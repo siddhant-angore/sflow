@@ -3,7 +3,8 @@
 // Overlay frontmatter: `extends: <playbook stem>` (or `target: <path from repo root>`), `when: <one sentence>`.
 // A change line is `- **After|Before|Replace|In** "verbatim words from the target": text`. A stale anchor fails the build.
 // An overlay with an empty `extends:` becomes a new playbook file and is listed in poteto-mode's Playbooks section.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+// A directory workflows/<name>/SKILL.md is an sflow-authored skill, installed into skills/<name>/.
+import { cpSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(new URL(import.meta.url).pathname), '..');
@@ -61,6 +62,12 @@ if (newPlaybooks.length) {
   if (!s.includes(anchor)) problems.push(`skills/poteto-mode/SKILL.md: playbook list anchor not found`);
   else s = s.replace(anchor, anchor + '\n' + newPlaybooks.map((p) => `- **${p.stem[0].toUpperCase() + p.stem.slice(1)}.** ${p.when} File: \`playbooks/${p.stem}.md\`.`).join('\n'));
   writeFileSync(skill, s);
+}
+// Authored skills live beside the overlays (a vendored directory is wiped on every sync) and are installed here.
+for (const d of readdirSync(join(root, 'workflows'), { withFileTypes: true }).filter((e) => e.isDirectory())) {
+  if (!existsSync(join(root, 'workflows', d.name, 'SKILL.md'))) continue;
+  if (existsSync(join(root, 'skills', d.name))) { problems.push(`workflows/${d.name}: a vendored skill already has that name`); continue; }
+  cpSync(join(root, 'workflows', d.name), join(root, 'skills', d.name), { recursive: true });
 }
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
 console.log(`workflows built: ${readdirSync(join(root, 'workflows')).filter((f) => f.endsWith('.md')).length} overlays, ${newPlaybooks.length} new playbooks`);
