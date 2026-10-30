@@ -48,6 +48,22 @@ pstack's own adapters for Codex, Copilot, Muse, and Pi ship in `hooks/` and `pi/
 | a PR | automatic | Opening a PR, with the review fan-out |
 | after a session | `/sflow:sflow retro` | Retro |
 
+## Harness hooks
+
+sflow ships the hooks that a review found every harness assumes and most lack. They activate when a repository has `.harness.json` on its protected branch:
+
+```json
+{ "protectedBranches": ["main"], "allowMerge": false, "gate": ["npm run lint && npm test"], "dod": [] }
+```
+
+- Guard: no force or `+` push, no push to a protected branch, no `reset --hard`, `clean -f`, `branch -D`, history rewrite, `--no-verify`, `gh pr merge`, GitHub write API call, release, or publish. `protectedBranches: []` turns off only the push rule for a solo repo.
+- Policy: `.harness.json` and `.claude/settings.json` are read-only to the agent, and the policy is read from `origin/<protected>`, not the working tree.
+- Gate: `git push` and `gh pr create` run the `gate` commands first (`{base}` is the merge base), skip when HEAD already passed, and scan the pushed range for secret-shaped text.
+- Stop: unmet definition-of-done items block the turn once per repo state; after three non-converging attempts the hook demands an auditable failure report and then lets the turn end. Hooks fail closed.
+- Run record: `<git dir>/harness/runs.jsonl` holds every gate result and Stop decision; the Retro playbook turns repeats into structure.
+
+`node scripts/eval-brake.mjs` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success.
+
 ## Maintain
 
 - `npm run sync` fetches the three sources at the pinned commits, renames the two name collisions (`tdd` and `teach` from Pocock become `tdd-vertical-slices` and `teach-workspace`), applies the overlays in `workflows/`, and writes the hash lock. A stale overlay anchor fails the build.

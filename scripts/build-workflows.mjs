@@ -69,6 +69,21 @@ for (const d of readdirSync(join(root, 'workflows'), { withFileTypes: true }).fi
   if (existsSync(join(root, 'skills', d.name))) { problems.push(`workflows/${d.name}: a vendored skill already has that name`); continue; }
   cpSync(join(root, 'workflows', d.name), join(root, 'skills', d.name), { recursive: true });
 }
+// Harness hooks: workflows/hooks/*.mjs are installed under hooks/harness/ and their events appended to the vendored hooks/hooks.json.
+{
+  const src = join(root, 'workflows', 'hooks');
+  if (existsSync(src)) {
+    const dest = join(root, 'hooks', 'harness');
+    cpSync(src, dest, { recursive: true, filter: (f) => !f.endsWith('hooks.json') });
+    const manifestPath = join(root, 'hooks', 'hooks.json');
+    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { hooks: {} };
+    const add = JSON.parse(readFileSync(join(src, 'hooks.json'), 'utf8'));
+    manifest.hooks ??= {};
+    for (const [event, entries] of Object.entries(add)) manifest.hooks[event] = [...(manifest.hooks[event] ?? []), ...entries];
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  }
+}
+
 // Domain packs: domains/<d>/authored/<name>/SKILL.md is installed into domains/<d>/skills/<name>/ the same way.
 const domainsDir = join(root, 'domains');
 for (const d of existsSync(domainsDir) ? readdirSync(domainsDir) : []) {

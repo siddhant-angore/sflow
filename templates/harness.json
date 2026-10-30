@@ -1,0 +1,6 @@
+{
+  "protectedBranches": ["main"],
+  "allowMerge": false,
+  "gate": ["echo 'replace with the project checks, e.g. npm run lint && npm test'; exit 1"],
+  "dod": []
+}
