@@ -13,7 +13,16 @@ For every playbook the sflow router opens, also open `<flutter>/playbooks/<playb
 
 ## House standard
 
-Very Good Ventures' conventions are the default because they ship with enforcement: `very_good_analysis` as the lint set, Bloc or Cubit for state, mocktail (never mockito), the layered monorepo from the **layered-architecture** skill, typed `go_router` routes from the **vgv-navigation** skill, `pumpApp` and `TestTag` from the **vgv-testing** skill, 100 percent coverage through the **green-gate** skill. The Flutter team's skills cover the Dart language and platform mechanics (pattern matching, primary constructors, FFI, docs, coverage, deep-link configuration, responsive layout, widget previews, layout-error fixes). Where the two disagree, VGV wins, unless the project's `CLAUDE.md` says `architecture: mvvm`, in which case the **flutter-apply-architecture-best-practices** skill is the architecture and mockito stays out.
+Very Good Ventures' conventions are the default because they ship with enforcement: `very_good_analysis` as the lint set, Bloc or Cubit for state (the **bloc** skill: sealed events and states with Equatable, no bloc-to-bloc dependencies, the Page/View split, `blocTest`), the layered monorepo from the **layered-architecture** skill, typed `go_router` routes from the **vgv-navigation** skill, `pumpApp` and `TestTag` from the **vgv-testing** skill, 100 percent coverage through the **green-gate** skill. The Flutter team's skills cover the Dart language and platform mechanics (pattern matching, primary constructors, FFI, docs, coverage, deep-link configuration, responsive layout, widget previews, layout-error fixes). Where the two disagree, VGV wins, unless the project's `CLAUDE.md` says `architecture: mvvm`, in which case the **flutter-apply-architecture-best-practices** skill is the architecture.
+
+## Mocking: the best of mocktail and mockito
+
+One library per package, chosen by this rule, and the same discipline whichever it is.
+
+- **Default mocktail** (the **vgv-testing** skill): no codegen, so the red-green loop stays a test run, not a build. Private `_MockFoo extends Mock implements Foo` classes, `registerFallbackValue` once in `setUpAll` for every custom type passed to `any()`, `MockBloc` and `MockCubit` from `bloc_test` for state.
+- **Use mockito's generated mocks** (the **dart-generate-test-mocks** skill) when the package already runs `build_runner` for other codegen and the interface is large, generic-heavy, or changes often: `@GenerateNiceMocks([MockSpec<Foo>()])` keeps the mock in step with the interface at build time, and a stale mock fails the build instead of the test. Never hand-edit generated `.mocks.dart`; commit it only if the project commits other generated files.
+- **Both libraries, always:** stub `Future` and `Stream` members with `thenAnswer`, never `thenReturn`; mock only at module boundaries (repositories, clients, platform channels), never your own value types or widgets; verify behavior the caller observes, not call counts, unless the count is the contract; one mock per collaborator per test file, created in `setUp` inside the `group`.
+- **Never** mix the two in one package, mock a Bloc with anything but `MockBloc`, or reach for a mock where a fake (an in-memory repository) reads better.
 
 ## Tools in force
 
