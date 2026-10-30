@@ -1,0 +1,34 @@
+{
+  "name": "sflow-flutter",
+  "version": "0.1.0",
+  "description": "sflow domain pack for Flutter and Dart: the Flutter team's skills, Very Good Ventures' skills, agents and hooks, the Dart MCP server, and per-playbook overlays that say which skill to read at which step.",
+  "author": {
+    "name": "Siddhant Angore"
+  },
+  "homepage": "https://github.com/siddhant-angore/sflow",
+  "repository": "https://github.com/siddhant-angore/sflow",
+  "license": "MIT",
+  "keywords": [
+    "sflow",
+    "flutter",
+    "dart",
+    "skills",
+    "mcp"
+  ],
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "agents": [
+    "./agents/architecture-review-agent.md",
+    "./agents/best-practices-research-agent.md",
+    "./agents/code-simplicity-review-agent.md",
+    "./agents/codebase-review-agent.md",
+    "./agents/flutter-reviewer.md",
+    "./agents/official-docs-research-agent.md",
+    "./agents/plan-splitting-agent.md",
+    "./agents/pr-readiness-review-agent.md",
+    "./agents/test-quality-review-agent.md",
+    "./agents/user-flow-analysis-agent.md",
+    "./agents/vgv-review-agent.md"
+  ]
+}

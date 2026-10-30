@@ -1,0 +1,1 @@
+/private/var/folders/1g/7v03gmkx4b3dxjn6dq7dp8x80000gn/T/sflow-vendor/VeryGoodOpenSource__vgv-wingspan/e78608956d26777efcda2e6ecefb0a3e981fb115/skills/shared/references/plan-templates/success-criteria.md

@@ -33,7 +33,7 @@ function expand(srcRoot, entry) {
   if (!entry.from.endsWith('/*')) return [[join(srcRoot, entry.from), join(root, entry.to)]];
   const parent = join(srcRoot, entry.from.slice(0, -2));
   return readdirSync(parent, { withFileTypes: true })
-    .filter((e) => e.isDirectory() || (entry.to === 'agents' && e.name.endsWith('.md')))
+    .filter((e) => e.isDirectory() || (basename(entry.to) === 'agents' && e.name.endsWith('.md')))
     .map((e) => [join(parent, e.name), join(root, entry.to, entry.rename?.[e.name] ?? e.name)]);
 }
 
@@ -58,14 +58,16 @@ function sync() {
       seen.set(to, entry.source);
       mkdirSync(dirname(to), { recursive: true });
       cpSync(from, to, { recursive: true });
-      if (statSync(to).isDirectory() && dirname(to) === join(root, 'skills')) alignName(to);
+      if (statSync(to).isDirectory() && basename(dirname(to)) === 'skills') alignName(to);
       notice.push(`- \`${relative(root, to)}\` from ${entry.source}@${manifest.sources[entry.source].sha.slice(0, 12)} (\`${entry.from}\`)`);
     }
     const lic = join(root, 'LICENSES', entry.source.replace('/', '__') + '.LICENSE');
     mkdirSync(dirname(lic), { recursive: true });
     cpSync(join(srcRoot, 'LICENSE'), lic);
+    // Vendored skill dirs that are not SKILL.md skills (e.g. wingspan's shared/) are left as-is; Claude Code ignores them.
   }
   execFileSync('node', [join(root, 'scripts', 'build-workflows.mjs')], { stdio: 'inherit' });
+  execFileSync('node', [join(root, 'scripts', 'check-domain-playbooks.mjs')], { stdio: 'inherit' });
   for (const t of new Set(manifest.entries.map((e) => e.to))) {
     const p = join(root, t);
     for (const f of statSync(p).isDirectory() ? walk(p) : [p]) lock.files[relative(root, f)] = sha256(f);

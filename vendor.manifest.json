@@ -1,25 +1,209 @@
 {
   "sources": {
-    "michael-denyer/pstack-claude": { "repo": "https://github.com/michael-denyer/pstack-claude", "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa", "license": "MIT" },
-    "mattpocock/skills": { "repo": "https://github.com/mattpocock/skills", "sha": "a496f5513d4a4cf889bc48e189e579f4b0bdf6aa", "license": "MIT" },
-    "addyosmani/agent-skills": { "repo": "https://github.com/addyosmani/agent-skills", "sha": "eb07f19f52c2669f2364897aaa293e2aaddd7b1c", "license": "MIT" }
+    "michael-denyer/pstack-claude": {
+      "repo": "https://github.com/michael-denyer/pstack-claude",
+      "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa",
+      "license": "MIT"
+    },
+    "mattpocock/skills": {
+      "repo": "https://github.com/mattpocock/skills",
+      "sha": "a496f5513d4a4cf889bc48e189e579f4b0bdf6aa",
+      "license": "MIT"
+    },
+    "addyosmani/agent-skills": {
+      "repo": "https://github.com/addyosmani/agent-skills",
+      "sha": "eb07f19f52c2669f2364897aaa293e2aaddd7b1c",
+      "license": "MIT"
+    },
+    "flutter/skills": {
+      "repo": "https://github.com/flutter/skills",
+      "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
+      "license": "BSD-3-Clause"
+    },
+    "VeryGoodOpenSource/vgv-ai-flutter-plugin": {
+      "repo": "https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin",
+      "sha": "e2231bfbd94888eab8b179eaed8fa997d09c50bd",
+      "license": "MIT"
+    },
+    "VeryGoodOpenSource/vgv-wingspan": {
+      "repo": "https://github.com/VeryGoodOpenSource/vgv-wingspan",
+      "sha": "e78608956d26777efcda2e6ecefb0a3e981fb115",
+      "license": "MIT"
+    }
   },
   "entries": [
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/skills/*", "to": "skills" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/agents", "to": "agents" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/hooks", "to": "hooks" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/assets", "to": "assets" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/pi", "to": "pi" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/models.json", "to": "models.json" },
-    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/README.md", "to": "docs/upstream/pstack-README.md" },
-    { "source": "mattpocock/skills", "from": "skills/engineering/*", "to": "skills", "rename": { "tdd": "tdd-vertical-slices", "teach": "teach-workspace" } },
-    { "source": "mattpocock/skills", "from": "skills/productivity/*", "to": "skills", "rename": { "teach": "teach-workspace" } },
-    { "source": "mattpocock/skills", "from": "skills/misc/*", "to": "skills" },
-    { "source": "mattpocock/skills", "from": "skills/in-progress/*", "to": "skills" },
-    { "source": "mattpocock/skills", "from": "README.md", "to": "docs/upstream/mattpocock-README.md" },
-    { "source": "addyosmani/agent-skills", "from": "skills/*", "to": "skills" },
-    { "source": "addyosmani/agent-skills", "from": "references", "to": "references" },
-    { "source": "addyosmani/agent-skills", "from": "agents/*", "to": "agents" },
-    { "source": "addyosmani/agent-skills", "from": "README.md", "to": "docs/upstream/addyosmani-README.md" }
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/skills/*",
+      "to": "skills"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/agents",
+      "to": "agents"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/hooks",
+      "to": "hooks"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/assets",
+      "to": "assets"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/pi",
+      "to": "pi"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/models.json",
+      "to": "models.json"
+    },
+    {
+      "source": "michael-denyer/pstack-claude",
+      "from": "plugins/pstack/README.md",
+      "to": "docs/upstream/pstack-README.md"
+    },
+    {
+      "source": "mattpocock/skills",
+      "from": "skills/engineering/*",
+      "to": "skills",
+      "rename": {
+        "tdd": "tdd-vertical-slices",
+        "teach": "teach-workspace"
+      }
+    },
+    {
+      "source": "mattpocock/skills",
+      "from": "skills/productivity/*",
+      "to": "skills",
+      "rename": {
+        "teach": "teach-workspace"
+      }
+    },
+    {
+      "source": "mattpocock/skills",
+      "from": "skills/misc/*",
+      "to": "skills"
+    },
+    {
+      "source": "mattpocock/skills",
+      "from": "skills/in-progress/*",
+      "to": "skills"
+    },
+    {
+      "source": "mattpocock/skills",
+      "from": "README.md",
+      "to": "docs/upstream/mattpocock-README.md"
+    },
+    {
+      "source": "addyosmani/agent-skills",
+      "from": "skills/*",
+      "to": "skills"
+    },
+    {
+      "source": "addyosmani/agent-skills",
+      "from": "references",
+      "to": "references"
+    },
+    {
+      "source": "addyosmani/agent-skills",
+      "from": "agents/*",
+      "to": "agents"
+    },
+    {
+      "source": "addyosmani/agent-skills",
+      "from": "README.md",
+      "to": "docs/upstream/addyosmani-README.md"
+    },
+    {
+      "source": "flutter/skills",
+      "from": "skills/*",
+      "to": "domains/flutter/skills"
+    },
+    {
+      "source": "flutter/skills",
+      "from": "rules",
+      "to": "domains/flutter/rules"
+    },
+    {
+      "source": "flutter/skills",
+      "from": "README.md",
+      "to": "domains/flutter/docs/upstream/flutter-skills-README.md"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-ai-flutter-plugin",
+      "from": "skills/*",
+      "to": "domains/flutter/skills",
+      "rename": {
+        "testing": "vgv-testing",
+        "navigation": "vgv-navigation",
+        "accessibility": "vgv-accessibility",
+        "animations": "vgv-animations",
+        "create-project": "vgv-create-project"
+      }
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-ai-flutter-plugin",
+      "from": "agents/*",
+      "to": "domains/flutter/agents"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-ai-flutter-plugin",
+      "from": "hooks",
+      "to": "domains/flutter/hooks"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-ai-flutter-plugin",
+      "from": "README.md",
+      "to": "domains/flutter/docs/upstream/vgv-ai-flutter-plugin-README.md"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "skills/*",
+      "to": "domains/flutter/skills",
+      "rename": {
+        "build": "wingspan-build",
+        "plan": "wingspan-plan",
+        "review": "wingspan-review",
+        "create": "wingspan-create",
+        "brainstorm": "wingspan-brainstorm",
+        "create-pr": "wingspan-create-pr",
+        "rebase": "wingspan-rebase",
+        "hotfix": "wingspan-hotfix",
+        "debrief": "wingspan-debrief",
+        "refine-approach": "wingspan-refine-approach",
+        "plan-technical-review": "wingspan-plan-technical-review",
+        "shared": "wingspan-shared"
+      }
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "agents/analysis/*",
+      "to": "domains/flutter/agents"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "agents/codebase-review/*",
+      "to": "domains/flutter/agents"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "agents/quality-review/*",
+      "to": "domains/flutter/agents"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "agents/research/*",
+      "to": "domains/flutter/agents"
+    },
+    {
+      "source": "VeryGoodOpenSource/vgv-wingspan",
+      "from": "README.md",
+      "to": "domains/flutter/docs/upstream/vgv-wingspan-README.md"
+    }
   ]
 }

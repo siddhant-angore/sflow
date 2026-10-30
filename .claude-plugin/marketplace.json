@@ -1,8 +1,21 @@
 {
   "name": "sflow",
-  "owner": { "name": "Siddhant Angore" },
+  "owner": {
+    "name": "Siddhant Angore"
+  },
   "description": "sflow: one rigorous engineering workflow for coding agents.",
   "plugins": [
-    { "name": "sflow", "source": "./", "description": "pstack's router and principles, Pocock's spec discipline, Osmani's lifecycle checklists and review personas, merged into task-driven playbooks.", "version": "0.1.0" }
+    {
+      "name": "sflow",
+      "source": "./",
+      "description": "pstack's router and principles, Pocock's spec discipline, Osmani's lifecycle checklists and review personas, merged into task-driven playbooks.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "sflow-flutter",
+      "source": "./domains/flutter",
+      "description": "Flutter and Dart domain pack: the Flutter team's and Very Good Ventures' skills, agents and hooks, the Dart MCP server, and playbook overlays.",
+      "version": "0.1.0"
+    }
   ]
 }

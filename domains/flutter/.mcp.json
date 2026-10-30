@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dart": {
+      "command": "dart",
+      "args": ["mcp-server"],
+      "env": { "AGENT_PLUGIN": "claude-code" }
+    },
+    "very-good-cli": {
+      "command": "very_good",
+      "args": ["mcp"]
+    }
+  }
+}
