@@ -1,5 +1,10 @@
 {
   "sources": {
+    "flutter/agent-plugins": {
+      "repo": "https://github.com/flutter/agent-plugins",
+      "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
+      "license": "BSD-3-Clause"
+    },
     "michael-denyer/pstack-claude": {
       "repo": "https://github.com/michael-denyer/pstack-claude",
       "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa",
@@ -14,11 +19,6 @@
       "repo": "https://github.com/addyosmani/agent-skills",
       "sha": "eb07f19f52c2669f2364897aaa293e2aaddd7b1c",
       "license": "MIT"
-    },
-    "flutter/skills": {
-      "repo": "https://github.com/flutter/skills",
-      "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
-      "license": "BSD-3-Clause"
     },
     "VeryGoodOpenSource/vgv-ai-flutter-plugin": {
       "repo": "https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin",
@@ -120,17 +120,17 @@
       "to": "docs/upstream/addyosmani-README.md"
     },
     {
-      "source": "flutter/skills",
+      "source": "flutter/agent-plugins",
       "from": "skills/*",
       "to": "domains/flutter/skills"
     },
     {
-      "source": "flutter/skills",
+      "source": "flutter/agent-plugins",
       "from": "rules",
       "to": "domains/flutter/rules"
     },
     {
-      "source": "flutter/skills",
+      "source": "flutter/agent-plugins",
       "from": "README.md",
       "to": "domains/flutter/docs/upstream/flutter-skills-README.md"
     },
@@ -176,9 +176,11 @@
         "hotfix": "wingspan-hotfix",
         "debrief": "wingspan-debrief",
         "refine-approach": "wingspan-refine-approach",
-        "plan-technical-review": "wingspan-plan-technical-review",
-        "shared": "wingspan-shared"
-      }
+        "plan-technical-review": "wingspan-plan-technical-review"
+      },
+      "exclude": [
+        "shared"
+      ]
     },
     {
       "source": "VeryGoodOpenSource/vgv-wingspan",

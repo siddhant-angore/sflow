@@ -1,5 +1,10 @@
 {
   "sources": {
+    "flutter/agent-plugins": {
+      "repo": "https://github.com/flutter/agent-plugins",
+      "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
+      "license": "BSD-3-Clause"
+    },
     "michael-denyer/pstack-claude": {
       "repo": "https://github.com/michael-denyer/pstack-claude",
       "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa",
@@ -14,11 +19,6 @@
       "repo": "https://github.com/addyosmani/agent-skills",
       "sha": "eb07f19f52c2669f2364897aaa293e2aaddd7b1c",
       "license": "MIT"
-    },
-    "flutter/skills": {
-      "repo": "https://github.com/flutter/skills",
-      "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
-      "license": "BSD-3-Clause"
     },
     "VeryGoodOpenSource/vgv-ai-flutter-plugin": {
       "repo": "https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin",
@@ -279,7 +279,7 @@
     "skills/setup-ts-deep-modules/SKILL.md": "29acca66ac99d4532e2a6f0370d8125d7cba1e87c9ac66573203c75189d3e6c7",
     "skills/setup-ts-deep-modules/agents/openai.yaml": "159f680217d50747702620c05fd65734a152185b3219a8ca5ee4630878a354fa",
     "skills/setup-ts-deep-modules/dependency-cruiser.config.cjs": "3c4973bec69f73b2117654abf9e666a7c28665b213be20e6d39869e29842428e",
-    "skills/sflow/SKILL.md": "c071bf824c5309078951efb954633b931ddff4ffd1facb68b4a124598626efb4",
+    "skills/sflow/SKILL.md": "9e48359019df711f84fe2dfd44146b1ad3727f4f5fd88a77c3a78f8e69be865a",
     "skills/sharpen/SKILL.md": "c804fef77be5157c6a47125e931ff0f914988316cad544607e837cd805d68f93",
     "skills/shipping-and-launch/SKILL.md": "726f3e546369db289160b8d42195590f00b6432887e17bf19070dcc9a347fe39",
     "skills/show-me-your-work/SKILL.md": "6d95ebf11474c949d1d8f041f12892ebeab6bf09c9a3d948299a6ce658151d54",
@@ -840,6 +840,7 @@
     "domains/flutter/skills/dart-use-primary-constructors/SKILL.md": "598d2fcb7641f6715861827840698450c3e8d077b4e92326e8bffe87e5b23c0c",
     "domains/flutter/skills/dart-write-documentation/SKILL.md": "0629abbb9e0c0bb9aee2237b6617600a01499015bb4484a20b81ee96857d67ef",
     "domains/flutter/skills/elements-of-style/SKILL.md": "0e75f0c74f2c47f2335682728b82c1e415d104a163f4f26b969af204abf18bdc",
+    "domains/flutter/skills/flutter/SKILL.md": "5e64f3d37ea22b92ed5dc6fa2874fda62c7860471f135f1409822b0e134c5e88",
     "domains/flutter/skills/flutter-add-integration-test/SKILL.md": "8d81b053c5fdf5b61aa7d0165cbc35e7a9a1c5bdcd7a301b8293a108771e6bab",
     "domains/flutter/skills/flutter-add-widget-preview/SKILL.md": "da257f97d23bb0ff4d5f1d1a0da48d78db7d056ccd11c0a51d3ff37c80beb54b",
     "domains/flutter/skills/flutter-add-widget-test/SKILL.md": "6c449ebd844e331e661b12630b6ad2a218e84d1bd8ea8377ba9dbd62ffe2798a",
@@ -973,21 +974,6 @@
     "domains/flutter/skills/wingspan-review/references/review-consolidation.md": "e45ebabb0dc74113b6d1d547a065f600215d8f1fcb3d59efc80942c5c3641c4d",
     "domains/flutter/skills/wingspan-review/references/review-report-template.md": "9b82a782bf24e6c4612947d7aced838e8bb6e94eaec2582eec57b69df100f309",
     "domains/flutter/skills/wingspan-review/scripts/detect-review-scope.sh": "226a656b317cf16e89e7fc68953b610699ab4944573f9c1d51f548ef7821b5cf",
-    "domains/flutter/skills/wingspan-shared/references/clear-context-handoff.md": "938311a064375363efae1c2b9a32edd9c247eebae7ed149a099227a0bb2161ab",
-    "domains/flutter/skills/wingspan-shared/references/drive-to-green.md": "f81303d37acd92ed7f11f7a05d821938ca9b05c861524128460bf6df15c0b19c",
-    "domains/flutter/skills/wingspan-shared/references/file-findings-on-pr.md": "8b6f7c61c5b3a124f39491efc99e6f8c3c844de658be94221e624d712b85f8d0",
-    "domains/flutter/skills/wingspan-shared/references/plan-review.md": "bc0544fdc631f997cb65fbe7ea9f7247ba130e9c09ba2a86bb5322fe77577aa0",
-    "domains/flutter/skills/wingspan-shared/references/plan-templates/extensive.md": "0b9fcc630bc67ea8f5343ca2e54e28354ea5b7686ea2bc45c5b92846ebaf64ed",
-    "domains/flutter/skills/wingspan-shared/references/plan-templates/implementation-phases.md": "9f1411daef0dc349a702f775e27bd86e91cc141e80834a0f09fed7ee8dea7e21",
-    "domains/flutter/skills/wingspan-shared/references/plan-templates/minimal.md": "d9a2307b2a489c802a89aceacc14c9648df43699575ef1714b922071449a9e29",
-    "domains/flutter/skills/wingspan-shared/references/plan-templates/standard.md": "71afd4a475413788f3e52947ca9e2d45a3d28c23790f2b0312801e0b7ef4d253",
-    "domains/flutter/skills/wingspan-shared/references/plan-templates/success-criteria.md": "ba0f09481defe34a87f6dc6c370023c18bec1eaba75928c37093ce367fb9bac7",
-    "domains/flutter/skills/wingspan-shared/references/review-agent-instructions.md": "a553ac862fbffe702a767cece6ae7b2e074cdbe25f13dce4ad1c0f5239c400b1",
-    "domains/flutter/skills/wingspan-shared/references/review-consolidation.md": "e45ebabb0dc74113b6d1d547a065f600215d8f1fcb3d59efc80942c5c3641c4d",
-    "domains/flutter/skills/wingspan-shared/references/review-report-template.md": "9b82a782bf24e6c4612947d7aced838e8bb6e94eaec2582eec57b69df100f309",
-    "domains/flutter/skills/wingspan-shared/references/validate-and-fix.md": "0adad3077634d56b3f948bc846630eb54046752c1b57741d4b4808a9c577551c",
-    "domains/flutter/skills/wingspan-shared/scripts/detect-base-branch.sh": "43052f5d869e5a5b78a3b58d939d7c8a7477b3117d5250f8c4598d85c03ec961",
-    "domains/flutter/skills/wingspan-shared/scripts/detect-review-scope.sh": "226a656b317cf16e89e7fc68953b610699ab4944573f9c1d51f548ef7821b5cf",
     "domains/flutter/rules/flutter-hot-reload.md": "f143e1a5012afc2807257d92b3788ae57759ab457d4d33abf83aabc85f358e8b",
     "domains/flutter/rules/flutter-hot-reload.mdc": "7481f83e07bf967608ff5ef6cecb39a864545d620f3df7f793029f2c1e76ea2c",
     "domains/flutter/docs/upstream/flutter-skills-README.md": "dd4d6aa147deeb78efb318bb0fde117c870d847549acc4dbb81232a07a1d3fa5",

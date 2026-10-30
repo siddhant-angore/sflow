@@ -69,5 +69,15 @@ for (const d of readdirSync(join(root, 'workflows'), { withFileTypes: true }).fi
   if (existsSync(join(root, 'skills', d.name))) { problems.push(`workflows/${d.name}: a vendored skill already has that name`); continue; }
   cpSync(join(root, 'workflows', d.name), join(root, 'skills', d.name), { recursive: true });
 }
+// Domain packs: domains/<d>/authored/<name>/SKILL.md is installed into domains/<d>/skills/<name>/ the same way.
+const domainsDir = join(root, 'domains');
+for (const d of existsSync(domainsDir) ? readdirSync(domainsDir) : []) {
+  const authored = join(domainsDir, d, 'authored');
+  if (!existsSync(authored)) continue;
+  for (const name of readdirSync(authored)) {
+    if (existsSync(join(domainsDir, d, 'skills', name))) { problems.push(`domains/${d}/authored/${name}: a vendored skill already has that name`); continue; }
+    cpSync(join(authored, name), join(domainsDir, d, 'skills', name), { recursive: true });
+  }
+}
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
 console.log(`workflows built: ${readdirSync(join(root, 'workflows')).filter((f) => f.endsWith('.md')).length} overlays, ${newPlaybooks.length} new playbooks`);

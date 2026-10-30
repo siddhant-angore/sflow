@@ -6,5 +6,6 @@ const root = join(dirname(new URL(import.meta.url).pathname), '..');
 const run = (cmd, args) => { console.log(`\n$ ${cmd} ${args.join(' ')}`); execFileSync(cmd, args, { cwd: root, stdio: 'inherit' }); };
 run('node', ['scripts/vendor.mjs', 'check']);
 run('claude', ['plugin', 'validate', '.']);
+run('claude', ['plugin', 'validate', 'domains/flutter']);
 run('node', ['scripts/check-routing.mjs']);
 console.log('\nall checks passed');

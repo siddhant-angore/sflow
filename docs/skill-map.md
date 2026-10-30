@@ -58,3 +58,9 @@
 | ask-matt (router part) | Pocock | sflow has one router, poteto-mode; only its phase-boundary ladder is used |
 | scaffold-exercises | Pocock | specific to its author's course repository |
 | Osmani commands (`/spec`, `/build`, `/ship`, ...) | Osmani | not vendored; they are a second lifecycle; their skills are wired into the playbooks instead |
+
+## Domain packs
+
+| pack | skills | where the map lives |
+|---|---|---|
+| `sflow-flutter` | the Flutter team's 25, Very Good Ventures' 15 and wingspan's 11, plus the `flutter` entry skill | `domains/flutter/README.md` and the overlays in `domains/flutter/playbooks/` |

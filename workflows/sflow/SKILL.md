@@ -30,3 +30,7 @@ Read `../poteto-mode/SKILL.md` in full and follow it. It is the router. Its play
 | a SKILL.md, AGENTS.md, or CLAUDE.md | Authoring or modifying a skill |
 
 Skills from all three sources are in `skills/`; `<sflow>/docs/skill-map.md` says where each one is used.
+
+## Domain packs
+
+A domain pack is a sibling plugin named `sflow-<domain>` with its own skills, MCP servers, hooks, agents, and `playbooks/` overlays in pstack's project-playbook format. When one is enabled and its entry skill's condition matches the repository (for `sflow-flutter`, a `pubspec.yaml`), read `/sflow-<domain>:<domain>` first, then open the pack's overlay for every playbook you run beside the core playbook, and apply its changes at the quoted steps.

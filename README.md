@@ -19,6 +19,14 @@ Claude Code:
 
 Then start any task with `/sflow:sflow` (or `/sflow:poteto-mode`). Run `/sflow:setup-pstack` once to choose the models each role uses.
 
+Domain packs are sibling plugins in the same marketplace. For Flutter and Dart:
+
+```
+/plugin install sflow-flutter@sflow
+```
+
+See `domains/flutter/README.md`. A pack adds skills, MCP servers, hooks, review agents, and per-playbook overlays; the core router applies them when the repository matches (a `pubspec.yaml` for Flutter). The same shape is the template for the next stack.
+
 Other agents (Codex, Cursor, Copilot, Gemini CLI, and any host that reads `skills/<name>/SKILL.md`):
 
 ```

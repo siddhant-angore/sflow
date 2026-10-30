@@ -34,6 +34,7 @@ function expand(srcRoot, entry) {
   const parent = join(srcRoot, entry.from.slice(0, -2));
   return readdirSync(parent, { withFileTypes: true })
     .filter((e) => e.isDirectory() || (basename(entry.to) === 'agents' && e.name.endsWith('.md')))
+    .filter((e) => !(entry.exclude ?? []).includes(e.name))
     .map((e) => [join(parent, e.name), join(root, entry.to, entry.rename?.[e.name] ?? e.name)]);
 }
 
@@ -57,7 +58,7 @@ function sync() {
       if (seen.has(to)) throw new Error(`collision: ${relative(root, to)} from ${seen.get(to)} and ${entry.source}; add a rename to the manifest`);
       seen.set(to, entry.source);
       mkdirSync(dirname(to), { recursive: true });
-      cpSync(from, to, { recursive: true });
+      cpSync(from, to, { recursive: true, dereference: true });
       if (statSync(to).isDirectory() && basename(dirname(to)) === 'skills') alignName(to);
       notice.push(`- \`${relative(root, to)}\` from ${entry.source}@${manifest.sources[entry.source].sha.slice(0, 12)} (\`${entry.from}\`)`);
     }
