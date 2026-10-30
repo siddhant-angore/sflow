@@ -1,0 +1,5 @@
+1. Run the **reflect** skill over the session, then the **retro** skill. Propose changes to the environment, not the code.
+2. Encode each lesson per the **encode-lessons-in-structure** principle: a mechanical mistake becomes a check the project runs, a `CONSTRAINTS.md` floor (the **constraint-driven-development** skill, ratchet when there is no target number), a lint, or a hook (the **git-guardrails-claude-code** skill for git safety, the **setup-pre-commit** skill for pre-commit); a judgment call goes into `CODING_STANDARDS.md`, which the reviewer reads, not the implementer; a repeated workflow becomes a playbook overlay in sflow's `workflows/` or a skill, written per the **writing-for-agents** skill and the **Authoring or modifying a skill** playbook.
+3. A skill or playbook change is evaluated before it lands: the **Eval** playbook for behavior, `node scripts/check-routing.mjs` for description collisions.
+
+**Reply:** each lesson, the structure that now enforces it, and the one that could not be encoded and why.

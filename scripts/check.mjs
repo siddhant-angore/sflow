@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// The one check a reviewer reruns: vendor hashes (which cover the built workflows), the plugin manifest, the routing report.
+import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+const root = join(dirname(new URL(import.meta.url).pathname), '..');
+const run = (cmd, args) => { console.log(`\n$ ${cmd} ${args.join(' ')}`); execFileSync(cmd, args, { cwd: root, stdio: 'inherit' }); };
+run('node', ['scripts/vendor.mjs', 'check']);
+run('claude', ['plugin', 'validate', '.']);
+run('node', ['scripts/check-routing.mjs']);
+console.log('\nall checks passed');

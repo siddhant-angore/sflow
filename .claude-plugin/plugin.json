@@ -1,0 +1,35 @@
+{
+  "name": "sflow",
+  "version": "0.1.0",
+  "description": "One rigorous engineering workflow for coding agents: pstack's router and principles, Matt Pocock's spec and grilling discipline, Addy Osmani's lifecycle checklists and review personas, merged into task-driven playbooks.",
+  "author": {
+    "name": "Siddhant Angore"
+  },
+  "homepage": "https://github.com/siddhant-angore/sflow",
+  "repository": "https://github.com/siddhant-angore/sflow",
+  "license": "MIT",
+  "keywords": [
+    "sflow",
+    "workflow",
+    "skills",
+    "pstack",
+    "tdd",
+    "spec",
+    "code-review",
+    "claude-code",
+    "codex",
+    "cursor"
+  ],
+  "skills": "./skills",
+  "agents": [
+    "./agents/code-reviewer.md",
+    "./agents/comment-sicko.md",
+    "./agents/poteto-agent.md",
+    "./agents/security-auditor.md",
+    "./agents/test-engineer.md",
+    "./agents/thermo-nuclear-code-quality-review-subagent.md",
+    "./agents/thermo-nuclear-review-subagent.md",
+    "./agents/web-performance-auditor.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

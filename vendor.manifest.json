@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "michael-denyer/pstack-claude": { "repo": "https://github.com/michael-denyer/pstack-claude", "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa", "license": "MIT" },
+    "mattpocock/skills": { "repo": "https://github.com/mattpocock/skills", "sha": "a496f5513d4a4cf889bc48e189e579f4b0bdf6aa", "license": "MIT" },
+    "addyosmani/agent-skills": { "repo": "https://github.com/addyosmani/agent-skills", "sha": "eb07f19f52c2669f2364897aaa293e2aaddd7b1c", "license": "MIT" }
+  },
+  "entries": [
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/skills/*", "to": "skills" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/agents", "to": "agents" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/hooks", "to": "hooks" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/assets", "to": "assets" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/pi", "to": "pi" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/models.json", "to": "models.json" },
+    { "source": "michael-denyer/pstack-claude", "from": "plugins/pstack/README.md", "to": "docs/upstream/pstack-README.md" },
+    { "source": "mattpocock/skills", "from": "skills/engineering/*", "to": "skills", "rename": { "tdd": "tdd-vertical-slices", "teach": "teach-workspace" } },
+    { "source": "mattpocock/skills", "from": "skills/productivity/*", "to": "skills", "rename": { "teach": "teach-workspace" } },
+    { "source": "mattpocock/skills", "from": "skills/misc/*", "to": "skills" },
+    { "source": "mattpocock/skills", "from": "skills/in-progress/*", "to": "skills" },
+    { "source": "mattpocock/skills", "from": "README.md", "to": "docs/upstream/mattpocock-README.md" },
+    { "source": "addyosmani/agent-skills", "from": "skills/*", "to": "skills" },
+    { "source": "addyosmani/agent-skills", "from": "references", "to": "references" },
+    { "source": "addyosmani/agent-skills", "from": "agents/*", "to": "agents" },
+    { "source": "addyosmani/agent-skills", "from": "README.md", "to": "docs/upstream/addyosmani-README.md" }
+  ]
+}

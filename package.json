@@ -1,0 +1,6 @@
+{
+  "name": "sflow",
+  "private": true,
+  "type": "module",
+  "scripts": { "sync": "node scripts/vendor.mjs sync", "check": "node scripts/check.mjs", "routing": "node scripts/check-routing.mjs" }
+}
