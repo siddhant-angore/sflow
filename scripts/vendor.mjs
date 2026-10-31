@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Vendors every source in vendor.manifest.json by commit SHA into one flat skill tree, applies the workflow overlays, and pins everything with a hash lock.
-//   node scripts/vendor.mjs sync   # fetch at the pinned shas, copy, rename collisions, build workflows, write vendor.lock.json + NOTICE.md (and each pack's LICENSES/ + NOTICE.md)
+//   node scripts/vendor.mjs sync   # fetch at the pinned shas, copy, rename collisions, build workflows, write vendor.lock.json + NOTICE.md
 //   node scripts/vendor.mjs check  # re-hash every pinned file; exit 1 on drift or a missing file
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
