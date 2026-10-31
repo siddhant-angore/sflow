@@ -4,6 +4,34 @@ const protectedToken = (tok, prot) => {
   return prot.includes(dst) || prot.some((b) => dst === `refs/heads/${b}`);
 };
 
+const NO_BRANCH = "git can't tell which branch this push updates here (no work tree, or the command targets another repository), so name the branch: git push origin <branch>";
+const isHeadRef = (t) => t === 'HEAD' || t === '@';
+
+// Does the raw command point git at another repository or directory than the hook's cwd? Then the hook's branch and policy are not the target's.
+// Errs toward true: that only means a push must name its branch.
+const GLOBAL_WITH_VALUE = /^(-c|-C|--git-dir|--work-tree|--exec-path|--namespace|--super-prefix|--config-env)$/;
+const RETARGET_OPT = /^(-C|--git-dir|--work-tree)(=|$)|^-C./;
+export function retargets(cmd) {
+  if (/(^|[\s;&|("'`{])GIT_(DIR|WORK_TREE)=/.test(cmd)) return true;
+  const segs = cmd.split(/&&|\|\||;|\||\n/);
+  let cd = false;
+  for (const seg of segs) {
+    const toks = seg.trim().split(/\s+/);
+    for (let i = 0; i < toks.length; i++) {
+      if (!/(^|\/)git$/.test(toks[i].replace(/^["'(`{]+/, ''))) continue;
+      for (let j = i + 1; j < toks.length; j++) {
+        const t = toks[j];
+        if (!t.startsWith('-')) break;
+        if (RETARGET_OPT.test(t)) return true;
+        if (GLOBAL_WITH_VALUE.test(t)) j++;
+      }
+    }
+    if (cd && /(^|[\s"'`])git\b.*\bpush\b/.test(seg)) return true;
+    if (/^["'({\s]*((builtin|command)\s+)?(cd|pushd)(\s|$)/.test(seg) || /\b(sh|bash|zsh|dash)\s+-c\s+["']?\s*(cd|pushd)(\s|$)/.test(seg)) cd = true;
+  }
+  return false;
+}
+
 export function pushReason(seg, prot, branch) {
   const m = /^git\s+push\b(.*)$/.exec(seg);
   if (!m) return null;
@@ -18,13 +46,15 @@ export function pushReason(seg, prot, branch) {
   if (/^\.\/?$/.test(refs[0] ?? '')) return NO_PUSH_DOT;
   if (refs.slice(1).some((t) => /^refs\/(remotes|replace)\//.test(t.replace(/^\+/, '').split(':').pop()))) return NO_PUSH_DST;
   const targets = refs.slice(1);
-  if (targets.length === 0 && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
+  if ((targets.length === 0 || targets.some(isHeadRef)) && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
   if (targets.some((t) => protectedToken(t, prot))) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
   if (flags.some((f) => f.startsWith('--force-with-lease')) && targets.length === 0 && branch && prot.includes(branch)) return 'lease push to a protected branch';
+  if (!branch && (targets.length === 0 || targets.some(isHeadRef))) return NO_BRANCH;
   return null;
 }
 
 const unquoted = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""');
+const NO_MERGE_UNREADABLE = "git can't read this repository, so strict defaults apply; fix the repo config (core.bare, core.repositoryformatversion, core.worktree, include.path); merging stays a human decision until then.";
 const NO_SET_HEAD = "harness policy is read from origin/HEAD's branch, so it is not set locally. Use `git remote set-head origin --auto` to sync it with the remote; changing the default branch is a repo-admin action on GitHub.";
 const NO_SYMREF = 'refs/remotes/* locate the harness policy, so they are not written locally. Read them with `git symbolic-ref --short refs/remotes/origin/HEAD`; sync them with `git fetch origin` or `git remote set-head origin --auto`.';
 const NO_UPDATE_REF = 'refs/remotes/* locate the harness policy, so they are not written locally. Update them with `git fetch origin`; to move a local branch use `git update-ref refs/heads/<name> <commit>`.';
@@ -72,7 +102,7 @@ const replaceReason = (a) => {
   return list ? null : NO_REPLACE;
 };
 
-export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
+export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch) {
   const p = pushReason(raw, prot, branch);
   if (p) return p;
   const seg = unquoted(raw);
@@ -103,7 +133,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
     [/^gh\s+(release|repo\s+delete|repo\s+archive|secret|variable|workflow\s+(run|enable|disable))\b/, 'releases, repo lifecycle, secrets, and workflow triggers are human actions'],
     [/^gh\s+repo\s+edit\b/, NO_REPO_EDIT],
     [/^(npm|pnpm|yarn|bun)\s+publish\b|^npm\s+(deprecate|unpublish)\b|^cargo\s+publish\b|^uv\s+publish\b|^twine\b/, 'publishing a package is a human action'],
-    [/^gh\s+pr\s+merge\b|^gh\s+pr\s+close\b/, allowMerge ? null : 'merging or closing a PR is a human or Shipping-playbook decision; set allowMerge in .harness.json on the base branch on origin'],
+    [/^gh\s+pr\s+merge\b|^gh\s+pr\s+close\b/, allowMerge === true ? null : unreadable ? NO_MERGE_UNREADABLE : 'merging or closing a PR is a human or Shipping-playbook decision; set allowMerge in .harness.json on the base branch on origin'],
   ];
   const args = raw.replace(/["']/g, '').split(/\s+/).slice(2); // quotes dropped so a quoted refspec cannot hide
   for (const [re, rule] of rules) {
