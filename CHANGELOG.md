@@ -10,6 +10,10 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Fixed
+
+- sflow-flutter hook commands quote `"${CLAUDE_PLUGIN_ROOT}"` so they run when the plugin path contains a space (the five `bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<x>.sh` commands split at the space). Applied as an sflow overlay (`workflows/flutter-hooks-quoting.md`, a `target:` overlay, now checked for valid JSON) to the file vendored from VeryGoodOpenSource/vgv-ai-flutter-plugin (MIT, credit Very Good Ventures); `NOTICE.md` and `domains/flutter/NOTICE.md` list the file as carrying an sflow change. `scripts/test-plugin-root-space.mjs` runs every hook command of both plugins from a root path with a space, and fails on the old unquoted form. (SID-49)
+
 ## [0.5.0] - 2026-10-31
 
 Harness security hardening. The policy fails closed and is read only from the base branch on origin (SID-65, #13); the Bash guard normalises git invocations, wrappers, redirections and quoting, and resolves `HEAD`/`@` in pushes (SID-79, SID-80, #16); and the policy files can no longer be written from the shell (SID-66, #15). Breaking for 0.4.0 users of the harness: with no `.harness.json` committed on the base branch on origin, strict defaults apply (`main`, `master` and the remote default branch protected, merges denied, no gate), and an uncommitted or branch-only policy is ignored (see the Migration note under Fixed).

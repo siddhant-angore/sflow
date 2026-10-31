@@ -950,7 +950,7 @@
     "domains/flutter/agents/test-quality-review-agent.md": "8efed7bf81ecef487d9dc002db8c003b5932c651f56ddb48fdc55d0b8a724e24",
     "domains/flutter/agents/user-flow-analysis-agent.md": "b9786eaa12628a9e3c43acbe378669a7b11c65977f9c7cc087139a44d89c9cc7",
     "domains/flutter/agents/vgv-review-agent.md": "564382ffd0f82e1eb7bbfdaad6a147a2e06f66b29fe935465de6bf2ce01b0a48",
-    "domains/flutter/hooks/hooks.json": "9fd4691470dfe01d524355dbf706889806a9305d83ce86b466ea4b4a9572b640",
+    "domains/flutter/hooks/hooks.json": "0db326c1f334b3c6cf40244ed1ece30628842a18d8daf3ced0bc20f94104c60e",
     "domains/flutter/hooks/scripts/allow-readonly-git.sh": "6e281708943e41aa543ddfb9549f5f973dcc582e8a9104cc85e24322c07fe5ca",
     "domains/flutter/hooks/scripts/allow-readonly-git_test.sh": "4fccb1d60e5697866a32a1fd81e92ac6ffcc3d78c4285a9ddd5bd0e6c00cb7cf",
     "domains/flutter/hooks/scripts/analyze.sh": "76372e1c1fc13ea5f87925e4ce06971b43b1ff0ed75eeceaf3abdd28b9772030",
