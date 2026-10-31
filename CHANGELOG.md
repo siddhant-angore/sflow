@@ -24,6 +24,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - Licenses are per source (`licensePath`), copied into `LICENSES/cursor__plugins__*.LICENSE`, and the `NOTICE.md` header is generated from the manifest.
   - Routing follows upstream: **108 → 48 model-invocable skills**. Upstream marks pstack's router, principle and playbook skills (and the thermos skills) `disable-model-invocation: true`, so the model reads them by path. Slash commands still work.
   - Upstream pins: `cursor/plugins` added at [`9f844cdaac06`](https://github.com/cursor/plugins/commit/9f844cdaac06aeaa1b2d17fbcb57e078979c6f99) (three source keys: `pstack`, `cursor-team-kit`, `thermos`); `michael-denyer/pstack-claude` removed; the other five pins are unchanged. The lock now holds 919 files.
+- pstack (`cursor/plugins/pstack`) is held at `9f844cd` with `"hold": "SID-43: Orchestrate rewrite c742dd6 not yet ported"` in `vendor.manifest.json`, so `npm run upstream` reports it `HELD` instead of behind until the Orchestrate rewrite `c742dd6` is ported (SID-43). The hold is removed when SID-43 lands.
 
 ### Removed
 

@@ -10,7 +10,8 @@
       "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
       "license": "MIT",
       "licensePath": "pstack/LICENSE",
-      "note": "pstack by Lauren Tan (poteto), Claude Code build from harness/pstack/claude-code. Pinned to the commit before c742dd6, which rewrites Orchestrate (SID-43)"
+      "note": "pstack by Lauren Tan (poteto), Claude Code build from harness/pstack/claude-code. Pinned to the commit before c742dd6, which rewrites Orchestrate (SID-43)",
+      "hold": "SID-43: Orchestrate rewrite c742dd6 not yet ported"
     },
     "cursor/plugins/cursor-team-kit": {
       "repo": "https://github.com/cursor/plugins",
