@@ -139,4 +139,18 @@ writeFileSync(join(solo, '.harness.json'), JSON.stringify({ protectedBranches: [
 sh(solo, 'git add .harness.json && git commit -qm p && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin');
 assert.equal(run('pre-bash.mjs', bash('git push origin main', solo)), null, 'solo: push to main allowed');
 assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 'solo: force push still denied');
+
+// SessionStart hook: valid additionalContext JSON naming the router and the Read-by-path rule; fails open on garbage input.
+for (const input of [JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }), 'not json', '']) {
+  const out = JSON.parse(execFileSync('node', [join(hooks, 'session-start.mjs')], { input, cwd: tmpdir() }).toString());
+  assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
+  const ctx = out.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /`sflow:sflow`/, 'names the model-invocable router');
+  assert.match(ctx, /skills.<name>.SKILL\.md/, 'says to read pstack skills by path');
+  assert.doesNotMatch(ctx, /pstack:/, 'no pstack:* namespace the Skill tool cannot resolve');
+  assert.ok(existsSync(join(hooks, '..', '..', 'skills', 'sflow', 'SKILL.md')), 'the router it names exists');
+}
+const startEntry = JSON.parse(readFileSync(join(hooks, '..', 'hooks.json'), 'utf8')).hooks.SessionStart;
+assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
+assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 console.log('hooks ok');

@@ -4,7 +4,7 @@
 // A change line is `- **After|Before|Replace|In** "verbatim words from the target": text`. A stale anchor fails the build.
 // An overlay with an empty `extends:` becomes a new playbook file and is listed in poteto-mode's Playbooks section.
 // A directory workflows/<name>/SKILL.md is an sflow-authored skill, installed into skills/<name>/.
-import { cpSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(new URL(import.meta.url).pathname), '..');
@@ -69,17 +69,15 @@ for (const d of readdirSync(join(root, 'workflows'), { withFileTypes: true }).fi
   if (existsSync(join(root, 'skills', d.name))) { problems.push(`workflows/${d.name}: a vendored skill already has that name`); continue; }
   cpSync(join(root, 'workflows', d.name), join(root, 'skills', d.name), { recursive: true });
 }
-// Harness hooks: workflows/hooks/*.mjs are installed under hooks/harness/ and their events appended to the vendored hooks/hooks.json.
+// Harness hooks: hooks/ is wholly generated. workflows/hooks/*.mjs are installed under hooks/harness/ and workflows/hooks/hooks.json becomes hooks/hooks.json.
 {
   const src = join(root, 'workflows', 'hooks');
   if (existsSync(src)) {
     const dest = join(root, 'hooks', 'harness');
+    rmSync(join(root, 'hooks'), { recursive: true, force: true });
     cpSync(src, dest, { recursive: true, filter: (f) => !f.endsWith('hooks.json') });
     const manifestPath = join(root, 'hooks', 'hooks.json');
-    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { hooks: {} };
-    const add = JSON.parse(readFileSync(join(src, 'hooks.json'), 'utf8'));
-    manifest.hooks ??= {};
-    for (const [event, entries] of Object.entries(add)) manifest.hooks[event] = [...(manifest.hooks[event] ?? []), ...entries];
+    const manifest = { hooks: JSON.parse(readFileSync(join(src, 'hooks.json'), 'utf8')) };
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
   }
 }
