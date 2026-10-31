@@ -7,6 +7,7 @@
     "check": "node scripts/check.mjs",
     "routing": "node scripts/check-routing.mjs",
     "eval:brake": "node scripts/eval-brake.mjs",
-    "test:hooks": "node scripts/test-hooks.mjs"
+    "test:hooks": "node scripts/test-hooks.mjs",
+    "test:eval-brake": "node scripts/test-eval-brake.mjs"
   }
 }
