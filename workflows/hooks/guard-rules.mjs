@@ -121,8 +121,12 @@ export function simpleCommands(s) {
 const WRAP = /^(sudo|doas|command|exec|nohup|time|nice|env|builtin|setsid)$/;
 const INTERP = /^(node|nodejs|bun|deno|python[\d.]*|ruby|perl)$/;
 const POLICY_NAME = /\.harness\.json|\.claude\/settings(\.local)?\.json|\.claude['"]?\s*,\s*['"]settings(\.local)?\.json/i;
-// Best-effort list of write/delete calls in an inline script (node/python/ruby/perl/deno/bun). Reads are not matched.
-const WRITE_CALL = /writeFile|appendFile|writeSync|createWriteStream|rename|unlink|\brmSync|\brm\b|copyFile|symlink|\blink\(|truncate|write_text|write_bytes|File\.(write|delete|rename|open)|os\.(remove|rename|replace)|shutil\.|Deno\.write|Bun\.write|,\s*['"](?:[wax]|r\+)[bt]?\+?['"]/;
+const POLICY_SRC = POLICY_NAME.source;
+// Best-effort list of write/delete calls in an inline script (node/python/ruby/perl/deno/bun). Only calls that always write or delete: reads (readFile, open(f), open(f,'r'), json.load, read_text, File.open(f), print, JSON.parse) never match.
+const WRITE_CALL = /writeFile|appendFile|writeSync|createWriteStream|rename|unlink|\brmSync|\brm\b|symlink|\blink\(|truncate|write_text|write_bytes|File\.(write|binwrite|delete|rename)|FileUtils|IO\.write|os\.(remove|rename|replace)|shutil\.(move|rmtree)|Deno\.(write|remove|rename|truncate)|Bun\.write|,\s*['"](?:[wax]|r\+)[bt]?\+?['"]|\b(?:mode|flags?)\s*[:=]\s*['"](?:[wax]|r\+)|['"]\s*\+?>>?/;
+// Copies write only their destination (the text after the first comma), so copying FROM a policy file is a read.
+const COPY_CALL = new RegExp(String.raw`(?:copyFile\w*|\bcpSync|\bfs\.cp|shutil\.copy\w*)\s*\([^,]*,[\s\S]*?(?:${POLICY_SRC})`, 'i');
+const scriptWrites = (text) => WRITE_CALL.test(text) || COPY_CALL.test(text);
 const P = (x) => isPolicyPath(x) || policyGlobHit(x);
 const base = (x) => x.replace(/\/+$/, '').split('/').pop();
 // A whole .claude directory (any parent, ~ and $HOME too). Replacing, moving or deleting it replaces settings.json inside it, so it reports the settings hit.
@@ -154,6 +158,7 @@ function oneCommand({ w, r }, depth, out) {
   if (!name) return;
   const hitAny = (xs) => { for (const x of xs) if (P(x)) out.hit ??= x; };
   if (/^(sh|bash|zsh|dash|ksh)$/.test(name)) { const k = args.findIndex((a) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a)); if (k >= 0 && args[k + 1] && depth < 3) scan(args[k + 1], depth + 1, out); return; }
+  if (name === 'cd' || name === 'pushd') { const d = args.find((x) => x !== '--' && !(x.startsWith('-') && x.length > 1)); if (d && d !== '-') out.cds.push(d); return; }
   if (name === 'eval') { if (depth < 3) scan(args.join(' '), depth + 1, out); return; }
   if (name === 'git') {
     while (args[0]?.startsWith('-')) args = args.slice(/^-(C|c)$|^--(git-dir|work-tree|exec-path)$/.test(args[0]) ? 2 : 1);
@@ -167,7 +172,7 @@ function oneCommand({ w, r }, depth, out) {
   }
   if (INTERP.test(name)) {
     const text = args.join(' '), inline = args.some((a, k) => (k === 0 && name === 'deno' && a === 'eval') || /^(--eval|--print|-[a-zA-Z]*[ecEp])$/.test(a));
-    if (inline && POLICY_NAME.test(text) && WRITE_CALL.test(text)) out.hit ??= (text.match(POLICY_NAME)[0].replace(/['"\s,]+/, '/'));
+    if (inline && POLICY_NAME.test(text) && scriptWrites(text)) out.hit ??= (text.match(POLICY_NAME)[0].replace(/['"\s,]+/, '/'));
     if (/^(perl|ruby)$/.test(name) && args.some((a) => /^-(?![MIm])[A-Za-z]*i\S*$/.test(a))) { const e = args.findIndex((a) => /^-[A-Za-z]*[eE]$/.test(a)); hitAny(args.filter((a, k) => !a.startsWith('-') && k !== e + 1)); }
     return;
   }
@@ -178,10 +183,9 @@ function oneCommand({ w, r }, depth, out) {
     if (dest === undefined) { if (name === 'ln') hitAny(pos); return; }
     if (name !== 'mv') out.through.push(dest);
     const pol = srcs.map(base).filter((b) => /^(\.harness\.json|settings(\.local)?\.json)$/i.test(b));
-    if (pol.length) out.into.push({ dest, names: pol }); // pre-bash checks whether dest is an existing directory
+    if (pol.length) out.into.push({ dest, names: pol, dir: !!t || isDirish(dest), cds: [...out.cds] }); // pre-bash resolves dir/<name> against the cwd (and any cd seen so far) and denies only a landing on the root .harness.json or a .claude/settings*.json
     if (P(dest)) out.hit ??= dest;
     else if (base(dest) === '.claude' && srcs.some((x) => /^settings(\.local)?\.json$/i.test(base(x)))) out.hit ??= '.claude/settings.json';
-    else if (isDirish(dest) && srcs.some((x) => base(x).toLowerCase() === '.harness.json')) out.hit ??= '.harness.json';
     if (name === 'ln' || name === 'mv') hitAny(pos);
     if (name === 'mv' ? [...srcs, dest].some(isClaudeDir) : isClaudeDir(dest) && srcs.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT;
     return;
@@ -193,6 +197,6 @@ function oneCommand({ w, r }, depth, out) {
 }
 
 function scan(text, depth, out) { for (const c of simpleCommands(text)) oneCommand(c, depth, out); return out; }
-// { hit, through }: hit is the first policy path the command writes, creates, replaces, moves, links or deletes; through lists paths written through (symlink check in pre-bash), into lists copies of a policy-named file to a destination that is a directory if it exists (checked in pre-bash).
-export const analyzeWrites = (cmd) => scan(String(cmd), 0, { hit: null, through: [], into: [] });
+// { hit, through }: hit is the first policy path the command writes, creates, replaces, moves, links or deletes; through lists paths written through (symlink check in pre-bash), into lists copies of a policy-named file to a destination that may be a directory (resolved in pre-bash; copying FROM a policy file is a read), cds the `cd` arguments seen so far.
+export const analyzeWrites = (cmd) => scan(String(cmd), 0, { hit: null, through: [], into: [], cds: [] });
 export const policyWriteReason = (cmd) => { const { hit } = analyzeWrites(cmd); return hit ? policyDeny(hit) : null; };

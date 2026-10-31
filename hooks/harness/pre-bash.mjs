@@ -27,14 +27,21 @@ try {
     try { real = realpathSync(resolve(ev.cwd ?? cfg.root, t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
     if (real && isPolicyPath(real)) { deny(`harness guard: ${t} is a symlink to ${policyDeny(real)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
-  // A policy-named source copied into an existing directory given without a trailing slash: `cp .harness.json sub` writes sub/.harness.json.
-  for (const { dest, names } of w.into) {
-    if (dest.includes('$')) continue;
-    const abs = resolve(ev.cwd ?? cfg.root, dest.replace(/^~(?=\/|$)/, homedir()));
-    let isDir = false;
-    try { isDir = statSync(abs).isDirectory(); } catch {}
-    const joined = names.map((n) => join(dest, n)).find(isPolicyPath);
-    if (isDir && joined) { deny(`harness guard: ${policyDeny(joined)}\n  ("${dest}" is an existing directory, so this writes ${joined})\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  // A policy-named source copied into a directory lands as <dir>/<name>. Copying FROM a policy file is a read: deny only when that landing is the repo-root .harness.json or a .claude/settings*.json. Dir = trailing slash, ., .., -t, or an existing directory; resolved against the event cwd (and any `cd` earlier in the command).
+  const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
+  const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+  const rootPolicy = [cfg.root, real(cfg.root)].map((r) => resolve(r, '.harness.json').toLowerCase());
+  const landsOnPolicy = (p) => rootPolicy.includes(p.toLowerCase()) || (isPolicyPath(p) && !/\.harness\.json$/i.test(p));
+  for (const { dest, names, dir, cds } of w.into) {
+    if (dest.includes('$') || cds.some((c) => c.includes('$'))) continue;
+    const start = resolve(ev.cwd ?? cfg.root);
+    for (const from of cds.length ? [start, resolve(start, ...cds.map(tilde))] : [start]) {
+      const abs = resolve(from, tilde(dest));
+      let isDir = dir;
+      if (!isDir) { try { isDir = statSync(abs).isDirectory(); } catch {} }
+      const n = isDir ? names.find((x) => landsOnPolicy(join(abs, x)) || landsOnPolicy(join(real(abs), x))) : null;
+      if (n) { const joined = join(dest, n); deny(`harness guard: ${policyDeny(joined)}\n  ("${dest}" is an existing directory, so this writes ${joined})\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+    }
   }
   const segs = segments(cmd);
   for (const seg of segs) {
