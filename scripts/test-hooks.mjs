@@ -158,10 +158,24 @@ const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'tru
   "git push --exe='true; git reset --hard' origin feat/x", "git push --exe 'true; git reset --hard' origin feat/x", "git push --receive='true; git branch -D main' origin feat/x", "git push --receive-p='true; git branch -D main' origin feat/x",
   "git push --rec 'true; git branch -D main' origin feat/x", "git push '--receive-p=true; git branch -D main' origin feat/x", "sort --com='x; git reset --hard' f", "sort --compress 'x; git reset --hard' f",
   `git fetch "--"upl='true; git reset --hard' origin`, `git fetch --u''pl='true; git reset --hard' origin`, `git push -"-"exe='true; git reset --hard' origin feat/x`, `git push $'--rec'eive-p='true; git branch -D main' origin feat/x`,
-  String.raw`git push --re\ceive-p='true; git branch -D main' origin feat/x`, `git fetch --u$(echo)pl='true; git reset --hard' origin`, "git fetch --u`echo`pl='true; git reset --hard' origin", "git fetch --u${X}pl='true; git reset --hard' origin", "git fetch -$X-upl='true; git reset --hard' origin"];
+  String.raw`git push --re\ceive-p='true; git branch -D main' origin feat/x`, `git fetch --u$(echo)pl='true; git reset --hard' origin`, "git fetch --u`echo`pl='true; git reset --hard' origin", "git fetch --u${X}pl='true; git reset --hard' origin", "git fetch -$X-upl='true; git reset --hard' origin",
+  "git push --e='true; git reset --hard; git-receive-pack' origin feat/x", "git push --e 'true; git reset --hard; git-receive-pack' origin feat/x"];
 const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
 for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
 for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-79 review round 6: a heredoc body no shell reads keeps main's handling of leading keywords; the same body fed to a shell is still checked.
+for (const kw of ['then', 'if', 'do', 'while', '!']) {
+  const ok = L('cat > notes.md <<EOF', `${kw} git push -f is never allowed.`, 'EOF');
+  assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 6 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
+  const bad = L('bash <<EOF', `${kw} git push -f origin main`, 'EOF');
+  assert.ok(denied('pre-bash.mjs', bash(bad)), `SID-79 round 6 must deny: ${JSON.stringify(bad)}`);
+}
+{
+  const ok = L('cat > notes.md <<EOF', 'then git push -f is never allowed.', 'EOF');
+  assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 6 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
+  const bad = L('bash <<EOF', 'then git push -f is never allowed.', 'EOF');
+  assert.ok(denied('pre-bash.mjs', bash(bad)), `SID-79 round 6 must deny: ${JSON.stringify(bad)}`);
+}
 
 // Writes into a git dir make quoted text code (git runs core.pager, aliases, hooks): no quote trust, and the write itself is denied.
 const CFG = /writing a git config file directly/, HOOK = /writing into a hooks directory/, INFO = /write into \.git\/info or \.git\/modules/, PAGER = String.raw`printf '[core]\n\tpager = true; git reset --hard\n'`;
@@ -677,7 +691,7 @@ const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`,
   (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
   (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
   (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`,
-  (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`];
+  (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`];
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
 const everything = [...new Set([...corpus, ...generated])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.

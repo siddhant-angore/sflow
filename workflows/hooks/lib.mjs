@@ -135,14 +135,14 @@ function stripRedirs(s) {
   return out.join(' ');
 }
 
-export function normalize(seg) {
+export function normalize(seg, keywords = true) {
   let s = stripRedirs(seg.trim());
   for (let prev = null; prev !== s;) {
     prev = s;
     const [t, rest] = take(s);
     if (t === null) break;
     const b = /^\\?(?:[^\s"'=\\]*\/)?([\w.+-]+)$/.exec(t)?.[1] ?? t;
-    if (KEYWORDS.has(t) || /^[A-Za-z_]\w*\+?=/.test(t)) s = rest;
+    if ((keywords && KEYWORDS.has(t)) || /^[A-Za-z_]\w*\+?=/.test(t)) s = rest;
     else if (Object.hasOwn(WRAPPERS, b)) s = unwrap(b, rest);
     else if (b === 'git') { const r = gitSub(rest); s = r ? `git ${r}` : 'git'; }
     else if (EXES.has(b)) s = rest ? `${b} ${rest}` : b;
@@ -265,9 +265,9 @@ const feedsShell = (n) => { const b = head(n)[1] ?? ''; return (SHELL.test(b) ||
 // Quoted text is only data when nothing in the command can execute it. `echo 'x; git push -f origin main' | sh` and `... > f.sh && bash f.sh` run it, and `git -c core.pager='...' log` or `GIT_PAGER='...' git log` execute it,
 // so quotes are honoured only when every segment (judged raw, after redirections) starts with a command that never runs its arguments; anything else also gets the quote-blind scan.
 const NON_EXEC = /^(?:(?:echo|printf|grep|cat|rg|cd|pwd|ls|true|false|:|test|\[|head|tail|wc|sort|uniq|cut|tr|mkdir|touch|tee|sleep)|git\s+(?:add|commit|status|log|diff|show|push|fetch|switch|checkout|restore|branch|rm|mv|tag|stash|reset|clean|rev-parse)|gh\s+(?:pr\s+(?:create|edit|comment|view)|issue\s+(?:create|comment|view)))(?:\s|$)/;
-// Options whose value is executed (git runs it via a shell; sort runs a program), matched by prefix (--up, --rec, --ex, --com) because both accept unique abbreviations. Tested on a de-quoted copy, since bash joins `--u''pl=`, `-"-"exe`, `$'--rec'eive-p=`.
+// Options whose value is executed (git runs it via a shell; sort runs a program), matched by prefix (--up, --rec, --e, --com) because both accept unique abbreviations. `--e` is a unique prefix of push's --exec; --u, --up, --r and --re are ambiguous in git (git refuses them), so they are safe and are not tested. Tested on a de-quoted copy, since bash joins `--u''pl=`, `-"-"exe`, `$'--rec'eive-p=`.
 // A dash-word containing `$` or a backtick (`--u$(echo)pl=`) can expand to anything, so it is never trusted. Harmless hits such as --recurse-submodules just fall back to the quote-blind scan, as on main.
-const RUNS_ARG = /(?:^|\s)--(?:up|rec|ex|com)/;
+const RUNS_ARG = /(?:^|\s)--(?:up|rec|e|com)/;
 const EXPANDS_OPT = /(?:^|\s)['"\\$]*-\S*[$`]/;
 const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s.replace(/\$?['"]|\\/g, '')) && !EXPANDS_OPT.test(s)); };
 
@@ -352,8 +352,10 @@ export function segments(cmd) {
   const qa = [...raw.flatMap(run), ...extra];
   if (!unsure && raw.every(nonExec) && !writesFile(joined)) return qa; // a line that writes a file keeps main's quote-blind scan too: what it writes can run later
   const seen = new Set(qa), blind = [];
+  // Lines of a heredoc body no shell reads are data, so as on main a leading keyword is not stripped there; bodies fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) are still checked fully through `extra`.
+  const bodyLines = reads ? new Set() : new Set(docs.flatMap((d) => d.text.split(/&&|\|\||;|\||\n/).map((x) => x.trim())));
   for (const s of [cmd, joined].flatMap((t) => t.split(/&&|\|\||;|\||\n/))) {
-    const n = normalize(s);
+    const n = normalize(s, !bodyLines.has(s.trim()));
     if (n && !seen.has(n)) { seen.add(n); blind.push(n, ...payload(n).flatMap(segments)); }
   }
   return [...new Set([...qa, ...blind])];
