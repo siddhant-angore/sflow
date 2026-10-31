@@ -50,7 +50,7 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.316
 
-      # check.mjs runs vendor check, plugin validate (root and domains/flutter), test-hooks, test-eval-brake, test-upstream and check-routing.
+      # check.mjs runs vendor check, check-versions, plugin validate (root and domains/flutter), test-hooks, test-eval-brake, test-upstream, test-vendor and check-routing.
       - name: npm run check
         run: npm run check
 

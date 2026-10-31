@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Vendors every source in vendor.manifest.json by commit SHA into one flat skill tree, applies the workflow overlays, and pins everything with a hash lock.
 //   node scripts/vendor.mjs sync   # fetch at the pinned shas, copy, rename collisions, build workflows, write vendor.lock.json + NOTICE.md
-//   node scripts/vendor.mjs check  # re-hash every pinned file; exit 1 on drift or a missing file
+//   node scripts/vendor.mjs check  # report symlinks, missing files, hash drift, unlocked (unexpected) files under vendored targets and manifest/lock sha mismatches; exit 1 on any
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, sep } from 'node:path';
 
-const root = join(dirname(new URL(import.meta.url).pathname), '..');
+let root = join(dirname(new URL(import.meta.url).pathname), '..');
 const manifest = JSON.parse(readFileSync(join(root, 'vendor.manifest.json'), 'utf8'));
 const lockPath = join(root, 'vendor.lock.json');
 const mode = process.argv[2];
@@ -65,14 +65,24 @@ function checkout(name) {
   return dir;
 }
 
-// cpSync({ dereference }) leaves nested symlinks as links into the tmp cache, so resolve every link by hand. A link whose target leaves the checkout is an error.
-function copyResolved(from, to, srcRoot) {
-  const real = realpathSync(from);
+// cpSync({ dereference }) leaves nested symlinks as links into the tmp cache, so resolve every link by hand.
+// A link that leaves the checkout, dangles, or points at a directory already on the current path (a loop) is an error. `seen` holds the real paths of the directories above `from`.
+function copyResolved(from, to, srcRoot, source, seen = new Set()) {
+  const isLink = lstatSync(from).isSymbolicLink();
+  const linkText = () => (isLink ? readlinkSync(from) : realpathSync(from));
+  let real;
+  try { real = realpathSync(from); } catch (e) {
+    if (isLink && e.code === 'ENOENT') throw new Error(`broken symlink in ${source}: ${relative(srcRoot, from)} -> ${readlinkSync(from)}`);
+    if (isLink && e.code === 'ELOOP') throw new Error(`symlink loop in ${source}: ${relative(srcRoot, from)} -> ${readlinkSync(from)}`);
+    throw e;
+  }
   const top = realpathSync(srcRoot);
-  if (real !== top && !real.startsWith(top + sep)) throw new Error(`symlink escapes the source checkout: ${from} -> ${real}`);
+  if (real !== top && !real.startsWith(top + sep)) throw new Error(`${source}: symlink escapes the source checkout: ${from} -> ${real}`);
   if (statSync(real).isDirectory()) {
+    if ([...seen].some((s) => s === real || s.startsWith(real + sep))) throw new Error(`symlink loop in ${source}: ${relative(srcRoot, from)} -> ${linkText()}`);
+    const next = new Set([...seen, real]);
     mkdirSync(to, { recursive: true });
-    for (const e of readdirSync(from)) copyResolved(join(from, e), join(to, e), srcRoot);
+    for (const e of readdirSync(from)) copyResolved(join(from, e), join(to, e), srcRoot, source, next);
   } else copyFileSync(real, to);
 }
 
@@ -97,7 +107,7 @@ function alignName(dir) {
   if (fixed !== text) writeFileSync(f, fixed);
 }
 
-function sync() {
+function syncInPlace() {
   const lock = { sources: manifest.sources, files: {} };
   for (const t of new Set(manifest.entries.map((e) => e.to))) rmSync(join(root, t), { recursive: true, force: true });
   const sources = Object.entries(manifest.sources);
@@ -110,7 +120,7 @@ function sync() {
       seen.set(to, entry.source);
       mkdirSync(dirname(to), { recursive: true });
       const top = entry.from.endsWith('/*') ? null : entry.include;
-      if (top) { mkdirSync(to,{recursive:true}); for (const e of readdirSync(from)) if (top.includes(e)) copyResolved(join(from,e), join(to,e), srcRoot); } else copyResolved(from, to, srcRoot);
+      if (top) { mkdirSync(to,{recursive:true}); for (const e of readdirSync(from)) if (top.includes(e)) copyResolved(join(from,e), join(to,e), srcRoot, entry.source); } else copyResolved(from, to, srcRoot, entry.source);
       if (statSync(to).isDirectory() && basename(dirname(to)) === 'skills') alignName(to);
       notice.push(`- \`${relative(root, to)}\` from ${entry.source}@${manifest.sources[entry.source].sha.slice(0, 12)} (\`${entry.from}\`)`);
     }
@@ -126,7 +136,7 @@ function sync() {
     const p = join(root, t);
     for (const f of statSync(p).isDirectory() ? walk(p) : [p]) lock.files[relative(root, f)] = sha256(f);
   }
-  writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
+  writeFileSync(join(root, 'vendor.lock.json'), JSON.stringify(lock, null, 2) + '\n');
   writeFileSync(join(root, 'NOTICE.md'), notice.join('\n') + '\n');
   for (const pack of packList) {
     const lic = join(root, pack.dir, 'LICENSES');
@@ -137,6 +147,21 @@ function sync() {
     writeFileSync(join(root, pack.dir, 'NOTICE.md'), packNotice(pack, readFileSync(join(root, 'NOTICE.md'), 'utf8')));
   }
   console.log(`vendored ${Object.keys(lock.files).length} files from ${Object.keys(manifest.sources).length} sources`);
+}
+
+// Build in a staging copy and swap the outputs in only on success, so a failed fetch, copy or overlay no longer leaves targets half-deleted.
+function sync() {
+  const real = root, stage = mkdtempSync(join(tmpdir(), 'sflow-vendor-stage-'));
+  try {
+    cpSync(real, stage, { recursive: true, verbatimSymlinks: true, filter: (f) => !['.git', 'node_modules'].includes(relative(real, f).split(sep)[0]) });
+    root = stage;
+    try { syncInPlace(); } finally { root = real; }
+    const outs = [...new Set([...manifest.entries.map((e) => e.to), 'LICENSES', 'NOTICE.md', 'vendor.lock.json', 'hooks', ...packList.flatMap((p) => [`${p.dir}/LICENSES`, `${p.dir}/NOTICE.md`])])];
+    for (const p of outs.filter((p) => !outs.some((q) => q !== p && p.startsWith(q + '/')))) {
+      rmSync(join(real, p), { recursive: true, force: true });
+      if (existsSync(join(stage, p))) cpSync(join(stage, p), join(real, p), { recursive: true, verbatimSymlinks: true });
+    }
+  } finally { rmSync(stage, { recursive: true, force: true }); }
 }
 
 function check() {
@@ -151,7 +176,7 @@ function check() {
   for (const t of new Set(manifest.entries.map((e) => e.to))) {
     const p = join(root, t);
     if (!existsSync(p) || !statSync(p).isDirectory()) continue;
-    for (const f of walk(p)) { const rel = relative(root, f); if (lstatSync(f).isSymbolicLink() && !(rel in lock.files)) problems.push(`symlink: ${rel}`); if (!(rel in lock.files) && !basename(f).startsWith('.')) problems.push(`unexpected (not in lock): ${rel}`); }
+    for (const f of walk(p)) { const rel = relative(root, f); if (lstatSync(f).isSymbolicLink() && !(rel in lock.files)) problems.push(`symlink: ${rel}`); else if (!(rel in lock.files) && !basename(f).startsWith('.')) problems.push(`unexpected (not in lock): ${rel}`); }
   }
   for (const [name, src] of Object.entries(lock.sources)) if (manifest.sources[name]?.sha !== src.sha) problems.push(`manifest/lock sha mismatch for ${name}; run sync`);
   const licDir = join(root, 'LICENSES');

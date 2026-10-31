@@ -10,6 +10,7 @@
     "test:hooks": "node scripts/test-hooks.mjs",
     "test:eval-brake": "node scripts/test-eval-brake.mjs",
     "test:upstream": "node scripts/test-upstream.mjs",
+    "test:vendor": "node scripts/test-vendor.mjs",
     "upstream": "node scripts/upstream.mjs"
   }
 }
