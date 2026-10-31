@@ -329,6 +329,47 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     assert.ok(!verdict(k5, 'git push origin feat/x').deny, 'k5: gate passes');
     assert.equal(readFileSync(join(k5, 'base.txt'), 'utf8'), realBase, 'k5: {base} comes from refs/remotes/origin/main, not the tag');
     // k5 (stop.mjs ahead count) not covered here: it needs a Stop-hook fixture; the change is the same one-token ref name.
+
+    // k6. a MISSING remote ref must not be conjured by refs/tags/refs/remotes/... or refs/heads/refs/remotes/... (rev-parse DWIM fallback).
+    const { remoteSha } = await import(join(hooks, 'lib.mjs'));
+    const shadows = [['tag', (n, e) => `git tag ${n} ${e}`, (n) => `git tag -d ${n}`], ['branch', (n, e) => `git branch ${n} ${e}`, (n) => `git branch -q -D ${n}`]];
+    const failsClosed = (d, tag, names) => {
+      const c = config(d);
+      assert.deepEqual([c.present, c.allowMerge, c.source], [false, false, null], `${tag}: shadow policy not read`);
+      for (const n of names) assert.ok(c.protectedBranches.includes(n), `${tag}: ${n} protected`);
+      assert.ok(verdict(d, 'gh pr merge 1').deny, `${tag}: merge denied`);
+      for (const n of names) assert.ok(verdict(d, `git push origin HEAD:${n}`).deny, `${tag}: push to ${n} denied`);
+    };
+    const k6m = mk('k6m'); // origin has main only: refs/remotes/origin/master is missing
+    const e6m = evilCommit(k6m, 'evil');
+    for (const [kind, mkShadow, rmShadow] of shadows) {
+      sh(k6m, mkShadow('refs/remotes/origin/master', e6m));
+      assert.equal(remoteSha(k6m, 'master'), null, `k6 master (${kind}): no remote sha`);
+      failsClosed(k6m, `k6 master (${kind})`, ['main', 'master']);
+      sh(k6m, rmShadow('refs/remotes/origin/master'));
+    }
+    assert.match(remoteSha(k6m, 'main'), /^[0-9a-f]{40,64}$/, 'k6: a real remote ref still yields its sha');
+    assert.equal(remoteSha(k6m, '..'), null, 'k6: implausible name rejected');
+    assert.equal(remoteSha(k6m, '-x'), null, 'k6: leading dash rejected');
+    assert.equal(remoteSha(k6m, 'a b'), null, 'k6: whitespace rejected');
+
+    const k6t = mk('k6t'); // origin has only trunk (HEAD -> trunk, no policy): refs/remotes/origin/main is missing
+    const origin6 = `${k6t}.origin.git`;
+    sh(k6t, `git push -q origin main:trunk && git --git-dir=${origin6} symbolic-ref HEAD refs/heads/trunk && git --git-dir=${origin6} branch -q -D main && git fetch -q --prune origin && git remote set-head origin --auto`);
+    assert.equal(sh(k6t, 'git for-each-ref refs/remotes/origin/main | wc -l'), '0', 'k6 main: refs/remotes/origin/main is gone');
+    const e6t = evilCommit(k6t, 'evil');
+    for (const [kind, mkShadow, rmShadow] of shadows) {
+      sh(k6t, mkShadow('refs/remotes/origin/main', e6t));
+      assert.equal(remoteSha(k6t, 'main'), null, `k6 main (${kind}): no remote sha`);
+      failsClosed(k6t, `k6 main (${kind})`, ['main']);
+      sh(k6t, rmShadow('refs/remotes/origin/main'));
+    }
+    assert.equal(remoteDefault(k6t), 'trunk', 'k6: real default still resolves');
+
+    const k6g = mk('k6g'); // shadow tag at HEAD, remote master missing: baseSha is the real main, never the tag
+    sh(k6g, 'git commit -q --allow-empty -m work && git tag refs/remotes/origin/master HEAD');
+    const g6 = config(k6g);
+    assert.deepEqual([g6.present, g6.baseSha === remoteSha(k6g, 'main')], [false, true], 'k6 gate: not present, baseSha is the real main');
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }
