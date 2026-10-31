@@ -1,6 +1,6 @@
 {
   "name": "sflow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "One rigorous engineering workflow for coding agents: pstack's router and principles, Matt Pocock's spec and grilling discipline, Addy Osmani's lifecycle checklists and review personas, merged into task-driven playbooks.",
   "author": {
     "name": "Siddhant Angore"
