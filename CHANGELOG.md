@@ -16,6 +16,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 - CI (`.github/workflows/ci.yml`) on every PR and push to `main`: a tracked-symlink gate, `npm run check` (vendor hashes, plugin validate, hooks, routing), and a vendor drift job (`vendor.mjs sync` must leave the tree clean). Actions are SHA-pinned; no secrets; `eval:brake` stays manual. [#2](https://github.com/siddhant-angore/sflow/pull/2) (SID-42), merged in `a216f9b`.
 - `docs/adr/0001-pstack-source-of-truth.md`, the decision record for taking pstack from the original. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44).
 - `npm run test:eval-brake` (`scripts/test-eval-brake.mjs`): offline tests plus end-to-end tests that run `eval-brake` against a fake `claude` on `PATH`. Part of `npm run check`. [#6](https://github.com/siddhant-angore/sflow/pull/6) (SID-47).
+- Upstream drift check, `npm run upstream` (`scripts/upstream.mjs`): read-only, no token. It compares every pinned `sha` with the upstream default branch, counts only commits that touch the vendored paths or the source's licence file, lists changed files, new or removed skill directories and overlays whose anchored file changed, and exits `0` (current or held), `10` (behind) or `1` (error). `--json` gives a machine-readable report. An optional `"hold": "<reason>"` on a source in `vendor.manifest.json` defers it without exit `10`. `.github/workflows/upstream.yml` runs it weekly (Monday 03:30 UTC) and on demand, and opens, updates or closes one `upstream-drift` issue; it never opens a PR or merges. `npm run test:upstream` (`scripts/test-upstream.mjs`) covers it offline, including one real-git test over `file://`, and is part of `npm run check`. [#4](https://github.com/siddhant-angore/sflow/pull/4) (SID-50).
 
 ### Changed
 
@@ -26,7 +27,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 ### Removed
 
-- The port-only pieces with no upstream equivalent: the `babysit` skill (covered by the Babysit playbook in `poteto-mode`), `models.json` and `pi/`, and the port's hooks (Codex/Copilot/Muse adapters, awk/PowerShell helpers, `pre-tool-use.*`, the SessionStart mandate). [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44).
+- The port-only pieces with no upstream equivalent: the `babysit` skill (covered by the Babysit playbook in `poteto-mode`), `models.json` and `pi/`, the port's icon (`assets/pstack-icon.png` and `assets/pstack-icon.prompt.txt`), and the port's hooks (Codex/Copilot/Muse adapters, awk/PowerShell helpers, `pre-tool-use.*`, the SessionStart mandate). [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44).
 
 ### Fixed
 
