@@ -46,6 +46,44 @@ sh(repo, 'git checkout -q main');
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push'))), /protected branch main/);
 sh(repo, 'git checkout -q feat/x');
 
+// SID-79/80: global git options, wrappers, paths, grouping, and HEAD/@ on a protected branch. The repo is on feat/x with a clean tree.
+const rawPrefixes = ['git -P', 'git -p', 'git --paginate', 'git --no-pager', 'git --no-replace-objects', 'git --literal-pathspecs', 'git -c a=b -C .', 'git --git-dir=.git', 'git --work-tree .', 'env git', 'env GIT_PAGER=cat git', 'env -i PATH=/usr/bin git',
+  'command git', 'exec git', 'nice -n 5 git', 'nohup git', 'time git', 'timeout 10 git', 'sudo git', 'GIT_PAGER=cat git', '/usr/bin/git', './git', '../bin/git', '\\git', '\\/usr/bin/git', '(git', '$(git', '{ git', 'if git'];
+const closeShell = (pre, c) => (pre === '(git' || pre === '$(git' ? `${c})` : pre === '{ git' ? `${c} ; }` : pre === 'if git' ? `${c}; then :; fi` : c);
+for (const pre of rawPrefixes)
+  for (const body of ['push --force origin main', 'push origin HEAD:main', 'reset --hard', 'branch -D feat/evil', 'clean -fdx', 'checkout .', 'push --mirror', 'filter-branch --all']) {
+    const c = closeShell(pre, `${pre} ${body}`);
+    assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 must deny: ${c}`);
+  }
+for (const c of ['env gh pr merge 1', '/usr/local/bin/gh pr merge 1', '\\gh release create v1', 'env npm publish']) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 must deny: ${c}`);
+for (const [pre, body, why] of [['git -P', 'push --force origin main', /force push/], ['git --paginate', 'push --force origin main', /force push/], ['env git', 'push --force origin main', /force push/], ['command git', 'push --force origin main', /force push/], ['/usr/bin/git', 'push --force origin main', /force push/], ['\\git', 'push --force origin main', /force push/],
+  ['git -P', 'reset --hard', /git reset --hard/], ['git --paginate', 'reset --hard', /git reset --hard/], ['env git', 'reset --hard', /git reset --hard/], ['command git', 'reset --hard', /git reset --hard/], ['/usr/bin/git', 'reset --hard', /git reset --hard/], ['\\git', 'reset --hard', /git reset --hard/],
+  ['git -P', 'branch -D feat/evil', /force-deleting/], ['git -P', 'push origin HEAD:main', /protected branch/]])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(`${pre} ${body}`))), why, `SID-79 reason: ${pre} ${body}`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git reset --hard'))), /commit to a WIP branch.*git restore <path>/, 'reset message says what to do instead');
+for (const c of ['git -P log', 'git -p log', 'git --no-pager diff', 'git --paginate show HEAD', 'env GIT_PAGER=cat git log', 'env FOO=1 git status', 'command git diff', '/usr/bin/git status', '\\git status', 'git -C . status', 'git -C sub status', 'git -c color.ui=never log --oneline',
+  'git push origin HEAD', 'git push -u origin HEAD', 'git push origin feat/x 2>&1', 'git push -o ci.skip origin feat/x', 'git push origin HEAD > /dev/null', 'git push -u origin HEAD 2>&1 | tail -1', 'git push origin @', 'git push origin HEAD:feat/x', 'nice git log', 'timeout 30 git fetch origin', '(cd sub && git status)', 'echo $(git rev-parse HEAD)', 'gitk --all', './scripts/git-helper push -f', 'echo "git -P push -f"', 'grep -rn "env git push --force" docs', 'ls -la'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79/80 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin $(git branch --show-current)'))), /literal/, 'command substitution in push arguments stays denied');
+
+// SID-80: on a protected branch HEAD and @ are that branch.
+sh(repo, 'git checkout -q main');
+for (const c of ['git push origin HEAD', 'git push origin @', 'git push -u origin HEAD', 'git push origin HEAD:HEAD', 'git push origin @:main', 'git push origin', 'git push -u origin', 'git -P push origin HEAD', 'env git push origin @']) {
+  const why = reasonOf(run('pre-bash.mjs', bash(c)));
+  assert.ok(denied('pre-bash.mjs', bash(c)), `SID-80 must deny on main: ${c}`);
+  assert.match(why, c === 'git push origin @:main' ? /protected branch/ : /protected branch main/, `SID-80 reason: ${c}`); // @:main names main in the text, so it keeps the existing "direct push to a protected branch (main, master)" message
+  assert.match(why, /feature branch/, `SID-80 says what to do: ${c}`);
+}
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD'))), /^harness guard: HEAD\/@ here is protected branch main; create a feature branch \(git switch -c <name>\)/);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin +HEAD'))), /\+ refspec/);
+for (const c of ['git push origin 2>&1', 'git push origin > /dev/null', 'git push origin >/dev/null 2>&1', 'git push origin 2>/dev/null', 'git push -o ci.skip origin', 'git push --push-option ci.skip origin', 'git push --repo origin', 'git push --receive-pack git-receive-pack origin', 'git push --exec x origin'])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /protected branch main; create a feature branch and push that/, `SID-80 redirection/option arg: ${c}`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD > /dev/null'))), /feature branch/, 'HEAD with redirection still denied');
+sh(repo, 'git checkout -q --detach');
+assert.ok(!denied('pre-bash.mjs', bash('git push origin HEAD')), 'detached HEAD is not a protected push (git refuses it)');
+assert.ok(denied('pre-bash.mjs', bash('git push origin HEAD:main')), 'detached HEAD:main is still denied by the destination');
+sh(repo, 'git checkout -q feat/x');
+
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
 assert.ok(denied('pre-bash.mjs', bash('gh pr merge 1')), 'working-tree policy edit must not take effect');

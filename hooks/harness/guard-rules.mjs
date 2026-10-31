@@ -1,13 +1,21 @@
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
-const protectedToken = (tok, prot) => {
-  const dst = tok.replace(/^\+/, '').split(':').pop();
-  return prot.includes(dst) || prot.some((b) => dst === `refs/heads/${b}`);
+const headRef = (r) => r === 'HEAD' || r === '@';
+// The protected branch a refspec pushes to (+ stripped, no colon means dst = src, HEAD and @ resolve to the current branch), or null. viaHead: the name came from the checkout, not from the text.
+const protectedTarget = (tok, prot, branch) => {
+  const p = tok.replace(/^\+/, '').split(':'), raw = p.length > 1 ? p.pop() : p[0];
+  const dst = headRef(raw) ? branch : raw.replace(/^refs\/heads\//, '');
+  return prot.includes(dst) ? { name: dst, viaHead: headRef(raw) } : null;
 };
 
 export function pushReason(seg, prot, branch) {
   const m = /^git\s+push\b(.*)$/.exec(seg);
   if (!m) return null;
-  const args = m[1].trim().split(/\s+/).filter(Boolean);
+  const toks = m[1].trim().split(/\s+/).filter(Boolean), args = [];
+  for (let i = 0; i < toks.length; i++) {
+    if (/^\d*(>>?|<|&>|>&|<&)/.test(toks[i])) { if (/^\d*(>>?|<|&>|>&|<&)$/.test(toks[i])) i++; } // shell redirection and its target
+    else if (/^(-o|--push-option|--repo|--receive-pack|--exec)$/.test(toks[i])) i++; // option argument, not a refspec
+    else args.push(toks[i]);
+  }
   const flags = args.filter((a) => a.startsWith('-'));
   const refs = args.filter((a) => !a.startsWith('-'));
   if (args.some((a) => /[$`]/.test(a))) return 'push arguments must be literal, no shell expansion';
@@ -17,7 +25,9 @@ export function pushReason(seg, prot, branch) {
   if (refs.some((r) => r.startsWith('+') || /^:/.test(r))) return 'a + refspec or a :branch deletion is a force or a delete';
   const targets = refs.slice(1);
   if (targets.length === 0 && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
-  if (targets.some((t) => protectedToken(t, prot))) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
+  const hit = targets.map((t) => protectedTarget(t, prot, branch)).find(Boolean);
+  if (hit?.viaHead) return `HEAD/@ here is protected branch ${hit.name}; create a feature branch (git switch -c <name>), push it and open a PR`;
+  if (hit) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
   if (flags.some((f) => f.startsWith('--force-with-lease')) && targets.length === 0 && branch && prot.includes(branch)) return 'lease push to a protected branch';
   return null;
 }
@@ -29,7 +39,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
   if (p) return p;
   const seg = unquoted(raw);
   const rules = [
-    [/^git\s+reset\b.*\s(--hard|--merge)\b/, 'git reset --hard/--merge destroys uncommitted work; use git stash or a fresh worktree'],
+    [/^git\s+reset\b.*\s(--hard|--merge)\b/, 'git reset --hard/--merge destroys uncommitted work; commit to a WIP branch or use a fresh worktree; restore named files with git restore <path>'],
     [/^git\s+(checkout|restore|switch)\b.*(\s\.(\s|$)|--discard-changes|\s-f(\s|$)|\s--force(\s|$)|\s--worktree\s+\.)/, 'discarding the working tree is irreversible; restore named files'],
     [/^git\s+clean\b.*\s-[a-zA-Z]*[fdx]/, 'git clean -f/-d/-x deletes untracked files; list them and delete by name'],
     [/^git\s+branch\b.*(\s-D\b|\s-[a-zA-Z]*f[a-zA-Z]*\b|--force\b|--delete\s+--force)/, 'force-deleting a branch is irreversible; use -d'],

@@ -37,9 +37,55 @@ export function config(cwd = process.cwd()) {
 export const gitDir = (root) => git(root, 'rev-parse', '--absolute-git-dir');
 export const currentBranch = (root) => { try { return git(root, 'symbolic-ref', '--short', 'HEAD'); } catch { return null; } };
 
-// `git -C x -c k=v --no-pager push` becomes `git push`, so every rule matches the subcommand.
-export const normalize = (cmd) => cmd.replace(/\bgit((\s+(-C|-c|--git-dir|--work-tree|--exec-path)(=|\s+)\S+)|\s+--no-pager|\s+--no-optional-locks)+\s+/g, 'git ');
-export const segments = (cmd) => normalize(cmd).split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
+// Canonical form of one segment, so every rule can anchor on ^git <sub>: `env -i A=1 /usr/bin/git -P -c k=v push` becomes `git push`.
+// Strips leading keywords, VAR=x, wrappers (and their options), a path or backslash on git/gh/npm..., then git's global options.
+// Indirection (`g=git; $g push -f`, aliases, `sh -c '...'`, scripts written then run) stays best-effort: SID-77/78.
+const KEYWORDS = new Set(['!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
+const EXES = new Set(['git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'uv', 'twine']);
+const WRAPPERS = { env: 'uC', command: '', builtin: '', exec: 'a', nice: 'n', nohup: '', time: 'of', timeout: 'ks', stdbuf: 'ioe', ionice: 'cnpPu', sudo: 'ugCDhprtTU', doas: 'uC', xargs: 'nILPsdEa' }; // short options that take a separate argument
+const LONG_ARG = new Set(['--user', '--group', '--chdir', '--unset', '--host', '--prompt', '--role', '--type', '--other-user', '--close-from', '--command-timeout', '--adjustment', '--kill-after', '--signal', '--max-args', '--max-procs', '--max-lines', '--replace', '--delimiter', '--eof', '--arg-file']);
+const GIT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
+const take = (s) => { const m = /^\s*((?:"[^"]*"|'[^']*'|\S)+)\s*/.exec(s); return m ? [m[1], s.slice(m[0].length)] : [null, '']; };
+
+function unwrap(name, rest) {
+  for (;;) {
+    const [t, r] = take(rest);
+    if (t === null || !(t.startsWith('-') || (name === 'env' && /^\w+=/.test(t)))) break;
+    rest = r;
+    if (t === '--') break;
+    const m = name === 'env' && /^(-S|--split-string)=?(.*)$/.exec(t);
+    if (m) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
+    if ((t.length === 2 && WRAPPERS[name].includes(t[1])) || LONG_ARG.has(t)) rest = take(r)[1];
+  }
+  return name === 'timeout' ? take(rest)[1] : rest;
+}
+
+// Drop git's global options (everything starting with - before the subcommand, plus the argument of those that take one).
+function gitSub(rest) {
+  for (;;) {
+    const [o, r] = take(rest);
+    if (!o?.startsWith('-')) return rest;
+    rest = GIT_ARG.has(o) ? take(r)[1] : r;
+  }
+}
+
+export function normalize(seg) {
+  let s = seg.trim();
+  for (let prev = null; prev !== s;) {
+    prev = s;
+    const [t, rest] = take(s);
+    if (t === null) break;
+    const b = /^\\?(?:[^\s"'=\\]*\/)?([\w.+-]+)$/.exec(t)?.[1] ?? t;
+    if (KEYWORDS.has(t) || /^[A-Za-z_]\w*\+?=/.test(t)) s = rest;
+    else if (Object.hasOwn(WRAPPERS, b)) s = unwrap(b, rest);
+    else if (b === 'git') { const r = gitSub(rest); s = r ? `git ${r}` : 'git'; }
+    else if (EXES.has(b)) s = rest ? `${b} ${rest}` : b;
+  }
+  return s;
+}
+
+// Split on shell operators and on subshell, group and substitution boundaries; the `$` of `$(` and the backtick stay on the left so `git push origin $(...)` still fails the literal-arguments rule.
+export const segments = (cmd) => cmd.replace(/\$\(/g, '$\n(').replace(/`/g, '`\n').split(/&&|\|\||;|\||&|\n|\(|\)|\{\s|\s\}/).map((s) => normalize(s.trim())).filter(Boolean);
 
 export function deny(reason, hookEventName = 'PreToolUse') {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');
