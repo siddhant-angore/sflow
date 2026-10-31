@@ -70,5 +70,11 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - `npm run check` re-hashes every vendored and built file, validates the plugin, and prints the description-collision report.
 - To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/`, or `pi/` by hand.
 - To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`.
+- `npm run upstream` compares every pinned `sha` with the upstream default branch. It is read-only and needs no token. Per source it prints the pinned and head shas, the branch, the commits ahead that touch the vendored paths (unrelated monorepo commits do not count) next to the total, a compare link, and, when behind, the changed files, new or removed skill directories (a new name that collides with an existing directory is flagged), and the overlays in `workflows/` whose anchored file changed upstream. Pass `--json` for a machine-readable report. Several source keys that share one repo are fetched once.
+  - Exit `0`: every source is current. Exit `10`: some source is behind. Exit `1`: an error, meaning a pinned sha is missing or not reachable from the head (deleted or force-pushed away), `vendor.manifest.json` and `vendor.lock.json` disagree on a sha, or the network failed. Error wins over drift.
+  - Overlay flags are a simple map: `extends: X` is `skills/poteto-mode/playbooks/X.md` (or the `target:` path), traced back through the manifest entry to its upstream path. It does not read the anchor text, so a flag means "look", not "broken".
+  - `npm run test:upstream` covers it offline with a stubbed git, and `npm run check` runs it.
+- `.github/workflows/upstream.yml` runs `npm run upstream` every Monday at 03:30 UTC (09:00 IST) and on demand. On drift it opens or updates one issue labelled `upstream-drift`. On an error it also fails the job. It never opens a PR or merges.
+- The upgrade loop when the report says behind: read the report, bump `sha` in `vendor.manifest.json`, run `npm run sync`, re-anchor any overlay that fails or was flagged, run `npm run check`, and open a PR (with a CHANGELOG entry once `CHANGELOG.md` exists).
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.

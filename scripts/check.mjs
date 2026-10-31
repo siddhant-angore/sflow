@@ -8,5 +8,6 @@ run('node', ['scripts/vendor.mjs', 'check']);
 run('claude', ['plugin', 'validate', '.']);
 run('claude', ['plugin', 'validate', 'domains/flutter']);
 run('node', ['scripts/test-hooks.mjs']);
+run('node', ['scripts/test-upstream.mjs']);
 run('node', ['scripts/check-routing.mjs']);
 console.log('\nall checks passed');
