@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { segments as newSegments } from '../hooks/harness/lib.mjs';
+import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
@@ -35,6 +35,10 @@ const mustDeny = [
   'git stash clear', 'git stash drop', 'git commit --no-verify -m x', 'git commit -n -m x', 'git merge --no-verify feat', 'git -c core.hooksPath=/dev/null commit -m x', 'HUSKY=0 git commit -m x',
   'git filter-branch --all', 'git update-ref -d refs/heads/x', 'gh pr merge 1', 'gh pr merge 1 --auto', 'gh pr close 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'gh api --method DELETE repos/o/r',
   'gh api repos/o/r/issues -f title=x', 'gh release create v1', 'gh repo delete o/r', 'npm publish', 'pnpm publish --access public', 'git merge feat && git push origin main',
+  // text written to a file can run later (hooks, .husky, scripts, git config): lines that write files keep main's quote-blind scan
+  String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, String.raw`printf '[core]\n\tpager = true; git reset --hard\n' >> ~/.gitconfig && git log`,
+  String.raw`printf 'true; git reset --hard\n' > .husky/pre-commit && git commit -m x`, String.raw`printf 'true; git reset --hard\n' > run.sh`, "printf 'x; git branch -D main' | tee run.sh",
+  String.raw`printf '%s\n' 'true; git reset --hard' > .githooks/pre-commit && git commit -m x`,
 ];
 for (const c of mustDeny) assert.ok(denied('pre-bash.mjs', bash(c)), `must deny: ${c}`);
 
@@ -42,6 +46,7 @@ const mustAllow = [
   'git push -u origin feat/x', 'git push', 'git push origin HEAD', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push origin sid-12-fix-main-nav', 'git push -u origin feat/main-menu',
   'git push -u origin sid-7-master-detail-view', 'git status', 'git branch -d x', 'git checkout -- a.txt', 'git restore a.txt', 'git checkout main', 'git stash', 'git stash pop', 'git commit -m "no -n here"',
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
+  "printf 'ok' > notes.md && git commit -m 'docs: notes'", 'echo "a; b" > /dev/null', "echo 'x; y' | tee /dev/null", 'git log --oneline > /tmp/sflow-log.txt', 'cat ~/.gitconfig', 'git config --global --get user.name', 'echo "$(git rev-parse HEAD)" > .last-sha',
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
@@ -131,6 +136,28 @@ const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'tru
 const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
 for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
 for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+
+// Writes into a git dir make quoted text code (git runs core.pager, aliases, hooks): no quote trust, and the write itself is denied.
+const CFG = /writing a git config file directly/, HOOK = /writing into a hooks directory/, INFO = /write into \.git\/info or \.git\/modules/, PAGER = String.raw`printf '[core]\n\tpager = true; git reset --hard\n'`;
+const gitWriteDeny = [[`${PAGER} >> .git/config && git log`, CFG], [String.raw`printf '[core]\n\tpager = "true; git reset --hard"\n' >> .git/config && git log`, CFG],[`printf 'true; git reset --hard\\n' > .git/hooks/pre-commit && git commit -m x`, HOOK], [`printf 'x' > .git/hooks/pre-commit`, HOOK], [`echo '[alias] x = !true' >> .git/config`, CFG],
+  [`${PAGER} | tee -a .git/config && git log`, CFG], [`printf 'x' | sudo tee .git/hooks/pre-push`, HOOK], ['cp /tmp/evil .git/hooks/pre-commit', HOOK], ['cp /tmp/evil .git/hooks/', HOOK], ['install -m 755 /tmp/evil .git/hooks/post-checkout', HOOK],
+  ['ln -s ../../evil.sh .git/hooks/pre-commit', HOOK], ['mv cfg .git/config', CFG], ['cp -t .git/hooks /tmp/evil', HOOK], ["sed -i 's/less/true; git reset --hard/' .git/config && git log", CFG], ["sed -i.bak '$a pager = x' .git/config", CFG],
+  ["perl -pi -e 's/a/b/' .git/config", CFG], ['printf x > ".git/config"', CFG], ['printf x >.git/config', CFG], ['printf x 1>> .git/config', CFG], ['dd of=.git/config if=/tmp/x', CFG], ["printf 'x' > .git/info/attributes && git status", INFO],
+  [`${PAGER} >> .git/modules/sub/config && git -C sub log`, INFO], ["printf 'x' > .git/modules/sub/hooks/pre-commit", HOOK], ["printf 'x' > ../origin.git/hooks/pre-receive && git push origin feat/x", HOOK], [`cd .git && ${PAGER} >> config && git log`, CFG],
+  ['cd .git/hooks && cp /tmp/evil pre-commit', HOOK], ['printf x > "$GIT_DIR/hooks/pre-commit"', HOOK], ['printf x > "$(git rev-parse --git-dir)/config"', CFG], ['GIT_DIR=/tmp/g.d git log > /dev/null; printf x > /tmp/g.d/config', CFG],
+  ['git --git-dir=/tmp/g.d status; printf x >> /tmp/g.d/hooks/pre-commit', HOOK],
+  [`${PAGER} >> $HOME/.gitconfig && git log`, CFG], [`${PAGER} >> \${HOME}/.gitconfig`, CFG], [`${PAGER} >> ~/.config/git/config && git log`, CFG], [`${PAGER} >> $HOME/.config/git/config`, CFG], [`${PAGER} >> $XDG_CONFIG_HOME/git/config`, CFG],
+  [`${PAGER} >> \${XDG_CONFIG_HOME}/git/config`, CFG], [`${PAGER} | sudo tee -a /etc/gitconfig`, CFG], [`${PAGER} >> /home/u/.gitconfig`, CFG], [`${PAGER} >> ~/.gitconfig`, CFG],
+  [String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, CFG]];
+const gitWriteAllow = ['cat .git/config', 'ls .git/hooks', 'ls -la .git/hooks/', 'git config --get core.pager', 'grep x .git/config', 'sed -n 1p .git/config', 'cp .git/config /tmp/sflow-bak', 'cat .git/config > /tmp/sflow-x', "printf 'x' > .git/info/exclude", "printf 'notes' > notes.md && git commit -m x", 'echo hi > config && git status'];
+for (const [c, why] of gitWriteDeny) { assert.ok(denied('pre-bash.mjs', bash(c)), `git write must deny: ${c}`); assert.match(reasonOf(run('pre-bash.mjs', bash(c))), why, `git write reason: ${c}`); }
+for (const c of gitWriteAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `git write must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+for (const c of gitWriteAllow.filter((x) => !/\.git\/info/.test(x))) assert.deepEqual(newGitWrites(c), [], `gitWrites reads are not writes: ${c}`);
+assert.deepEqual(newGitWrites('cd .git/hooks && cp /tmp/evil pre-commit'), [{ path: '.git/hooks/pre-commit', kind: 'hooks' }]);
+assert.deepEqual(newGitWrites('echo "a > .git/config"'), [], 'a quoted > is text');
+for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'echo "a > ~/.gitconfig"']) assert.deepEqual(newGitWrites(c), [], `global config reads are not writes: ${c}`);
+for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
+for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));

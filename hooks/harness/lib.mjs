@@ -225,6 +225,73 @@ const RUNS_ARG = /(?:^|\s)--(?:up|rec|ex|com)/;
 const EXPANDS_OPT = /(?:^|\s)['"\\$]*-\S*[$`]/;
 const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s.replace(/\$?['"]|\\/g, '')) && !EXPANDS_OPT.test(s)); };
 
+// Shell writes into a git directory: [{ path, kind }], kind config | hooks | info | modules. Git runs what such files hold (core.pager, aliases, hooks), so text quoted in a command that writes them is not data.
+// Works on a de-quoted copy: quoted characters are hidden (private-use code points) so a quoted `;`, `>` or space never splits or redirects. Reads (cat, grep, cp from, sed without -i) are not writes.
+const KIND_RES = [['hooks', /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/)?hooks(?:\/|$)/], ['modules', /(?:^|\/)[^\/\s]*\.git\/modules\/.+\/config$/], ['config', /(?:^|\/)[^\/\s]*\.git\/(?:config(?:\.worktree)?|worktrees\/[^\/]+\/config\.worktree)$/], ['info', /(?:^|\/)[^\/\s]*\.git\/info\//], ['config', /(?:^|\/)\.gitconfig$|(?:^|\/)\.config\/git\/config$|^\$\{?XDG_CONFIG_HOME\}?\/git\/config$|^\/etc\/gitconfig$/]]; // the last is global/system config: ~/.gitconfig, ~/.config/git/config, $XDG_CONFIG_HOME/git/config, /etc/gitconfig
+const hide = (c) => (c.charCodeAt(0) < 256 ? String.fromCharCode(0xE000 + c.charCodeAt(0)) : c), show = (s) => s.replace(/[\uE000-\uE0FF]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xE000));
+function dequote(s) { // q: s single, d double, a $'..'
+  let out = '', q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q === 's') { if (c === "'") q = null; else out += hide(c); }
+    else if (q) { if (c === '\\' && i + 1 < s.length) out += hide(s[++i]); else if (c === (q === 'd' ? '"' : "'")) q = null; else out += hide(c); }
+    else if (c === '\\') { if (++i < s.length) out += hide(s[i]); }
+    else if (c === "'") q = 's';
+    else if (c === '"') q = 'd';
+    else if (c === '$' && (s[i + 1] === "'" || s[i + 1] === '"')) q = s[++i] === "'" ? 'a' : 'd';
+    else out += c;
+  }
+  return out;
+}
+const GIT_SEP = /&&|\|\||;|\n|`|[()]|(?<!>)\||(?<![<>&\d])&(?![>&])/, GIT_REDIR = /(?<![-=])\d*(?:&>>?|>>|>\||<>|>&|>)\s*([^\s<>|&;()]+)/g;
+const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|info|modules\/.+))?\/*$/, GIT_CMDS = new Set(['tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
+const GIT_WRAP = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'time', 'timeout', 'stdbuf', 'ionice', 'xargs']), GIT_KW = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
+const NO_FILE = /^\/dev\/(?:null|stdout|stderr|tty)$/;
+// One pass over one string: { writes: git-dir/config writes as [{ path, kind }], files: every file it writes }. Commands inside $( ) in a quoted string are hidden here; scanAll adds them.
+function scan(cmd) {
+  const text = cmd.replace(/\\\n/g, '').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
+  const dq = dequote(text), base = (x) => x.replace(/^.*\//, '');
+  const dirs = [...show(dq).matchAll(/(?:^|[\s;&|(`])(?:GIT_DIR=|--git-dir[=\s]\s*)([^\s;&|)`]+)/g)].map((m) => m[1].replace(/\/+$/, '')).filter(Boolean); // GIT_DIR=X, --git-dir X: X/config is a git config
+  const writes = [], files = []; let cwd = null;
+  const hit = (t) => {
+    t = show(t).replace(/\/{2,}/g, '/').replace(/\/(?:\.\/)+/g, '/');
+    const d = dirs.find((x) => t.startsWith(`${x}/`)); if (d) t = `.git/${t.slice(d.length + 1)}`;
+    for (const p of cwd && !/^[\/~$]/.test(t) ? [t, `${cwd}/${t.replace(/^\.\//, '')}`] : [t]) { const kind = KIND_RES.find(([, re]) => re.test(p))?.[0]; if (kind) return void writes.push({ path: p, kind }); }
+  };
+  const put = (t) => { if (!NO_FILE.test(show(t))) files.push(show(t)); hit(t); };
+  for (const seg of dq.split(GIT_SEP)) {
+    for (const m of seg.matchAll(GIT_REDIR)) if (!(/&/.test(m[0].slice(0, m[0].length - m[1].length)) && /^(?:\d+-?|-)$/.test(m[1]))) put(m[1]); // `2>&1` duplicates a descriptor, it writes no file
+    const w = seg.replace(GIT_REDIR, ' ').split(/\s+/).filter(Boolean).map(show);
+    while (w.length && (/^\w+=/.test(w[0]) || GIT_KW.has(w[0]))) w.shift();
+    if (!w.length) continue;
+    if (base(w[0]) === 'cd' || base(w[0]) === 'pushd') { const d = w.slice(1).find((x) => !x.startsWith('-')); cwd = d && GIT_CD.test(d) ? d.replace(/\/+$/, '') : null; continue; }
+    const at = GIT_CMDS.has(base(w[0])) ? 0 : GIT_WRAP.has(base(w[0])) ? w.findIndex((x, j) => j > 0 && GIT_CMDS.has(base(x))) : -1;
+    if (at < 0) continue;
+    const name = base(w[at]), args = w.slice(at + 1), operands = args.filter((a) => !a.startsWith('-'));
+    if (name === 'tee' || name === 'truncate') operands.forEach(put);
+    else if (name === 'dd') args.filter((a) => a.startsWith('of=')).forEach((a) => put(a.slice(3)));
+    else if (name === 'sed' || name === 'perl') { if (args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith('--in-place'))) operands.forEach(put); }
+    else { // cp mv ln install: the destination is -t DIR or the last operand
+      const j = args.findIndex((a) => /^-[a-zA-Z]*t$/.test(a) || a === '--target-directory'), eq = args.find((a) => a.startsWith('--target-directory='));
+      const dest = eq ? eq.slice(19) : j >= 0 ? args[j + 1] : operands.at(-1);
+      if (dest) put(dest);
+    }
+  }
+  return { writes, files };
+}
+// scan over the command and, recursively, every piece the quote-aware split cuts out of it, so a write inside "$( )" or backticks in a string is seen too.
+function scanAll(cmd) {
+  const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)), r = scan(cmd);
+  for (const piece of split(joined).out) if (piece !== cmd) { const x = scanAll(piece); r.writes.push(...x.writes); r.files.push(...x.files); }
+  return r;
+}
+export function gitWrites(cmd) {
+  const seen = new Set();
+  return scanAll(cmd).writes.filter((w) => { const k = `${w.kind} ${w.path}`; return !seen.has(k) && seen.add(k); });
+}
+// Text written to any file can be executed later (hooks, .husky, scripts, git config), so a line that writes a file loses quote trust in segments().
+export const writesFile = (cmd) => scanAll(cmd).files.length > 0;
+
 // Everything that may run. Quote-aware segments (with $( ), backtick, heredoc-body and payload extraction) are always used. Unless quotes are honoured, the text is also split quote-blind on && || ; | newline, as before.
 export function segments(cmd) {
   const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)); // backslash-newline continues the line
@@ -237,7 +304,7 @@ export function segments(cmd) {
   }
   const run = (s) => { const n = normalize(s); return n ? [n, ...payload(n).flatMap(segments)] : []; };
   const qa = [...raw.flatMap(run), ...extra];
-  if (!unsure && raw.every(nonExec)) return qa;
+  if (!unsure && raw.every(nonExec) && !writesFile(joined)) return qa; // a line that writes a file keeps main's quote-blind scan too: what it writes can run later
   const seen = new Set(qa), blind = [];
   for (const s of [cmd, joined].flatMap((t) => t.split(/&&|\|\||;|\||\n/))) {
     const n = normalize(s);
