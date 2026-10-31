@@ -1,3 +1,4 @@
+import { isPolicyPath, policyDeny, policyGlobHit } from './lib.mjs';
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
 const protectedToken = (tok, prot) => {
   const dst = tok.replace(/^\+/, '').split(':').pop();
@@ -70,3 +71,118 @@ export function envReason(cmd) {
   if (/\b(HUSKY|LEFTHOOK|SKIP_HOOKS|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG)=/.test(cmd)) return 'disabling commit hooks by environment is not allowed';
   return null;
 }
+
+// SID-66: the policy files (lib.mjs POLICY_FILES) are not written from the shell either. Best-effort, no expansion: variables, indirect paths, scripts run from files and cd-then-relative writes are not seen.
+// Runs on the WHOLE command, not on segments(): segments() splits inside quotes and heredoc bodies. This splitter is quote-aware, skips heredoc bodies, and drops `# comments`.
+// Returns [{ w: words (quotes removed), r: redirect-output targets }] per simple command.
+export function simpleCommands(s) {
+  const cmds = []; let c = { w: [], r: [] }, cur = null, quoted = false, mode = null, hd = false;
+  const pend = [];
+  const word = () => {
+    if (cur === null) return;
+    if (mode === 'out') c.r.push(cur); else if (mode === 'in') { if (hd) pend.push(cur); } else c.w.push(cur);
+    cur = null; quoted = false; mode = null; hd = false;
+  };
+  const sep = () => { word(); if (c.w.length || c.r.length) cmds.push(c); c = { w: [], r: [] }; };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "'") { cur ??= ''; quoted = true; const j = s.indexOf("'", i + 1), e = j < 0 ? s.length : j; cur += s.slice(i + 1, e); i = e; }
+    else if (ch === '"') { cur ??= ''; quoted = true; for (i++; i < s.length && s[i] !== '"'; i++) { if (s[i] === '\\' && '"\\$`'.includes(s[i + 1] ?? '')) i++; cur += s[i]; } }
+    else if (ch === '\\') { cur ??= ''; quoted = true; if (s[++i] !== undefined && s[i] !== '\n') cur += s[i]; }
+    else if (ch === '#' && cur === null) { const e = s.indexOf('\n', i); i = e < 0 ? s.length : e - 1; }
+    else if (ch === '\n' || ch === ';' || ch === '|' || ch === '(' || ch === ')' || ch === '`' || (ch === '&' && s[i + 1] !== '>')) {
+      sep();
+      if (ch === '\n') while (pend.length) { const d = pend.shift(); let k = i + 1; for (;;) { const e = s.indexOf('\n', k), line = s.slice(k, e < 0 ? s.length : e); k = e < 0 ? s.length : e + 1; if (e < 0 || line.trim() === d) break; } i = k - 1; }
+    }
+    else if (ch === '>' || ch === '<' || ch === '&') {
+      if (cur !== null && !quoted && /^\d+$/.test(cur)) cur = null; else word();
+      if (ch === '&') i++; // &>
+      if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { hd = true; i++; if (s[i + 1] === '-') i++; } else if (ch === '<' && s[i + 1] === '<') i += 2; // << heredoc delimiter, <<< here-string
+      else if (s[i + 1] === '>' || s[i + 1] === '|' || s[i + 1] === '&') i++; // >> >| >& <>
+      mode = ch === '<' ? 'in' : 'out';
+    }
+    else if (/\s/.test(ch)) word();
+    else cur = (cur ?? '') + ch;
+  }
+  sep();
+  return cmds;
+}
+
+const WRAP = /^(sudo|doas|command|exec|nohup|time|nice|env|builtin|setsid)$/;
+const INTERP = /^(node|nodejs|bun|deno|python[\d.]*|ruby|perl)$/;
+const POLICY_NAME = /\.harness\.json|\.claude\/settings(\.local)?\.json|\.claude['"]?\s*,\s*['"]settings(\.local)?\.json/i;
+// Best-effort list of write/delete calls in an inline script (node/python/ruby/perl/deno/bun). Reads are not matched.
+const WRITE_CALL = /writeFile|appendFile|writeSync|createWriteStream|rename|unlink|\brmSync|\brm\b|copyFile|symlink|\blink\(|truncate|write_text|write_bytes|File\.(write|delete|rename|open)|os\.(remove|rename|replace)|shutil\.|Deno\.write|Bun\.write|,\s*['"](?:[wax]|r\+)[bt]?\+?['"]/;
+const P = (x) => isPolicyPath(x) || policyGlobHit(x);
+const base = (x) => x.replace(/\/+$/, '').split('/').pop();
+// A whole .claude directory (any parent, ~ and $HOME too). Replacing, moving or deleting it replaces settings.json inside it, so it reports the settings hit.
+const CLAUDE_DIR_HIT = '.claude/settings.json';
+const isClaudeDir = (x) => base(x.replace(/(\/\.)+\/?$/, '')).toLowerCase() === '.claude';
+const recursive = (flags) => flags.some((f) => f === '--recursive' || /^-[a-zA-Z]*[rR]/.test(f) && !f.startsWith('--'));
+const isDirish = (x) => /(^|\/)\.{1,2}\/?$|\/$/.test(x);
+
+// Split args into flags and positionals; -t/--target-directory VALUE (cp, mv, ln, install) is returned as t.
+function split(args, targetDir) {
+  const flags = [], pos = []; let t = null, rest = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (rest || !a.startsWith('-') || a === '-') pos.push(a);
+    else if (a === '--') rest = true;
+    else if (targetDir && (a === '-t' || a === '--target-directory')) t = args[++i] ?? null;
+    else if (targetDir && a.startsWith('--target-directory=')) t = a.slice(19);
+    else flags.push(a);
+  }
+  return { flags, pos, t };
+}
+
+// One simple command: returns { hit: offending policy path | null, through: paths written through (symlink check) }.
+function oneCommand({ w, r }, depth, out) {
+  for (const x of r) { out.through.push(x); if (P(x)) out.hit ??= x; }
+  let i = 0;
+  while (i < w.length && (/^[A-Za-z_]\w*=/.test(w[i]) || WRAP.test(base(w[i])))) { const wrap = WRAP.test(base(w[i])); i++; while (wrap && w[i]?.startsWith('-')) i++; }
+  const name = base(w[i] ?? ''); let args = w.slice(i + 1);
+  if (!name) return;
+  const hitAny = (xs) => { for (const x of xs) if (P(x)) out.hit ??= x; };
+  if (/^(sh|bash|zsh|dash|ksh)$/.test(name)) { const k = args.findIndex((a) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a)); if (k >= 0 && args[k + 1] && depth < 3) scan(args[k + 1], depth + 1, out); return; }
+  if (name === 'eval') { if (depth < 3) scan(args.join(' '), depth + 1, out); return; }
+  if (name === 'git') {
+    while (args[0]?.startsWith('-')) args = args.slice(/^-(C|c)$|^--(git-dir|work-tree|exec-path)$/.test(args[0]) ? 2 : 1);
+    const sub = args[0], { flags, pos } = split(args.slice(1));
+    const dirHit = () => { if (pos.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT; };
+    if (sub === 'checkout') { hitAny(pos); dirHit(); }
+    else if (sub === 'restore') { if (!(flags.some((f) => f === '--staged' || f === '-S') && !flags.some((f) => f === '--worktree' || f === '-W'))) { hitAny(pos); dirHit(); } }
+    else if (sub === 'mv') { hitAny(pos); dirHit(); }
+    else if (sub === 'rm') { if (!flags.includes('--cached')) { hitAny(pos); dirHit(); } }
+    return;
+  }
+  if (INTERP.test(name)) {
+    const text = args.join(' '), inline = args.some((a, k) => (k === 0 && name === 'deno' && a === 'eval') || /^(--eval|--print|-[a-zA-Z]*[ecEp])$/.test(a));
+    if (inline && POLICY_NAME.test(text) && WRITE_CALL.test(text)) out.hit ??= (text.match(POLICY_NAME)[0].replace(/['"\s,]+/, '/'));
+    if (/^(perl|ruby)$/.test(name) && args.some((a) => /^-(?![MIm])[A-Za-z]*i\S*$/.test(a))) { const e = args.findIndex((a) => /^-[A-Za-z]*[eE]$/.test(a)); hitAny(args.filter((a, k) => !a.startsWith('-') && k !== e + 1)); }
+    return;
+  }
+  const { flags, pos, t } = split(args, /^(cp|mv|ln|install)$/.test(name));
+  if (name === 'tee') { for (const x of pos) { out.through.push(x); if (P(x)) out.hit ??= x; } return; }
+  if (/^(cp|install|rsync|ln|mv)$/.test(name)) {
+    const dest = t ?? pos.at(-1), srcs = t ? pos : pos.slice(0, -1);
+    if (dest === undefined) { if (name === 'ln') hitAny(pos); return; }
+    if (name !== 'mv') out.through.push(dest);
+    const pol = srcs.map(base).filter((b) => /^(\.harness\.json|settings(\.local)?\.json)$/i.test(b));
+    if (pol.length) out.into.push({ dest, names: pol }); // pre-bash checks whether dest is an existing directory
+    if (P(dest)) out.hit ??= dest;
+    else if (base(dest) === '.claude' && srcs.some((x) => /^settings(\.local)?\.json$/i.test(base(x)))) out.hit ??= '.claude/settings.json';
+    else if (isDirish(dest) && srcs.some((x) => base(x).toLowerCase() === '.harness.json')) out.hit ??= '.harness.json';
+    if (name === 'ln' || name === 'mv') hitAny(pos);
+    if (name === 'mv' ? [...srcs, dest].some(isClaudeDir) : isClaudeDir(dest) && srcs.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT;
+    return;
+  }
+  if (/^(rm|unlink|truncate|shred)$/.test(name)) { if (name !== 'rm' && name !== 'unlink') out.through.push(...pos); hitAny(pos); if (name === 'rm' && recursive(flags) && pos.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT; return; }
+  if (name === 'dd') { for (const a of args) if (a.startsWith('of=')) { out.through.push(a.slice(3)); if (P(a.slice(3))) out.hit ??= a.slice(3); } return; }
+  if (name === 'sed') { if (flags.some((f) => /^-[A-Za-z]*i|^--in-place/.test(f))) { const sc = flags.filter((f) => /^-[A-Za-z]*[ef]$|^--(expression|file)$/.test(f)).length; hitAny(pos.slice(sc || flags.some((f) => /^-[A-Za-z]*[ef]\S|^--(expression|file)=/.test(f)) ? sc : 1)); } return; } // script words (the first positional, or one per -e/-f) are not files
+  if (/^(ed|ex|vim|vi|nano|emacs)$/.test(name)) hitAny(pos);
+}
+
+function scan(text, depth, out) { for (const c of simpleCommands(text)) oneCommand(c, depth, out); return out; }
+// { hit, through }: hit is the first policy path the command writes, creates, replaces, moves, links or deletes; through lists paths written through (symlink check in pre-bash), into lists copies of a policy-named file to a destination that is a directory if it exists (checked in pre-bash).
+export const analyzeWrites = (cmd) => scan(String(cmd), 0, { hit: null, through: [], into: [] });
+export const policyWriteReason = (cmd) => { const { hit } = analyzeWrites(cmd); return hit ? policyDeny(hit) : null; };

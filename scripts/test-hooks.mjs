@@ -1,7 +1,7 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -274,6 +274,104 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     assert.equal(JSON.parse(execFileSync('node', [join(hooks, 'session-start.mjs')], { input: 'not json', cwd: tmpdir() }).toString()).hookSpecificOutput.hookEventName, 'SessionStart', 'j: garbage input still valid');
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
+  }
+}
+
+// SID-66: the policy files (.harness.json, .claude/settings*.json) are not written from the shell either (redirects, tee, cp/mv/ln/install/rsync, rm, in-place editors, git checkout/restore, interpreter one-liners that write).
+// Deny messages say what to do instead; narrow rules, so normal work stays allowed. Symlink defence and the SID-65 backstop are covered too.
+{
+  const made = [];
+  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid66-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const mkNone = (name) => { // repo on feat/x, bare origin with main only: no policy committed
+    const d = scratch(name);
+    sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
+    return d;
+  };
+  const verdict = (d, c) => { const r = run('pre-bash.mjs', bash(c, d)); return { deny: r?.hookSpecificOutput?.permissionDecision === 'deny', why: reasonOf(r) }; };
+  const sid66Deny = [
+    "cat > .harness.json <<'J'\n{\"allowMerge\":true}\nJ", "echo '{}' > .harness.json", "echo '{}' >> ./.harness.json", 'printf x >| .harness.json', 'echo x 1> .harness.json', 'echo x &> .harness.json', 'echo x>.harness.json',
+    'cp /dev/null .claude/settings.json', 'cp templates/harness.json .harness.json', 'cp x/settings.json .claude/', 'cp -t .claude x/settings.json', 'install -m644 a .harness.json', 'rsync a .claude/settings.local.json',
+    'ln -sf /tmp/p .harness.json', 'ln -s .harness.json p', 'mv .harness.json old.json', 'mv new.json .harness.json', 'rm .harness.json', 'rm -f .claude/settings.local.json', 'truncate -s0 .harness.json', 'dd if=a of=.harness.json',
+    'tee .harness.json', 'echo x | tee -a .claude/settings.json', 'sed -i s/false/true/ .harness.json', 'sed -i.bak s/a/b/ .claude/settings.json', "sed -i -e 's/.*/x/' .harness.json", 'perl -pi -e s/a/b/ .harness.json',
+    'git checkout origin/feat -- .harness.json', 'git checkout feat .harness.json', 'git -C . checkout main -- .harness.json', 'git restore --source=feat .harness.json', 'git restore .claude/settings.json', 'git mv a .harness.json', 'git rm .harness.json',
+    'sh -c "echo {} > .harness.json"', "bash -c 'cp a .claude/settings.json'", `node -e "require('fs').writeFileSync('.harness.json','{}')"`, `python3 -c "open('.harness.json','w').write('{}')"`, `python3 -c "import os; os.unlink('.harness.json')"`,
+    // whole .claude directory: delete, move, replace, restore
+    'rm -rf .claude', 'rm -r .claude/', 'rm -R ~/.claude', 'rm --recursive $HOME/.claude', 'rm -fr sub/.claude', 'rm -rf ./.claude/.', 'mv .claude old', 'mv old .claude', 'mv .claude ~/bak', 'mv x -t .claude',
+    'cp -r other/.claude .claude', 'cp -r ../a/.claude .claude/', 'rsync -a --delete other/.claude/ .claude/', 'ln -sfn ../shared/.claude .claude', 'git checkout main -- .claude', 'git checkout origin/feat .claude', 'git checkout -- .claude',
+    'git restore .claude', 'git restore --source=main --worktree .claude', 'git restore -S -W .claude', 'git rm -r .claude', 'git rm -rf .claude', 'git mv .claude old', 'sh -c "rm -rf .claude"', 'cd sub && rm -rf .claude',
+    // a policy-named file copied into a directory path with a trailing slash (backup/.harness.json is itself a policy path)
+    'cp .harness.json backup/', 'mv .harness.json backup/',
+    'echo x > sub/dir/.harness.json', 'echo x > "$HOME/.claude/settings.json"', 'echo x > ~/.claude/settings.json', 'echo x > .harness.*', 'cp a .claude/settings*.json', 'cd sub && echo x > ../.harness.json', "echo ok && echo '{}' > .harness.json",
+  ];
+  // Allowed: reads, copies elsewhere, index-only git, and ordinary writes. `echo "> .harness.json is policy" | wc -l` is allowed on purpose: the redirect is inside quotes, so it is text.
+  const sid66Allow = [
+    'echo x > src/a.ts', 'echo x > settings.json', 'echo x > config/settings.json', 'cat .harness.json', 'jq . .harness.json', 'cp .harness.json /tmp/h.json', 'cp templates/harness.json docs/harness.example.json', 'git add .harness.json',
+    'git diff -- .harness.json', 'git log -p -- .harness.json', 'git show origin/main:.harness.json', 'git show origin/main:.harness.json > /tmp/policy.json', 'git rm --cached .harness.json', 'git restore --staged .harness.json',
+    'grep -n allowMerge .harness.json', 'sed -n 1p .harness.json', 'sed -i s/a/b/ src/a.ts', "sed -i 's/.*/x/' src/a.ts", 'npm test 2>&1 | tee test.log', 'npm run build > build.log', 'npm run lint', 'npx tsc --noEmit', 'flutter test', 'make',
+    'node -e "console.log(1)"', 'python3 -c "print(1)"', `node -e "console.log(require('./.harness.json'))"`, `python3 -c "import json;print(json.load(open('.harness.json')))"`, 'cp -r src/ dist/', 'mv a.txt b.txt', 'rm -f build.log', 'rm .*.swp',
+    'ln -s ../lib lib2', 'git checkout main', 'git checkout -- a.txt', 'git restore a.txt', 'git commit -m "update .harness.json docs"', 'echo "> .harness.json is policy" | wc -l', 'vim src/a.ts', 'touch notes.md', 'mkdir -p .claude/commands',
+    'rm -rf .claude/commands', 'rm .claude/commands/x.md', 'mkdir -p .claude/agents', 'cp x.md .claude/commands/', 'ls .claude', 'cat .claude/settings.json', 'rm -rf build .cache', 'git checkout -- src', 'rm .claude', 'rm -rf .claudeX', 'cp -r src .claude/agents',
+    'cp -r .claude /tmp/claude-backup', 'git rm -r --cached .claude', 'git restore --staged .claude', 'git rm -r src', 'git checkout main -- src', 'mv x.md .claude/commands/', 'cp .harness.json nodir', 'cp settings.json sub', 'cp x.md sub',
+    'echo x > .claude/commands/ship.md', "cat > docs/h.md <<'EOF'\nrm .harness.json\necho x > .harness.json\nEOF",
+  ];
+  try {
+    // a + b. every write form is denied with and without a committed policy, and says what to do; ordinary commands are not touched
+    const none = mkNone('none');
+    for (const [label, d] of [['no policy', none], ['committed policy', repo]]) {
+      for (const c of sid66Deny) {
+        const v = verdict(d, c);
+        assert.ok(v.deny, `${label}: must deny: ${c}`);
+        const head = v.why.split('\n  in:')[0];
+        if (/settings|\.claude/.test(c)) assert.match(head, /holds Claude Code permissions.*ask the human/, `${label}: ${c}`);
+        else { assert.match(head, /is the harness policy; agents do not write it/, `${label}: ${c}`); assert.match(head, /templates\/harness\.json/, c); assert.match(head, /git fetch origin/, c); }
+        assert.match(v.why, /policy: /, `${label}: policyNote on ${c}`);
+      }
+      for (const c of sid66Allow) assert.ok(!verdict(d, c).deny, `${label}: must allow: ${c} (${verdict(d, c).why})`);
+    }
+
+    // b2. (mv/ln of .harness.json are already denied as sources) a policy-named source copied into an EXISTING directory given without a slash lands as dir/<name>: denied when that is a policy path (checked in pre-bash against the real directory)
+    const into = ['cp .harness.json sub', 'cp -t sub .harness.json', 'rsync .harness.json sub', 'install .harness.json sub', 'cp x/.harness.json ./sub'];
+    for (const [label, d] of [['no policy', none], ['committed policy', repo]]) {
+      mkdirSync(join(d, 'sub'), { recursive: true });
+      for (const c of into) {
+        const v = verdict(d, c);
+        assert.ok(v.deny, `${label}: must deny (existing dir): ${c}`);
+        assert.match(v.why, /sub\/\.harness\.json is the harness policy; agents do not write it.*\n  \("(\.\/)?sub" is an existing directory, so this writes sub\/\.harness\.json\)/s, `${label}: ${c}`);
+      }
+      for (const c of ['cp x/settings.json .claude', 'cp x/settings.json sub/.claude']) assert.match(verdict(d, c).why, /ask the human/, `${label}: ${c}`);
+      for (const c of ['cp .harness.json /tmp/h.json', 'cp .harness.json nodir', 'cp .harness.json sub2', 'cp settings.json sub', 'cp x.md sub']) assert.ok(!verdict(d, c).deny, `${label}: must allow: ${c}`);
+    }
+
+    // c. the issue's repro: the heredoc is refused; even if a human or another route lands an untracked .harness.json, it grants nothing (SID-65)
+    const c = mkNone('c');
+    assert.ok(verdict(c, "cat > .harness.json <<'J'\n{\"allowMerge\":true}\nJ").deny, 'c: heredoc write refused');
+    assert.ok(!existsSync(join(c, '.harness.json')), 'c: the hook never writes');
+    writeFileSync(join(c, '.harness.json'), JSON.stringify({ allowMerge: true }));
+    assert.match(verdict(c, 'gh pr merge 1').why, /merging or closing a PR/, 'c: a successful bypass still grants nothing');
+
+    // d. a write through an existing symlink to a policy file is refused
+    const d = mkNone('d');
+    writeFileSync(join(d, '.harness.json'), '{}');
+    sh(d, 'ln -s .harness.json p && ln -s nowhere dangling && echo y > q');
+    const vd = verdict(d, 'echo x > p');
+    assert.ok(vd.deny, 'd: write through a symlink to .harness.json denied');
+    assert.match(vd.why, /p is a symlink to .*\.harness\.json is the harness policy/);
+    assert.ok(verdict(d, 'tee -a p').deny && verdict(d, 'cp a p').deny, 'd: tee and cp through the symlink denied');
+    for (const ok of ['echo x > q', 'echo x > dangling', 'cat p', 'rm p']) assert.ok(!verdict(d, ok).deny, `d: must allow: ${ok}`);
+
+    // e. policy.mjs (Edit/Write/MultiEdit): same files, new message; other files untouched
+    const home = (await import('node:os')).homedir();
+    for (const tool of ['Edit', 'Write', 'MultiEdit'])
+      for (const [f, re] of [[join(repo, '.harness.json'), /templates\/harness\.json.*git fetch origin/], [join(repo, '.claude/settings.json'), /ask the human/], [join(repo, '.claude/settings.local.json'), /ask the human/], ['./.harness.json', /templates\/harness\.json/], [join(home, '.claude/settings.json'), /ask the human/]]) {
+        const r = run('policy.mjs', { tool_name: tool, tool_input: { file_path: f }, cwd: repo });
+        assert.equal(r?.hookSpecificOutput?.permissionDecision, 'deny', `${tool} ${f}`);
+        assert.match(reasonOf(r), re, `${tool} ${f}`);
+      }
+    for (const f of ['.claude/commands/x.md', 'src/settings.json', 'docs/harness.json'])
+      assert.ok(!denied('policy.mjs', { tool_name: 'Write', tool_input: { file_path: join(repo, f) }, cwd: repo }), `policy allows ${f}`);
+  } finally {
+    for (const dir of made) rmSync(dir, { recursive: true, force: true });
+    rmSync(join(repo, 'sub'), { recursive: true, force: true });
   }
 }
 

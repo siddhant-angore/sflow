@@ -1,10 +1,11 @@
 // PreToolUse(Bash): guard first (irreversible git and release actions), then the push gate from .harness.json.
 // Any internal error denies: the hook fails closed.
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, PLACEHOLDER, policyNote, readEvent, record, segments } from './lib.mjs';
-import { envReason, reason } from './guard-rules.mjs';
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { config, currentBranch, deny, git, gitDir, isPolicyPath, PLACEHOLDER, policyDeny, policyNote, readEvent, record, segments } from './lib.mjs';
+import { analyzeWrites, envReason, reason } from './guard-rules.mjs';
 
 const ev = readEvent();
 if (ev.tool_name !== 'Bash') process.exit(0);
@@ -15,6 +16,26 @@ try {
   const branch = currentBranch(cfg.root);
   const env = envReason(cmd);
   if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
+  // SID-66: no shell write to a policy file. Runs on the whole command (segments() splits inside quotes), whether or not a policy is committed.
+  const w = analyzeWrites(cmd);
+  const line = cmd.split('\n')[0].slice(0, 200);
+  if (w.hit) { deny(`harness guard: ${policyDeny(w.hit)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  // Defence in depth: a write through an existing symlink whose real path is a policy file.
+  for (const t of w.through) {
+    if (t.includes('$')) continue;
+    let real = null;
+    try { real = realpathSync(resolve(ev.cwd ?? cfg.root, t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
+    if (real && isPolicyPath(real)) { deny(`harness guard: ${t} is a symlink to ${policyDeny(real)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  }
+  // A policy-named source copied into an existing directory given without a trailing slash: `cp .harness.json sub` writes sub/.harness.json.
+  for (const { dest, names } of w.into) {
+    if (dest.includes('$')) continue;
+    const abs = resolve(ev.cwd ?? cfg.root, dest.replace(/^~(?=\/|$)/, homedir()));
+    let isDir = false;
+    try { isDir = statSync(abs).isDirectory(); } catch {}
+    const joined = names.map((n) => join(dest, n)).find(isPolicyPath);
+    if (isDir && joined) { deny(`harness guard: ${policyDeny(joined)}\n  ("${dest}" is an existing directory, so this writes ${joined})\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  }
   const segs = segments(cmd);
   for (const seg of segs) {
     const why = reason(seg, cfg, branch);
