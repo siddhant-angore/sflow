@@ -3,16 +3,17 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { config, currentBranch, deny, git, gitDir, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, segments } from './lib.mjs';
-import { analyzeWrites, envReason, reason } from './guard-rules.mjs';
+import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
 if (ev.tool_name !== 'Bash') process.exit(0);
 const cmd = String(ev.tool_input?.command ?? '');
 try {
   const cfg = config(ev.cwd);
-  const branch = cfg.root ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
+  // Branch unknown (null) when there is no root, or the command retargets git at another repo or dir: the hook cwd's branch is not the one pushed, so a push must name its branch.
+  const branch = cfg.root && !retargets(cmd) ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
   const env = envReason(cmd);
   if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
   // SID-66: no shell write to a policy file. Runs on the whole command (segments() splits inside quotes), whether or not a policy is committed.
@@ -30,7 +31,8 @@ try {
   const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
   const real = (p) => { try { return realpathSync(p); } catch { return p; } };
   // No root (git can't read the repo, or there is none): the cwd stands in for the root, so copies onto ./.harness.json are refused and copies out (cp .harness.json /tmp/) stay allowed.
-  const rootDir = cfg.root ?? resolve(ev.cwd ?? process.cwd());
+  // No work tree (cwd inside .git, or core.bare): cfg.root is the git dir, so the work tree is its parent when it is named .git, else the cwd.
+  const rootDir = cfg.noWorkTree ? (basename(cfg.root) === '.git' ? dirname(cfg.root) : resolve(ev.cwd ?? process.cwd())) : cfg.root ?? resolve(ev.cwd ?? process.cwd());
   const rootPolicy = [rootDir, real(rootDir)].map((r) => resolve(r, '.harness.json').toLowerCase());
   const landsOnPolicy = (p) => rootPolicy.includes(p.toLowerCase()) || (isPolicyPath(p) && !/\.harness\.json$/i.test(p));
   for (const { dest, names, dir, cds } of w.into) {
@@ -53,6 +55,7 @@ try {
 
   const pushes = segs.some((s) => /^git\s+push\b|^gh\s+pr\s+(create|ready)\b/.test(s));
   if (!pushes || !cfg.present) process.exit(0);
+  if (cfg.noWorkTree) { deny('harness gate: git sees no work tree here (the shell is inside .git, or core.bare is set), so the gate can\'t check what you push; run the push from the repository\'s work tree (cd to its root). If core.bare is set on a normal checkout, ask a human to fix the repo config.'); process.exit(0); }
   if (segs.some((s) => /^git\s+(add|commit)\b/.test(s))) { deny('harness gate: commit in one command and push in the next, so the gate checks the commit it records'); process.exit(0); }
   if (git(cfg.root, 'status', '--porcelain', '--untracked-files=no')) { deny('harness gate: tracked changes are uncommitted; commit them first so the gate checks what you push'); process.exit(0); }
   if (cfg.gate.some((c) => c.includes(PLACEHOLDER))) { deny(`harness gate: .harness.json still has the placeholder gate; set the project checks on ${cfg.source}`); process.exit(0); }
@@ -95,7 +98,7 @@ function secretHits(root, base) {
     ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
   ];
   let diff = '';
-  try { diff = execSync(`git --no-replace-objects diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
+  try { diff = execSync(`git --no-replace-objects -c core.fsmonitor=false diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
   const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
   return patterns.filter(([, re]) => re.test(added)).map(([n]) => n);
 }

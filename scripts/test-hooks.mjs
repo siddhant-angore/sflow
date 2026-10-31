@@ -1,7 +1,7 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,6 +39,7 @@ const mustDeny = [
   'git config includeIf.gitdir:/x/.path /tmp/x', 'git -c core.bare=true status', 'git -c include.path=/tmp/x fetch', 'git -c core.bare status', "git -c 'core.bare' status", 'git --config-env=core.bare=X status',
   'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.bare GIT_CONFIG_VALUE_0=true git status', "GIT_CONFIG_PARAMETERS=\"'core.bare'='true'\" git status",
   'git push . HEAD:refs/remotes/origin/main', 'git push . evil:main', 'git push ./ x:y', 'git push origin HEAD:refs/remotes/origin/main', 'git push origin x:refs/replace/abc',
+  'FOO=1 git push --force origin feat/x', 'A="x y" git push origin main', 'env FOO=1 git push -f',
   'git fast-import', 'git fast-import --force < dump', 'echo "update refs/heads/tmp HEAD" | git update-ref --stdin', 'git update-ref --stdin < f', 'git update-ref -z --stdin',
 ];
 for (const c of mustDeny) assert.ok(denied('pre-bash.mjs', bash(c)), `must deny: ${c}`);
@@ -52,6 +53,7 @@ const mustAllow = [
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
   'git replace -l', 'git replace --list', 'git symbolic-ref -q HEAD', 'git symbolic-ref HEAD refs/heads/feat/x', 'git symbolic-ref -m switch HEAD refs/heads/feat/x',
   'git config --get core.bare', 'git config core.bare', 'git config --get-all include.path', 'git config -l', 'git config core.autocrlf false', 'git -c core.autocrlf=false status', 'git push origin feat/x:feat/y', 'git push origin HEAD:refs/heads/feat/x',
+  'git push origin feat/x', 'git push -u origin feat/x', // SID-65: branch known and named, stays allowed
   ...allowRemote, // SID-65: remote-tracking rules must not touch ordinary fetch/pull/config/gh reads
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
@@ -424,11 +426,25 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
       const setupCmd = setup(d);
       assert.ok(verdict(d, setupCmd).deny, `k8 ${tag}: the guard refuses the setup command`);
       sh(d, setupCmd); // bypass the guard
+      if (tag === 'bare') { // git can still find the git dir, so the committed policy is read through it (no work tree)
+        const c8b = config(d);
+        assert.equal(c8b.root, realpathSync(join(d, '.git')), 'k8 bare: root is the absolute git dir');
+        assert.ok(c8b.noWorkTree === true && !c8b.unreadable && c8b.present === true, 'k8 bare: noWorkTree, readable, committed policy in force');
+        assert.ok(!verdict(d, 'gh pr merge 1').deny, 'k8 bare: the committed policy (allowMerge true) is in force');
+        for (const cmd of ['git push -f origin HEAD:main', 'git push --force origin feat/x', 'git reset --hard HEAD~1']) assert.ok(verdict(d, cmd).deny, `k8 bare: must deny: ${cmd}`);
+        for (const cmd of ['ls', 'gh pr view 1 -R o/r', 'npm test', 'git status']) assert.ok(!verdict(d, cmd).deny, `k8 bare: must allow: ${cmd}`);
+        continue;
+      }
       const c8 = config(d);
       assert.ok(c8.root === null && c8.unreadable === true, `k8 ${tag}: git can't read the repo`);
       for (const cmd of ['git push -f origin HEAD:main', 'git push --force origin feat/x', 'gh pr merge 1 -R o/r', 'gh pr merge 1', 'git reset --hard HEAD~1'])
         assert.ok(verdict(d, cmd).deny, `k8 ${tag}: must deny: ${cmd}`);
       assert.match(verdict(d, 'gh pr merge 1').why, /could not read a repository/, `k8 ${tag}: message says git could not read the repository`);
+      if (tag === 'fmt') for (const cmd of ['gh pr merge 1', 'gh pr close 1']) {
+        const w = verdict(d, cmd).why;
+        assert.match(w, /guard: git can't read this repository, so strict defaults apply; fix the repo config \(core\.bare, core\.repositoryformatversion, core\.worktree, include\.path\)/, `k8 fmt: ${cmd} leads with the unreadable wording`);
+        assert.doesNotMatch(w, /set allowMerge/, `k8 fmt: ${cmd} does not suggest allowMerge`);
+      }
       for (const cmd of ['ls', 'gh pr view 1 -R o/r', 'npm test', 'git status']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: must allow: ${cmd}`);
       // SID-66 shell-write rules still apply with no readable repo (the cwd stands in for the root); reads and copies out stay allowed
       for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .', 'cp a .claude/settings.json']) assert.ok(verdict(d, cmd).deny, `k8 ${tag}: SID-66 must deny: ${cmd}`);
@@ -440,6 +456,83 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
     for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must deny: ${cmd}`);
     for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'cp .harness.json backup/']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must allow: ${cmd} (${verdict(nonRepo, cmd).why})`);
+
+    // k9. Branch unknown: the hook cwd's branch is not what a push updates when git has no work tree (cwd inside .git, core.bare) or the command
+    // targets another repository. Then a push must name its branch. With the branch known and no retargeting, behaviour is unchanged.
+    const { retargets } = await import(join(hooks, 'guard-rules.mjs'));
+    const { currentBranch } = await import(join(hooks, 'lib.mjs'));
+    const NAME = /name the branch: git push origin <branch>/;
+    for (const c of ['git -C /x push', 'git -C/x push', 'git --git-dir=/x/.git push', 'git --git-dir /x/.git --work-tree /x push', 'GIT_DIR=/x/.git git push', 'GIT_WORK_TREE=/x git push', 'export GIT_DIR=/x; git push', 'env GIT_DIR=/x git push',
+      'cd /x && git push', 'cd /x; git push origin HEAD', 'pushd /x && git push', '(cd /x && git push)', 'sh -c "cd /x && git push"', 'git -c a=b -C /x push', 'git --no-pager -C /x push']) assert.ok(retargets(c), `retargets: ${c}`);
+    for (const c of ['git push origin feat/x', 'git push', 'git commit -C abc', 'git log -C', 'git commit -m "cd fix" && git push', 'git -c a=b push', 'git --no-pager push origin feat/x', 'cd /x', 'git push && cd /x', 'echo hi && git push -u origin feat/x']) assert.ok(!retargets(c), `does not retarget: ${c}`);
+
+    // 1. cwd inside .git, on main, no policy (strict defaults): the branch is read from the git dir, so the protected-branch rule applies.
+    const k9a = mk('k9a');
+    sh(k9a, 'git checkout -q main');
+    const inGit = join(k9a, '.git');
+    assert.equal(currentBranch(config(inGit).root), 'main', 'k9 1: branch known from inside .git');
+    for (const c of ['git push', 'git push origin', 'git push origin HEAD', 'git push origin @', 'git push -u origin', 'git push --force-with-lease', 'git push --force-with-lease=main:abc', 'git push origin main'])
+      assert.ok(verdict(inGit, c).deny, `k9 1: must deny: ${c}`);
+    assert.match(verdict(inGit, 'git push origin HEAD').why, /you are on protected branch main; create a feature branch and push that/, 'k9 1: protected-branch message, branch now known');
+    assert.ok(!verdict(inGit, 'git push origin feat/x').deny && !verdict(inGit, 'git push origin HEAD:feat/x').deny, 'k9 1: an explicit non-protected destination is fine (no policy, no gate)');
+    // e2e: the verdict is a deny, so the push never runs and origin main stays put.
+    const originMain = () => sh(k9a, 'git --git-dir="$(pwd).origin.git" rev-parse refs/heads/main');
+    const before = originMain();
+    assert.ok(verdict(inGit, 'git push origin HEAD').deny && originMain() === before, 'k9 1: origin main did not move');
+    // SID-66 with no work tree: the repo-root .harness.json is the git dir's parent, not <git dir>/.harness.json.
+    for (const c of ['cp x/.harness.json ..', 'cp x/.harness.json ../', 'echo x > ../.harness.json']) assert.ok(verdict(inGit, c).deny, `k9 1: SID-66 must deny from inside .git: ${c}`);
+    for (const c of ['cp ../.harness.json /tmp/', 'cat ../.harness.json']) assert.ok(!verdict(inGit, c).deny, `k9 1: SID-66 must allow from inside .git: ${c}`);
+
+    // 2. committed policy protects develop; checked out on develop; cwd inside .git.
+    const k9b = mk('k9b');
+    policyOn(k9b, 'main', { protectedBranches: ['develop'] });
+    sh(k9b, 'git checkout -q -b develop');
+    const inGitB = join(k9b, '.git');
+    const c9 = config(inGitB);
+    assert.ok(c9.present === true && c9.noWorkTree === true && currentBranch(c9.root) === 'develop', 'k9 2: policy read through the git dir, branch develop');
+    for (const c of ['git push', 'git push origin HEAD', 'git push origin develop']) assert.ok(verdict(inGitB, c).deny, `k9 2: must deny: ${c}`);
+    assert.match(verdict(inGitB, 'git push origin feat/y').why, /git sees no work tree here .* run the push from the repository's work tree/, 'k9 2: a push that would run the gate says what to do');
+
+    // 3. core.bare=true on a normal checkout (set past the guard).
+    const k9c = mk('k9c');
+    sh(k9c, 'git checkout -q main && git config core.bare true');
+    assert.equal(config(k9c).noWorkTree, true, 'k9 3: no work tree');
+    for (const c of ['git push', 'git push origin HEAD']) assert.ok(verdict(k9c, c).deny, `k9 3: must deny: ${c}`);
+
+    // 4. cross-repo: cwd is A on feat/x, the push lands in B, which is on main.
+    const k9d = mk('k9d'), B = mk('k9dB');
+    sh(B, 'git checkout -q main');
+    for (const c of [`git -C ${B} push`, `git -C ${B} push origin`, `git -C ${B} push origin HEAD`, `cd ${B} && git push`, `cd ${B}; git push origin HEAD`, `git --git-dir=${B}/.git push`,
+      `git --git-dir ${B}/.git --work-tree ${B} push`, `GIT_DIR=${B}/.git git push`, `GIT_WORK_TREE=${B} git push`]) {
+      const v = verdict(k9d, c);
+      assert.ok(v.deny && NAME.test(v.why), `k9 4: must deny with the name-the-branch message: ${c} (${v.why})`);
+    }
+    for (const c of [`git -C ${B} push origin feat/y`, `cd ${B} && git push -u origin feat/y`, `git -C ${B} status`, `cd ${B} && git log -1`]) assert.ok(!verdict(k9d, c).deny, `k9 4: must allow: ${c}`);
+    assert.ok(verdict(k9d, 'git -C . push --force origin feat/x').deny, 'k9 4: force still denied');
+
+    // 5. over-blocking guard: normal cwd on feat/x, nothing retargeted.
+    for (const c of ['git push', 'git push -u origin feat/x', 'git push origin feat/x', 'git push origin HEAD', 'git push origin @']) assert.ok(!verdict(k9d, c).deny, `k9 5: must allow: ${c}`);
+    assert.ok(verdict(k9d, 'git push origin main').deny, 'k9 5: main still denied');
+
+    // 6. allowMerge is honoured only as the boolean true.
+    for (const [v, want] of [['false', true], [1, true], ['true', true], [true, false]]) {
+      const m = mk('k9m');
+      policyOn(m, 'main', { allowMerge: v });
+      assert.equal(verdict(m, 'gh pr merge 1').deny, want, `k9 allowMerge ${JSON.stringify(v)}: merge ${want ? 'denied' : 'allowed'}`);
+    }
+
+    // 7. fsmonitor: a configured fsmonitor script must not run inside the hook (the gate's git status).
+    const k9f = mk('k9f');
+    policyOn(k9f, 'main', { gate: ['true'] });
+    const marker = join(k9f, 'fsmonitor-ran');
+    writeFileSync(join(k9f, 'fsm.sh'), `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(join(k9f, 'fsm.sh'), 0o755);
+    sh(k9f, `git config core.fsmonitor '${join(k9f, 'fsm.sh')}'`);
+    sh(k9f, 'git status --porcelain'); // sanity: git itself does run the script
+    assert.ok(existsSync(marker), 'k9 fsmonitor: sanity, git runs the script');
+    rmSync(marker);
+    assert.ok(!verdict(k9f, 'git push origin feat/x').deny, 'k9 fsmonitor: the gate push still passes');
+    assert.ok(!existsSync(marker), 'k9 fsmonitor: the hook did not run the fsmonitor script');
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }
