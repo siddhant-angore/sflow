@@ -1,1 +1,18 @@
-/private/var/folders/1g/7v03gmkx4b3dxjn6dq7dp8x80000gn/T/sflow-vendor/VeryGoodOpenSource__vgv-wingspan/e78608956d26777efcda2e6ecefb0a3e981fb115/skills/shared/references/clear-context-handoff.md
+# Clear Context Handoff
+
+When a "Clear context and [next step]" option is selected, output the following block (substituting the actual skill and document path) and then **stop**:
+
+```md
+To continue with a fresh context, run:
+
+/clear
+
+Then start <NEXT_ACTION> with:
+
+/<NEXT_SKILL> <DOC_PATH>
+```
+
+Where:
+- `<NEXT_ACTION>` — the verb for the next phase (e.g., "planning", "building")
+- `<NEXT_SKILL>` — the skill to invoke (e.g., `plan`, `build`)
+- `<DOC_PATH>` — the full path to the document produced in the current phase
