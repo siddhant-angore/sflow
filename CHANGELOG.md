@@ -8,24 +8,11 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 ## [Unreleased]
 
-> Entries marked "pending" come from open pull requests (#2, #3, #4) and are not merged. Entries marked "merged" are on main but not yet in a release. The release step moves them under a version heading.
+> Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
 ### Added
 
 - This changelog (SID-48).
-- GitHub Actions CI that runs `npm run check`, the routing check, `npm run test:hooks`, and a vendor drift job on pull requests and on `main`. [#2](https://github.com/siddhant-angore/sflow/pull/2) (SID-42), pending.
-- `npm run upstream`, a drift check of each pinned source against its upstream. Exit code 0 (no drift), 10 (drift), or 1 (error). Supports `--json`. Fails if a pinned SHA no longer exists upstream. Also adds a weekly upstream-drift workflow. [#4](https://github.com/siddhant-angore/sflow/pull/4) (SID-50), pending.
-- `make-bot-ui` skill, from the pstack source change below. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
-- A sflow-authored `SessionStart` hook, replacing the hooks that came with the port. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
-
-### Changed
-
-- pstack is now vendored from Lauren Tan (poteto)'s original in `cursor/plugins`, pinned at `9f844cd`, which is before the Orchestrate rewrite (`c742dd6`). It replaces the `michael-denyer/pstack-claude` port. The `cursor-team-kit` and `thermos` skills are sourced from their own plugins. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
-  - Pending pin change: `michael-denyer/pstack-claude` [`22b5e137e945`](https://github.com/michael-denyer/pstack-claude/commit/22b5e137e945cb65dd29dac5fc703c13d83a00aa) → `cursor/plugins` [`9f844cdaac06`](https://github.com/cursor/plugins/commit/9f844cdaac06aeaa1b2d17fbcb57e078979c6f99) (new source).
-
-### Removed
-
-- From the pstack source change: the `babysit` skill, `pi/`, `models.json`, and the port's hooks. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
 
 ### Fixed
 
@@ -54,7 +41,7 @@ Harness hooks, a loop brake, and a behavioral eval. Tag `v0.3.0` points at `5cf8
 - `scripts/build-workflows.mjs` builds the hook files; `scripts/check.mjs` was extended (one line).
 - Plugin version bumped 0.2.0 → 0.3.0 in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json`. All three agree at this tag.
 
-### Upstream pins
+**Upstream pins**
 
 No pin changed. The lock grew from 970 to 975 files; the five new entries are the `hooks/harness/*.mjs` files above, and `hooks/hooks.json` and a few playbook files changed hash because of the overlays. No vendored upstream file changed.
 
@@ -88,11 +75,11 @@ Flutter domain pack. Tag `v0.2.0` points at `8f00181`.
 - Flutter state standard is Bloc. Mocking: `mocktail` by default (no codegen); `mockito` generated mocks where a package already runs `build_runner` and the interface is large. One discipline for both: `thenAnswer` for async, mocks at boundaries only, `MockBloc` for blocs, never both libraries in one package.
 - `scripts/vendor.mjs` dereferences wingspan's `shared` references on vendoring; they are no longer vendored as a separate `wingspan-shared` skill directory.
 
-### Known issues
+**Known issues**
 
 - **Version mismatch.** The `v0.2.0` tag does not contain the 0.2.0 version bump. At the tag, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` still say `0.1.0`, so a `v0.2.0` checkout reports itself as 0.1.0. The bump is commit `2746be6` (`chore: version 0.2.0`), made 16 seconds after the tag was created (tag 15:33:21, commit 15:33:37 IST), and it is not in the tag. The tag was not moved. `v0.3.0` and later have consistent versions.
 
-### Upstream pins
+**Upstream pins**
 
 Three pins are unchanged from 0.1.0. Three sources are new. The lock grew from 776 to 970 files.
 
@@ -126,7 +113,7 @@ Initial release. Tag `v0.1.0` points at `a83b213`, which includes the initial im
 
 - The authored sflow skill is now installed at build time. The sync wipes `skills/` before vendoring, so an authored skill there was lost; authored skills now live under `workflows/<name>/` and the build copies them in. (`a83b213`)
 
-### Upstream pins
+**Upstream pins**
 
 Initial pin of all three sources.
 

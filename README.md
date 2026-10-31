@@ -70,6 +70,6 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - `npm run check` re-hashes every vendored and built file, validates the plugin, and prints the description-collision report.
 - To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/`, or `pi/` by hand.
 - To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`.
-- On release, add the entries to `CHANGELOG.md` (including upstream pin changes), bump the version in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` together, then tag the bump commit.
+- On release, add the entries to `CHANGELOG.md` (including upstream pin changes), bump the version in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` together, then create an annotated tag on the bump commit (`git tag -a vX.Y.Z -m "sflow vX.Y.Z"`) and push it.
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.
