@@ -1,13 +1,15 @@
 import { posix } from 'node:path';
-import { isPolicyPath, policyDeny, policyGlobHit, take, unwrap, WRAPPERS } from './lib.mjs';
+import { gitWrites, isPolicyPath, policyDeny, policyGlobHit, segments, sortOut, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
-const protectedToken = (tok, prot) => {
-  const dst = tok.replace(/^\+/, '').split(':').pop();
-  return prot.includes(dst) || prot.some((b) => dst === `refs/heads/${b}`);
+const headRef = (r) => r === 'HEAD' || r === '@';
+// The protected branch a refspec pushes to (+ stripped, no colon means dst = src, HEAD and @ resolve to the current branch), or null. viaHead: the name came from the checkout, not from the text.
+const protectedTarget = (tok, prot, branch) => {
+  const p = tok.replace(/^\+/, '').split(':'), raw = p.length > 1 ? p.pop() : p[0];
+  const dst = headRef(raw) ? branch : raw.replace(/^refs\/heads\//, '');
+  return prot.includes(dst) ? { name: dst, viaHead: headRef(raw) } : null;
 };
 
 const NO_BRANCH = "git can't tell which branch this push updates here (no work tree, or the command targets another repository), so name the branch: git push origin <branch>";
-const isHeadRef = (t) => t === 'HEAD' || t === '@';
 
 // Does the raw command point git at another repository or directory than the hook's cwd? Then the hook's branch and policy are not the target's.
 // Errs toward true: that only means a push must name its branch.
@@ -35,9 +37,13 @@ export function retargets(cmd) {
 }
 
 export function pushReason(seg, prot, branch) {
-  const m = /^git\s+push\b(.*)$/.exec(seg);
+  const m = /^git\s+push\b([\s\S]*)$/.exec(seg);
   if (!m) return null;
-  const args = m[1].trim().split(/\s+/).filter(Boolean);
+  const toks = m[1].trim().split(/\s+/).filter(Boolean), args = [];
+  for (let i = 0; i < toks.length; i++) {
+    if (/^(-o|--push-option|--repo|--receive-pack|--exec)$/.test(toks[i])) i++; // option argument, not a refspec
+    else args.push(toks[i]);
+  }
   const flags = args.filter((a) => a.startsWith('-'));
   const refs = args.filter((a) => !a.startsWith('-'));
   if (args.some((a) => /[$`]/.test(a))) return 'push arguments must be literal, no shell expansion';
@@ -48,10 +54,12 @@ export function pushReason(seg, prot, branch) {
   if (/^\.\/?$/.test(refs[0] ?? '')) return NO_PUSH_DOT;
   if (refs.slice(1).some((t) => /^refs\/(remotes|replace)\//.test(t.replace(/^\+/, '').split(':').pop()))) return NO_PUSH_DST;
   const targets = refs.slice(1);
-  if ((targets.length === 0 || targets.some(isHeadRef)) && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
-  if (targets.some((t) => protectedToken(t, prot))) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
+  if (targets.length === 0 && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
+  const hit = targets.map((t) => protectedTarget(t, prot, branch)).find(Boolean);
+  if (hit?.viaHead) return `you are on protected branch ${hit.name}; create a feature branch and push that (HEAD/@ here is ${hit.name}: git switch -c <name>, push it and open a PR)`;
+  if (hit) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
   if (flags.some((f) => f.startsWith('--force-with-lease')) && targets.length === 0 && branch && prot.includes(branch)) return 'lease push to a protected branch';
-  if (!branch && (targets.length === 0 || targets.some(isHeadRef))) return NO_BRANCH;
+  if (!branch && (targets.length === 0 || targets.some((t) => headRef(t.replace(/^\+/, '').split(':').pop())))) return NO_BRANCH; // HEAD, @, x:HEAD with no branch checked out: fail closed
   return null;
 }
 
@@ -154,6 +162,10 @@ export function envReason(cmd) {
   if (params && FETCH_KEY.test(params[1])) return NO_FETCH_OVERRIDE;
   if (params && DISCOVERY_ENV.test(params[1])) return NO_DISCOVERY_CFG;
   if (/\b(HUSKY|LEFTHOOK|SKIP_HOOKS|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG)=/.test(cmd)) return 'disabling commit hooks by environment is not allowed';
+  const writes = gitWrites(cmd).map((w) => w.kind);
+  if (writes.includes('config')) return 'writing a git config file directly can make git run commands (core.pager, core.sshCommand, aliases, filters); use `git config <key> <value>` instead';
+  if (writes.includes('hooks')) return 'writing into a hooks directory installs code git runs automatically; ask the user, or use the harness hook setup';
+  if (writes.length && segments(cmd).some((s) => /^git\b/.test(s))) return 'a write into .git/info or .git/modules is followed by a git command on the same line; git may run what was written; do the write on its own and review it';
   return null;
 }
 
@@ -369,6 +381,8 @@ function oneCommand({ w, r }, depth, out) {
     else if (sub === 'restore') { if (!(flags.some((f) => f === '--staged' || f === '-S') && !flags.some((f) => f === '--worktree' || f === '-W'))) { hitAny(pos); dirHit(); } }
     else if (sub === 'mv') { hitAny(pos); dirHit(); }
     else if (sub === 'rm') { if (!flags.includes('--cached')) { hitAny(pos); dirHit(); } }
+    // `git log --output=F` / `git diff --output F` write F (main's writesFile scan sees the same two spellings)
+    args.slice(1).forEach((a, k) => { if (a === '--output' && args[k + 2]) written(args[k + 2]); else if (a.startsWith('--output=')) written(a.slice(9)); });
     return;
   }
   if (INTERP.test(name)) {
@@ -377,6 +391,9 @@ function oneCommand({ w, r }, depth, out) {
     if (/^(perl|ruby)$/.test(name) && args.some((a) => /^-(?![MIm])[A-Za-z]*i\S*$/.test(a))) { const e = args.findIndex((a) => /^-[A-Za-z]*[eE]$/.test(a)); args.filter((a, k) => !a.startsWith('-') && k !== e + 1).forEach(written); }
     return;
   }
+  // sort -o F / --output=F and uniq IN OUT write a file (main's sortOut/uniqOut find the operand)
+  if (name === 'sort') { sortOut(args).forEach(written); return; }
+  if (name === 'uniq') { uniqOut(args).forEach(written); return; }
   const { flags, pos, t } = split(args, /^(cp|mv|ln|install)$/.test(name));
   if (name === 'tee') { pos.forEach(written); return; }
   if (/^(cp|install|rsync|ln|mv)$/.test(name)) {

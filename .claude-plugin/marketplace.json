@@ -9,13 +9,13 @@
       "name": "sflow",
       "source": "./",
       "description": "pstack's router and principles, Pocock's spec discipline, Osmani's lifecycle checklists and review personas, merged into task-driven playbooks.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     },
     {
       "name": "sflow-flutter",
       "source": "./domains/flutter",
       "description": "Flutter and Dart domain pack: the Flutter team's and Very Good Ventures' skills, agents and hooks, the Dart MCP server, and playbook overlays.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     }
   ]
 }

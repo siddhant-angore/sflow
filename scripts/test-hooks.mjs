@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
+import * as newRules from '../hooks/harness/guard-rules.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -19,7 +22,8 @@ const repo = mkdtempSync(join(tmpdir(), 'harness-test-'));
 sh(repo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 'echo base={base}'] }));
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
-const bash = (command, cwd = repo) => ({ tool_name: 'Bash', tool_input: { command }, cwd });
+const corpus = new Set(); // every command sent through bash(), reused by the regression check
+const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash', tool_input: { command }, cwd });
 
 const mustDeny = [
   'git push --force origin feat/x', 'git push -f', 'git push -fu origin feat/x', 'git push -uf origin feat/x', 'git push --force-with-lease origin main',
@@ -31,6 +35,10 @@ const mustDeny = [
   'git stash clear', 'git stash drop', 'git commit --no-verify -m x', 'git commit -n -m x', 'git merge --no-verify feat', 'git -c core.hooksPath=/dev/null commit -m x', 'HUSKY=0 git commit -m x',
   'git filter-branch --all', 'git update-ref -d refs/heads/x', 'gh pr merge 1', 'gh pr merge 1 --auto', 'gh pr close 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'gh api --method DELETE repos/o/r',
   'gh api repos/o/r/issues -f title=x', 'gh release create v1', 'gh repo delete o/r', 'npm publish', 'pnpm publish --access public', 'git merge feat && git push origin main',
+  // text written to a file can run later (hooks, .husky, scripts, git config): lines that write files keep main's quote-blind scan
+  String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, String.raw`printf '[core]\n\tpager = true; git reset --hard\n' >> ~/.gitconfig && git log`,
+  String.raw`printf 'true; git reset --hard\n' > .husky/pre-commit && git commit -m x`, String.raw`printf 'true; git reset --hard\n' > run.sh`, "printf 'x; git branch -D main' | tee run.sh",
+  String.raw`printf '%s\n' 'true; git reset --hard' > .githooks/pre-commit && git commit -m x`,
   'git update-ref refs/replace/abc def', 'git update-ref -d refs/replace/abc', 'git replace abc def', 'git replace -f abc def', 'git replace -d abc', 'git replace --graft abc', 'git replace --edit abc',
   'echo "update refs/replace/abc def" | git update-ref --stdin', "printf 'update refs/remotes/origin/main abc\\n' | git update-ref --stdin",
   'git symbolic-ref HEAD refs/remotes/origin/main', 'git symbolic-ref -m x HEAD refs/remotes/origin/main', 'git symbolic-ref -m "x y" HEAD refs/remotes/origin/main', 'git symbolic-ref HEAD refs/tags/v1', 'git symbolic-ref HEAD refs/replace/abc',
@@ -51,6 +59,7 @@ const mustAllow = [
   'git push -u origin feat/x', 'git push', 'git push origin HEAD', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push origin sid-12-fix-main-nav', 'git push -u origin feat/main-menu',
   'git push -u origin sid-7-master-detail-view', 'git status', 'git branch -d x', 'git checkout -- a.txt', 'git restore a.txt', 'git checkout main', 'git stash', 'git stash pop', 'git commit -m "no -n here"',
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
+  "printf 'ok' > notes.md && git commit -m 'docs: notes'", 'echo "a; b" > /dev/null', "echo 'x; y' | tee /dev/null", 'git log --oneline > /tmp/sflow-log.txt', 'cat ~/.gitconfig', 'git config --global --get user.name', 'echo "$(git rev-parse HEAD)" > .last-sha',
   'git replace -l', 'git replace --list', 'git symbolic-ref -q HEAD', 'git symbolic-ref HEAD refs/heads/feat/x', 'git symbolic-ref -m switch HEAD refs/heads/feat/x',
   'git config --get core.bare', 'git config core.bare', 'git config --get-all include.path', 'git config -l', 'git config core.autocrlf false', 'git -c core.autocrlf=false status', 'git push origin feat/x:feat/y', 'git push origin HEAD:refs/heads/feat/x',
   'git push origin feat/x', 'git push -u origin feat/x', // SID-65: branch known and named, stays allowed
@@ -71,6 +80,131 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git update-ref --stdin < f'))), 
 sh(repo, 'git checkout -q main');
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push'))), /protected branch main/);
 sh(repo, 'git checkout -q feat/x');
+
+// SID-79/80: global git options, wrappers, paths, grouping, and HEAD/@ on a protected branch. The repo is on feat/x with a clean tree.
+const rawPrefixes = ['git -P', 'git -p', 'git --paginate', 'git --no-pager', 'git --no-replace-objects', 'git --literal-pathspecs', 'git -c a=b -C .', 'git --git-dir=.git', 'git --work-tree .', 'env git', 'env GIT_PAGER=cat git', 'env -i PATH=/usr/bin git',
+  'command git', 'exec git', 'nice -n 5 git', 'nohup git', 'time git', 'timeout 10 git', 'sudo git', 'GIT_PAGER=cat git', '/usr/bin/git', './git', '../bin/git', '\\git', '\\/usr/bin/git', '(git', '$(git', '{ git', 'if git'];
+const closeShell = (pre, c) => (pre === '(git' || pre === '$(git' ? `${c})` : pre === '{ git' ? `${c} ; }` : pre === 'if git' ? `${c}; then :; fi` : c);
+for (const pre of rawPrefixes)
+  for (const body of ['push --force origin main', 'push origin HEAD:main', 'reset --hard', 'branch -D feat/evil', 'clean -fdx', 'checkout .', 'push --mirror', 'filter-branch --all']) {
+    const c = closeShell(pre, `${pre} ${body}`);
+    assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 must deny: ${c}`);
+  }
+for (const c of ['env gh pr merge 1', '/usr/local/bin/gh pr merge 1', '\\gh release create v1', 'env npm publish']) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 must deny: ${c}`);
+for (const [pre, body, why] of [['git -P', 'push --force origin main', /force push/], ['git --paginate', 'push --force origin main', /force push/], ['env git', 'push --force origin main', /force push/], ['command git', 'push --force origin main', /force push/], ['/usr/bin/git', 'push --force origin main', /force push/], ['\\git', 'push --force origin main', /force push/],
+  ['git -P', 'reset --hard', /git reset --hard/], ['git --paginate', 'reset --hard', /git reset --hard/], ['env git', 'reset --hard', /git reset --hard/], ['command git', 'reset --hard', /git reset --hard/], ['/usr/bin/git', 'reset --hard', /git reset --hard/], ['\\git', 'reset --hard', /git reset --hard/],
+  ['git -P', 'branch -D feat/evil', /force-deleting/], ['git -P', 'push origin HEAD:main', /protected branch/]])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(`${pre} ${body}`))), why, `SID-79 reason: ${pre} ${body}`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git reset --hard'))), /commit to a WIP branch.*git restore <path>/, 'reset message says what to do instead');
+for (const c of ['git -P log', 'git -p log', 'git --no-pager diff', 'git --paginate show HEAD', 'env GIT_PAGER=cat git log', 'env FOO=1 git status', 'command git diff', '/usr/bin/git status', '\\git status', 'git -C . status', 'git -C sub status', 'git -c color.ui=never log --oneline',
+  'git push origin HEAD', 'git push -u origin HEAD', 'git push origin feat/x 2>&1', 'git push -o ci.skip origin feat/x', 'git push origin HEAD > /dev/null', 'git push -u origin HEAD 2>&1 | tail -1', 'git push origin @', 'git push origin HEAD:feat/x', 'nice git log', 'timeout 30 git fetch origin', '(cd sub && git status)', 'echo $(git rev-parse HEAD)', 'gitk --all', './scripts/git-helper push -f', 'echo "git -P push -f"', 'grep -rn "env git push --force" docs', 'ls -la'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79/80 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin $(git branch --show-current)'))), /literal/, 'command substitution in push arguments stays denied');
+// Redirections before the arguments must not hide flags or refspecs; splitting is quote-aware; sh -c / eval payloads are checked.
+for (const [c, why] of [['git push 2>&1 origin HEAD:main', /protected branch/], ['git push 2>&1 origin feat/x:main', /protected branch/], ['git push &>/dev/null origin HEAD:main', /protected branch/], ['git push >&2 origin HEAD:main', /protected branch/],
+  ['git push 2>/dev/null origin feat/x:main', /protected branch/], ['git push 2>&1 origin :main', /deletion/], ['git push >&2 origin :main', /deletion/], ['git push 2>&1 -f origin feat/x', /force push/], ['git push >/dev/null 2>&1 --force origin feat/x', /force push/],
+  ['git push 2>&1 --mirror', /mirror/], ['git push &>/dev/null --mirror', /mirror/], ['git reset 2>&1 --hard', /git reset --hard/], ['git reset >/dev/null --hard', /git reset --hard/], ['git branch 2>&1 -D x', /force-deleting/], ['git branch &>/dev/null -D x', /force-deleting/],
+  ['git clean 2>&1 -fdx', /git clean/], ['git clean 2> err.log -fdx', /git clean/], ['git checkout 2>&1 .', /discarding/], ['git checkout >&2 .', /discarding/], ['git commit 2>&1 --no-verify -m x', /no-verify/], ['git commit 2>&1 -n -m x', /no-verify/],
+  ['gh api 2>&1 -X PUT repos/o/r/pulls/1/merge', /GitHub API/], ['gh api >&2 -X PUT repos/o/r/pulls/1/merge', /GitHub API/], ['git push origin feat/x 2>&1 & git push 2>&1 origin feat/x:main', /protected branch/],
+  ['2>/dev/null git push -f origin feat/x', /force push/], ['>/dev/null git reset --hard', /git reset --hard/], ['git -C . 2>&1 push -f origin feat/x', /force push/], ['git push origin HEAD>/dev/null -f', /force push/],
+  ['bash -c "true; git push -f origin main"', /force push/], ["sh -c 'cd x && git reset --hard'", /git reset --hard/], ['bash -lc "git push origin HEAD:main"', /protected branch/], ['eval "git push --force"', /force push/], ['eval git reset --hard', /git reset --hard/],
+  ['ssh host "cd x; git push -f origin main"', /force push/], ['su -c "cd x && git reset --hard" me', /git reset --hard/], ['watch "true; git reset --hard"', /git reset --hard/], ['script -c "true; git push -f" /dev/null', /force push/], ['flock /tmp/l -c "true; git push -f"', /force push/],
+  ['echo "$(git push -f)"', /force push/], ['git push origin $(git branch --show-current)', /literal/]])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), why, `SID-79 must deny: ${c}`);
+for (const c of ['git commit -m "fix (git push -f) docs"', 'echo "{ git push }"', "echo 'a & b'", 'echo "a && git push -f"', "git commit -m 'x; git reset --hard'", 'git log --format="%h (%s)"', 'git push origin feat/x 2>&1', 'git push -u origin HEAD 2>&1 | tail -1', 'git log 2>&1 | head',
+  'sleep 1 & git status', 'echo "\\"quoted\\" (paren)"', 'bash -c "git status"', "echo '$(git push -f)'", 'git status 2>&1 & git log', 'echo "a" > out.txt', 'git log >/dev/null 2>&1; git status',
+  "git push origin feat/x # don't push main", 'git status # reset --hard later', 'ssh host "git status"', 'watch git status', 'su -c "git log" me'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+
+// SID-80: on a protected branch HEAD and @ are that branch.
+sh(repo, 'git checkout -q main');
+for (const c of ['git push origin HEAD', 'git push origin @', 'git push -u origin HEAD', 'git push origin HEAD:HEAD', 'git push origin @:main', 'git push origin', 'git push -u origin', 'git -P push origin HEAD', 'env git push origin @']) {
+  const why = reasonOf(run('pre-bash.mjs', bash(c)));
+  assert.ok(denied('pre-bash.mjs', bash(c)), `SID-80 must deny on main: ${c}`);
+  assert.match(why, c === 'git push origin @:main' ? /protected branch/ : /protected branch main/, `SID-80 reason: ${c}`); // @:main names main in the text, so it keeps the existing "direct push to a protected branch (main, master)" message
+  assert.match(why, /feature branch/, `SID-80 says what to do: ${c}`);
+}
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD'))), /^harness guard: you are on protected branch main; create a feature branch and push that \(HEAD\/@ here is main: git switch -c <name>/);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin +HEAD'))), /\+ refspec/);
+for (const c of ['git push origin 2>&1', 'git push origin > /dev/null', 'git push origin >/dev/null 2>&1', 'git push origin 2>/dev/null', 'git push -o ci.skip origin', 'git push --push-option ci.skip origin', 'git push --repo origin', 'git push --receive-pack git-receive-pack origin', 'git push --exec x origin'])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /protected branch main; create a feature branch and push that/, `SID-80 redirection/option arg: ${c}`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD > /dev/null'))), /feature branch/, 'HEAD with redirection still denied');
+for (const c of ['git push 2>&1 origin', 'git push >/dev/null origin', 'git push > /dev/null origin', 'git push origin HEAD>/dev/null', '2>&1 git push origin', 'git push origin 2>&1 & git status'])
+  assert.ok(denied('pre-bash.mjs', bash(c)), `SID-80 must deny on main: ${c}`);
+sh(repo, 'git checkout -q --detach');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD'))), /name the branch/, 'detached HEAD: the branch is unknown, so a HEAD push fails closed (SID-65)');
+assert.ok(denied('pre-bash.mjs', bash('git push origin HEAD:main')), 'detached HEAD:main is still denied by the destination');
+sh(repo, 'git checkout -q feat/x');
+
+// SID-79 review: $'..', heredoc bodies, line continuation, and launchers that only the quote-blind scan on main caught.
+const L = (...lines) => lines.join('\n');
+const classA = [String.raw`echo $'\''; git push -f origin main`, String.raw`echo $'\''; git push -f origin main; echo \'`, String.raw`printf '%s' $'it\'s'; git reset --hard`];
+const classB = [L('cat <<EOF', "it's", 'EOF', 'git push -f origin main'), L('cat > f <<EOF', "don't", 'EOF', 'git push -f origin main'), L("cat <<'EOF'", "it's", 'EOF', 'git push -f origin main'), L('cat <<"EOF"', "it's", 'EOF', 'git push -f origin main'),
+  L('cat <<-EOF', "\tit's", '\tEOF', 'git push -f origin main'), L('cat <<EOF', "it's", 'EOF', 'git push -f origin main', "echo don't"), L("bash <<'E'", 'sleep 1 & git push -f origin main', 'E'), L('cat <<EOF | sh', 'git push -f origin main', 'EOF'), L('cat <<EOF | sh', 'sleep 1 & git push -f origin main', 'EOF'),
+  L('cat <<EOF', '$(git push -f origin main)', 'EOF'), L("ssh host <<'E'", 'git reset --hard', 'E'),
+  L('cat <<EOF', "it's", 'EOF', 'sleep 1 & git push -f origin main'), L('cat << EOF', "it's", 'EOF', '(git push -f origin main)'), L('cat <<E"OF"', "it's", 'EOF', 'sleep 1 & git push -f origin main'), L('cat <<\\EOF', "it's", 'EOF', 'sleep 1 & git push -f origin main'),
+  L('cat <<A <<B', "it's", 'A', "don't", 'B', 'sleep 1 & git push -f origin main'), L('cat <<EOF', 'git push -f origin main'), L('cat <<EOF', "it's", 'git push -f origin main'), L('busybox sh <<E', 'sleep 1 & git reset --hard', 'E'), L('cat <<EOF', '`git push -f origin main`', 'EOF')];
+const classBAllow = [L("cat > notes.md <<'EOF'", "Don't run git push -f origin main; it's blocked", 'EOF'), L('cat <<EOF', "it's (fine) & ok; really", 'EOF', 'git status'), L("git commit -F - <<'EOF'", "fix: don't (git push -f) here", 'EOF'),
+  L("cat <<'EOF'", '$(git push -f origin main)', 'EOF'), L('cat <<EOF', 'x', 'EOF', 'git status'),
+  L('git commit -m "$(cat <<\'EOF\'', "fix: it's (git push -f) ok; really", 'EOF', ')"'), L('git add -A && git commit -m "$(cat <<\'EOF\'', "fix: don't; git reset --hard", 'EOF', ')"'),
+  L('gh pr create --title t --body "$(cat <<\'EOF\'', '## Summary', "- don't git push -f; ok", 'EOF', ')"')];
+const classC = [L('git push -f \\', ' origin main'), L('git push \\', ' origin main'), L('git reset \\', ' --hard'), L('git branch \\', ' -D x'), L('gh api \\', ' -X PUT repos/o/r/pulls/1/merge'), L("git push 'a", "b' -f origin main")];
+const classCAllow = [L('git log \\', ' --oneline'), L('git push \\', ' origin feat/x')];
+const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'true; git push -f origin main'", `perl -e 'system("true; git push -f origin main")'`, "tmux new 'true; git push -f origin main'", "busybox sh -c 'true; git push -f origin main'", "fish -c 'true; git push -f origin main'",
+  "docker exec c sh -c 'true; git push -f origin main'", "parallel ::: 'true; git push -f origin main'", "echo 'x; git push -f origin main' | sh", "echo 'x; git push -f origin main' > f.sh && bash f.sh", "git -c core.pager='true; git push -f origin main' log",
+  "GIT_PAGER='true; git push -f origin main' git log", "git fetch --upload-pack='x; git reset --hard' origin", "git push --exec='x; git reset --hard' origin feat/x", "git push --receive-pack='true; git push -f origin main' origin feat/x",
+  "git push --exec 'x; git reset --hard' origin feat/x", "sort --compress-program='x; git reset --hard' f", "bash -c -- 'git push -f origin main'", "bash -c -x 'git push -f origin main'", "echo 'x; git push -f origin main",
+  "git fetch --upl='true; git reset --hard; git-upload-pack' origin", "git fetch --upload-pac='true; git reset --hard' origin", "git fetch --upload='true; git reset --hard' origin", "git fetch --upl 'true; git reset --hard' origin",
+  "git push --exe='true; git reset --hard' origin feat/x", "git push --exe 'true; git reset --hard' origin feat/x", "git push --receive='true; git branch -D main' origin feat/x", "git push --receive-p='true; git branch -D main' origin feat/x",
+  "git push --rec 'true; git branch -D main' origin feat/x", "git push '--receive-p=true; git branch -D main' origin feat/x", "sort --com='x; git reset --hard' f", "sort --compress 'x; git reset --hard' f",
+  `git fetch "--"upl='true; git reset --hard' origin`, `git fetch --u''pl='true; git reset --hard' origin`, `git push -"-"exe='true; git reset --hard' origin feat/x`, `git push $'--rec'eive-p='true; git branch -D main' origin feat/x`,
+  String.raw`git push --re\ceive-p='true; git branch -D main' origin feat/x`, `git fetch --u$(echo)pl='true; git reset --hard' origin`, "git fetch --u`echo`pl='true; git reset --hard' origin", "git fetch --u${X}pl='true; git reset --hard' origin", "git fetch -$X-upl='true; git reset --hard' origin",
+  "git push --e='true; git reset --hard; git-receive-pack' origin feat/x", "git push --e 'true; git reset --hard; git-receive-pack' origin feat/x",
+  "git push --{e,e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push -{-,-}e='true; git reset --hard; git-receive-pack' origin feat/x", "git fetch --u{p,p}l='true; git reset --hard; git-upload-pack' origin", "git push {--e,--e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push --[e]='true; git reset --hard; git-receive-pack' origin feat/x",
+  String.raw`printf '[core]\nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"\n' | sort -o .git/config`, `git log -1 --output=.git/config --format='[core]%nrepositoryformatversion = 0%nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"'`,
+  String.raw`printf 'touch MARK; git reset --hard\n' | uniq - f.sh`, "git log -1 --output=f.sh --format='true; git reset --hard'", String.raw`printf 'touch MARK; git reset --hard\n' | sort -o f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | uniq - .git/config`,
+  String.raw`printf 'touch MARK; git reset --hard\n' | sort --outp=f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | sort -uo f.sh`, "sort --co='x; git reset --hard' f"];
+const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
+for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
+for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-79 review round 6: a heredoc body no shell reads keeps main's handling of leading keywords; the same body fed to a shell is still checked.
+for (const kw of ['then', 'if', 'do', 'while', '!']) {
+  const ok = L('cat > notes.md <<EOF', `${kw} git push -f is never allowed.`, 'EOF');
+  assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 6 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
+  const bad = L('bash <<EOF', `${kw} git push -f origin main`, 'EOF');
+  assert.ok(denied('pre-bash.mjs', bash(bad)), `SID-79 round 6 must deny: ${JSON.stringify(bad)}`);
+}
+{
+  const ok = L('cat > notes.md <<EOF', 'then git push -f is never allowed.', 'EOF');
+  assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 6 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
+  const bad = L('bash <<EOF', 'then git push -f is never allowed.', 'EOF');
+  assert.ok(denied('pre-bash.mjs', bash(bad)), `SID-79 round 6 must deny: ${JSON.stringify(bad)}`);
+}
+// SID-79 review round 7: plain sort/uniq/git output options and sort option clusters stay allowed.
+for (const ok of ['sort -o out.txt in.txt', 'uniq in.txt out.txt', 'git log -1 --output=/tmp/log.txt', 'git diff --output=patch.diff', 'sort -k2 -t, data.csv', "git log --oneline -- '*.mjs'"]) assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 7 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
+
+// Writes into a git dir make quoted text code (git runs core.pager, aliases, hooks): no quote trust, and the write itself is denied.
+const CFG = /writing a git config file directly/, HOOK = /writing into a hooks directory/, INFO = /write into \.git\/info or \.git\/modules/, PAGER = String.raw`printf '[core]\n\tpager = true; git reset --hard\n'`;
+const gitWriteDeny = [[`${PAGER} >> .git/config && git log`, CFG], [String.raw`printf '[core]\n\tpager = "true; git reset --hard"\n' >> .git/config && git log`, CFG],[`printf 'true; git reset --hard\\n' > .git/hooks/pre-commit && git commit -m x`, HOOK], [`printf 'x' > .git/hooks/pre-commit`, HOOK], [`echo '[alias] x = !true' >> .git/config`, CFG],
+  [`${PAGER} | tee -a .git/config && git log`, CFG], [`printf 'x' | sudo tee .git/hooks/pre-push`, HOOK], ['cp /tmp/evil .git/hooks/pre-commit', HOOK], ['cp /tmp/evil .git/hooks/', HOOK], ['install -m 755 /tmp/evil .git/hooks/post-checkout', HOOK],
+  ['ln -s ../../evil.sh .git/hooks/pre-commit', HOOK], ['mv cfg .git/config', CFG], ['cp -t .git/hooks /tmp/evil', HOOK], ["sed -i 's/less/true; git reset --hard/' .git/config && git log", CFG], ["sed -i.bak '$a pager = x' .git/config", CFG],
+  ["perl -pi -e 's/a/b/' .git/config", CFG], ['printf x > ".git/config"', CFG], ['printf x >.git/config', CFG], ['printf x 1>> .git/config', CFG], ['dd of=.git/config if=/tmp/x', CFG], ["printf 'x' > .git/info/attributes && git status", INFO],
+  [`${PAGER} >> .git/modules/sub/config && git -C sub log`, INFO], ["printf 'x' > .git/modules/sub/hooks/pre-commit", HOOK], ["printf 'x' > ../origin.git/hooks/pre-receive && git push origin feat/x", HOOK], [`cd .git && ${PAGER} >> config && git log`, CFG],
+  ['cd .git/hooks && cp /tmp/evil pre-commit', HOOK], ['printf x > "$GIT_DIR/hooks/pre-commit"', HOOK], ['printf x > "$(git rev-parse --git-dir)/config"', CFG], ['GIT_DIR=/tmp/g.d git log > /dev/null; printf x > /tmp/g.d/config', CFG],
+  ['git --git-dir=/tmp/g.d status; printf x >> /tmp/g.d/hooks/pre-commit', HOOK],
+  [`${PAGER} >> $HOME/.gitconfig && git log`, CFG], [`${PAGER} >> \${HOME}/.gitconfig`, CFG], [`${PAGER} >> ~/.config/git/config && git log`, CFG], [`${PAGER} >> $HOME/.config/git/config`, CFG], [`${PAGER} >> $XDG_CONFIG_HOME/git/config`, CFG],
+  [`${PAGER} >> \${XDG_CONFIG_HOME}/git/config`, CFG], [`${PAGER} | sudo tee -a /etc/gitconfig`, CFG], [`${PAGER} >> /home/u/.gitconfig`, CFG], [`${PAGER} >> ~/.gitconfig`, CFG],
+  [String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, CFG],
+  [String.raw`printf 'x\n' | sort -o .git/config`, CFG], [String.raw`printf 'x\n' | uniq - .git/config`, CFG], ['git log -1 --output=.git/config --format=x', CFG], ['git diff --output .git/config', CFG], ['sort -uo .git/config f', CFG], [String.raw`printf 'x\n' | sort -o .git/hooks/pre-commit`, HOOK]];
+const gitWriteAllow = ['cat .git/config', 'ls .git/hooks', 'ls -la .git/hooks/', 'git config --get core.pager', 'grep x .git/config', 'sed -n 1p .git/config', 'cp .git/config /tmp/sflow-bak', 'cat .git/config > /tmp/sflow-x', "printf 'x' > .git/info/exclude", "printf 'notes' > notes.md && git commit -m x", 'echo hi > config && git status'];
+for (const [c, why] of gitWriteDeny) { assert.ok(denied('pre-bash.mjs', bash(c)), `git write must deny: ${c}`); assert.match(reasonOf(run('pre-bash.mjs', bash(c))), why, `git write reason: ${c}`); }
+for (const c of gitWriteAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `git write must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+for (const c of gitWriteAllow.filter((x) => !/\.git\/info/.test(x))) assert.deepEqual(newGitWrites(c), [], `gitWrites reads are not writes: ${c}`);
+assert.deepEqual(newGitWrites('cd .git/hooks && cp /tmp/evil pre-commit'), [{ path: '.git/hooks/pre-commit', kind: 'hooks' }]);
+assert.deepEqual(newGitWrites('echo "a > .git/config"'), [], 'a quoted > is text');
+for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'echo "a > ~/.gitconfig"']) assert.deepEqual(newGitWrites(c), [], `global config reads are not writes: ${c}`);
+for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
+for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
@@ -584,6 +718,9 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     `node -e "fs.writeFileSync('/tmp/a', 1); fs.writeFileSync('.harness.json', '{}')"`, `python3 -c "import os; os.system('echo x > .harness.json')"`, `python3 -c "import subprocess; subprocess.run(['rm', '.claude/settings.json'])"`, `node -e "require('child_process').execSync('rm .harness.json')"`,
     `python3 -c "c='rm .harness.json'; import os; os.system(c)"`, `ruby -e 'File.write ".harness.json", "{}"'`, `python3 -c "from pathlib import Path; p=Path('.claude/settings.json'); p.write_text('{}')"`, `node -e "const fs=require('fs'); fs.writeFileSync('/tmp/a', fs.readFileSync('.harness.json')); fs.unlinkSync('.harness.json')"`,
     `node -e "require('fs').writeFileSync(process.argv[1], '{}')" .harness.json`, `perl -e 'open(my $fh, ">>", ".harness.json"); print $fh 1'`, `python3 -c "open('.harness.json','r+').write('{}')"`, `python3 -c "open('.harness.json', 'w').write('{}')  # don't"`,
+    // main's file-writing forms (sort -o, uniq IN OUT, git --output) onto a policy path, plain and wrapped/cd'd
+    'sort -o .harness.json f', 'sort f -o .harness.json', 'sort -uo .harness.json f', 'sort --output=.harness.json f', 'sort --output .harness.json f', 'nice sort -o .harness.json f', 'sort -o .claude/settings.local.json f', 'cd .claude && sort -o settings.json f',
+    'uniq a .claude/settings.json', 'uniq -c a .harness.json', 'git log -1 --output=.harness.json', 'git diff --output .claude/settings.json', 'git -C sub log --output=.harness.json',
   ];
   // Allowed: reads, copies elsewhere, index-only git, and ordinary writes. `echo "> .harness.json is policy" | wc -l` is allowed on purpose: the redirect is inside quotes, so it is text.
   const sid66Allow = [
@@ -616,6 +753,8 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     `node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync('.claude/settings.json','utf8')); fs.writeFileSync('/tmp/s.json', JSON.stringify(d))"`, `python3 -c "print('edit .claude/settings.json by hand'); open('/tmp/log','w').write('x')"`,
     `node -e "console.log('.harness.json'); require('fs').writeFileSync('/tmp/a','b')"`, `ruby -e 'puts File.read(".harness.json"); File.write("/tmp/x", "y")'`, `python3 -c "import shutil; shutil.copy('.harness.json', '/tmp/h.json'); open('/tmp/n','w').write('1')"`,
     `python3 -c "from pathlib import Path; p=Path('.harness.json'); Path('/tmp/o').write_text(p.read_text())"`, `python3 -c "import subprocess; subprocess.run(['cat', '.harness.json'])"`, `node -e "const p='.harness.json'; const d=require('fs').readFileSync(p); require('fs').writeFileSync('/tmp/o', d)"`,
+    // the same tools reading a policy file, or writing elsewhere
+    'sort .harness.json', 'sort -o /tmp/x .harness.json', 'uniq .harness.json', 'uniq .harness.json /tmp/x', 'git log --output=/tmp/x', 'cat .harness.json | sort',
   ];
   try {
     // a + b. every write form is denied with and without a committed policy, and says what to do; ordinary commands are not touched
@@ -714,4 +853,58 @@ for (const input of [JSON.stringify({ hook_event_name: 'SessionStart', source: '
 const startEntry = JSON.parse(readFileSync(join(hooks, '..', 'hooks.json'), 'utf8')).hooks.SessionStart;
 assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
+// Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
+const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+// Three baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
+const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const baselines = [];
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
+  const rev = pick(revs);
+  assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
+  const dir = mkdtempSync(join(tmpdir(), 'harness-main-'));
+  for (const f of ['lib.mjs', 'guard-rules.mjs']) writeFileSync(join(dir, f), gitHere('show', `${rev}:workflows/hooks/${f}`));
+  const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
+  baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
+}
+const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
+const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
+const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`, (x) => `bash -c "true && ${x}"`, (x) => `bash -c -- 'true; ${x}'`, (x) => `sh -c '${x}'`, (x) => `setsid sh -c 'true; ${x}'`, (x) => `busybox sh -c 'true; ${x}'`, (x) => `fish -c 'true; ${x}'`,
+  (x) => `docker exec c sh -c 'true; ${x}'`, (x) => `tmux new 'true; ${x}'`, (x) => `perl -e 'system("true; ${x}")'`, (x) => `parallel ::: 'true; ${x}'`, (x) => `xargs sh -c 'true; ${x}'`, (x) => `ssh host 'cd x; ${x}'`, (x) => `nohup sh -c 'true; ${x}'`,
+  (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
+  (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
+  (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`,
+  (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`,
+  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
+  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
+  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`];
+const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
+const everything = [...new Set([...corpus, ...generated])];
+// Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
+const ALLOWLIST = new Map([
+  ['echo "a && git push -f"', 'quoted text of echo, which runs nothing'],
+  ["git commit -m 'x; git reset --hard'", 'quoted text of git commit -m'],
+  ["git push origin feat/x # don't push main", 'a real comment, never run'],
+  [L('git add -A && git commit -m "$(cat <<\'EOF\'', "fix: don't; git reset --hard", 'EOF', ')"'), 'quoted-delimiter heredoc data of cat inside git commit -m; every segment is git add, git commit or cat, none runs it'],
+  [L('git push \\', ' origin feat/x'), 'line continuation: it is `git push origin feat/x`; main saw a bare `git push \\` and denied it on the protected branch'],
+  ['git replace -l', 'list form only prints replace refs; 086c230 denied every git replace, main since #13 (f70d9bd) denies only the forms that write them'],
+  ['git replace --list', 'list form only prints replace refs; 086c230 denied every git replace, main since #13 (f70d9bd) denies only the forms that write them'],
+]);
+const nowDenies = new Map(everything.flatMap((c) => ['feat/x', 'main'].map((b) => [`${b} ${c}`, newDenies(c, b)])));
+const lostAny = new Set();
+for (const base of baselines) {
+  const rows = everything.flatMap((c) => ['feat/x', 'main'].map((b) => ({ c, b, was: base.denies(c, b), now: nowDenies.get(`${b} ${c}`) })));
+  const lost = rows.filter((r) => r.was && !r.now);
+  lost.forEach((r) => lostAny.add(r.c));
+  assert.deepEqual([...new Set(lost.filter((r) => !ALLOWLIST.has(r.c)).map((r) => r.c))], [], `regression vs ${base.sha}: main denied these, the new guard allows them`);
+  const gaps = rows.filter((r) => generated.includes(r.c) && !r.now);
+  assert.deepEqual(gaps.filter((r) => r.was).map((r) => `${r.b}: ${r.c}`), [], `a generated body x template that ${base.sha} denied must stay denied`);
+  console.log(`regression vs ${base.sha}: ${everything.length} commands x 2 branches, main denies ${rows.filter((r) => r.was).length}, new allows ${lost.length} (all allowlisted: ${[...new Set(lost.map((r) => r.c))].length} of ${ALLOWLIST.size} entries)`);
+  console.log(`generated ${generated.length} combinations x 2 branches vs ${base.sha}: new denies all but ${gaps.length} that main also allows`);
+}
+for (const [c, why] of ALLOWLIST) {
+  assert.ok(everything.includes(c), `stale ALLOWLIST entry (not in the corpus): ${c} (${why})`);
+  assert.ok(lostAny.has(c), `stale ALLOWLIST entry (no baseline denies it, or the new guard denies it): ${c} (${why})`);
+}
+
 console.log('hooks ok');
