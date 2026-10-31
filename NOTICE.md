@@ -1,6 +1,6 @@
 # NOTICE
 
-sflow is assembled from 8 vendored sources, pinned by commit. Each source's license text is in `LICENSES/`. Do not edit vendored files in place; bump `vendor.manifest.json` and run `node scripts/vendor.mjs sync`. The workflow overlays in `workflows/` are the only sflow-authored change to those files, applied by `scripts/build-workflows.mjs`.
+sflow is assembled from 8 vendored sources (7 MIT, 1 BSD-3-Clause), pinned by commit. Each source's license text is in `LICENSES/`. Do not edit vendored files in place; bump `vendor.manifest.json` and run `node scripts/vendor.mjs sync`. The workflow overlays in `workflows/` are the only sflow-authored change to those files, applied by `scripts/build-workflows.mjs`.
 
 ## Sources
 

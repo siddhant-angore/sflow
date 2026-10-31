@@ -1,6 +1,6 @@
 # sflow
 
-One rigorous engineering workflow for coding agents, as a single installable thing. sflow merges MIT-licensed skill sets, pinned by commit:
+One rigorous engineering workflow for coding agents, as a single installable thing. sflow merges MIT-licensed skill sets, pinned by commit (the `sflow-flutter` pack adds BSD-3-Clause work by The Flutter Authors and MIT work by Very Good Ventures):
 
 - **pstack by Lauren Tan (poteto)**, https://github.com/cursor/plugins/tree/main/pstack, taken from its Claude Code build in `harness/pstack/claude-code/`: the router (`poteto-mode`), 24 principles, 23 playbooks, multi-model review, verification discipline. sflow's overlays add 5 more playbooks. pstack's own README is vendored at `docs/upstream/pstack-README.md` and its guide at `docs/guide/`; pstack links to `../../README.md` (for example in `poteto-help`) land on this file, because sflow's plugin root is this repo's root.
 - **Cursor's `cursor-team-kit` and `thermos` plugins** (https://github.com/cursor/plugins, same commit as pstack): the `deslop`, `fix-ci`, `fix-merge-conflicts`, `get-pr-comments`, `make-pr-easy-to-review`, and `what-did-i-get-done` skills from `cursor-team-kit` (plugin author Eric Zakariasson), and the `thermos`, `thermo-nuclear-review`, and `thermo-nuclear-code-quality-review` skills with their two review subagents from `thermos`.
@@ -81,4 +81,4 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - CI (`.github/workflows/ci.yml`) runs on every PR and on push to `main`: it fails on any tracked symlink, then runs `npm run check` (vendor hashes, plugin validate, hooks, routing), plus a separate vendor drift job (`node scripts/vendor.mjs sync` must leave the tree clean). It uses no secrets. `npm run eval:brake` makes a paid live Claude call, so it is manual and never runs in CI.
 - On release, add the entries to `CHANGELOG.md` (including upstream pin changes), bump the version in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` together, then create an annotated tag on the bump commit (`git tag -a vX.Y.Z -m "sflow vX.Y.Z"`) and push it.
 
-Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.
+Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`. Credit goes to Lauren Tan (pstack), Cursor (`cursor-team-kit`, author Eric Zakariasson, and `thermos`), Matt Pocock, Addy Osmani, Very Good Ventures, and The Flutter Authors.
