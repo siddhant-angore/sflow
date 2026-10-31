@@ -34,10 +34,14 @@ const mustDeny = [
 ];
 for (const c of mustDeny) assert.ok(denied('pre-bash.mjs', bash(c)), `must deny: ${c}`);
 
+const allowRemote = [
+  'git fetch', 'git fetch origin', 'git fetch origin main', 'git fetch origin feat/x', 'git fetch --prune', 'git fetch -p origin', 'git fetch --all', 'git fetch --all --prune', 'git fetch origin main:main', 'git fetch origin refs/heads/main:refs/heads/tmp', 'git pull', 'git pull --rebase', 'git pull origin main', 'git pull --ff-only', 'git remote set-head origin --auto', 'git remote set-head origin -a', 'git remote -v', 'git remote show origin', 'git symbolic-ref refs/remotes/origin/HEAD', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git symbolic-ref HEAD', 'git update-ref refs/heads/tmp HEAD', 'git config --get remote.origin.fetch', 'git config --get-all remote.origin.fetch', 'git config remote.origin.fetch', 'git config -l', 'git config --list', 'git config user.name x', 'git -c color.ui=never fetch origin', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git fetch', "GIT_CONFIG_PARAMETERS=\"'color.ui'='never'\" git fetch", 'gh repo view', 'gh repo view --json defaultBranchRef', 'gh repo view o/r --json name',
+];
 const mustAllow = [
   'git push -u origin feat/x', 'git push', 'git push origin HEAD', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push origin sid-12-fix-main-nav', 'git push -u origin feat/main-menu',
   'git push -u origin sid-7-master-detail-view', 'git status', 'git branch -d x', 'git checkout -- a.txt', 'git restore a.txt', 'git checkout main', 'git stash', 'git stash pop', 'git commit -m "no -n here"',
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
+  ...allowRemote, // SID-65: remote-tracking rules must not touch ordinary fetch/pull/config/gh reads
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
@@ -231,34 +235,39 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     assert.ok(!verdict(g, 'gh pr merge 1').deny, 'g: merge allowed after adoption');
     assert.ok(!verdict(g, 'git push origin feat/x').deny && existsSync(join(g, 'gate-ran')), 'g: the committed gate runs');
 
-    // h. remote-tracking refs locate the policy, so local rewrites are refused
-    for (const cmd of ['git remote set-head origin feat/x', 'git remote set-head origin -d', 'git remote set-head origin --delete', 'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/x',
-      'git symbolic-ref -d refs/remotes/origin/HEAD', 'git update-ref refs/remotes/origin/main HEAD', 'git fetch origin feat/x:refs/remotes/origin/main', 'git fetch origin +feat/x:refs/remotes/origin/main', "git fetch origin 'feat/x:refs/remotes/origin/main'"]) {
+    // h. remote-tracking refs locate the policy, so local rewrites are refused; each message names the allowed alternative
+    const SET_HEAD = /read from origin\/HEAD's branch.*Use `git remote set-head origin --auto`/;
+    const SYMREF = /Read them with `git symbolic-ref --short refs\/remotes\/origin\/HEAD`; sync them with `git fetch origin` or `git remote set-head origin --auto`/;
+    const UPDATE_REF = /Update them with `git fetch origin`; to move a local branch use `git update-ref refs\/heads\/<name> <commit>`/;
+    const FETCH_DST = /Use `git fetch origin <branch>`.*`git fetch origin <branch>:<local-branch>`/;
+    const FETCH_CFG = /remote\.<name>\.fetch decides what refs\/remotes\/\* hold.*`git fetch origin <branch>`.*`git config --get-all remote\.origin\.fetch`/;
+    const OVERRIDE = /per-command remote\.<name>\.fetch override.*Use `git fetch origin <branch>` instead; other -c settings are fine/;
+    const REPO_EDIT = /repo-admin action on GitHub\. Read them with `gh repo view --json <fields>`/;
+    const cases = [
+      [SET_HEAD, ['git remote set-head origin feat/x', 'git remote set-head origin -d', 'git remote set-head origin --delete']],
+      [SYMREF, ['git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/x', 'git symbolic-ref -d refs/remotes/origin/HEAD']],
+      [UPDATE_REF, ['git update-ref refs/remotes/origin/main HEAD']],
+      [FETCH_DST, ['git fetch origin x:refs/remotes/origin/main', 'git fetch origin +x:refs/remotes/origin/main', "git fetch origin 'x:refs/remotes/origin/main'", 'git pull origin x:refs/remotes/origin/main']],
+      [FETCH_CFG, ['git config remote.origin.fetch +refs/heads/x:refs/remotes/origin/main', "git config remote.origin.fetch '+refs/heads/x:refs/remotes/origin/main'", 'git config --add remote.origin.fetch x',
+        'git config --replace-all remote.origin.fetch x', 'git config --unset remote.origin.fetch', 'git config --unset-all remote.origin.fetch', 'git config --global remote.origin.fetch x', 'git config set remote.origin.fetch x']],
+      [OVERRIDE, ['git -c remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main fetch', "git -c 'remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main' fetch origin", 'git --config-env=remote.origin.fetch=X fetch',
+        'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=x git fetch', "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch'='x'\" git fetch", "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch=x'\" git fetch"]],
+      [REPO_EDIT, ['gh repo edit --default-branch feat/x', 'gh repo edit o/r --description x']],
+    ];
+    for (const [msg, cmds] of cases) for (const cmd of cmds) {
       const v = verdict(a, cmd);
       assert.ok(v.deny, `h: must deny: ${cmd}`);
-      assert.match(v.why, /remote-tracking refs locate the harness policy; rewriting them locally is not allowed \(git fetch updates them\)/, cmd);
+      assert.match(v.why, msg, cmd);
     }
-    for (const cmd of ['git config remote.origin.fetch +refs/heads/x:refs/remotes/origin/main', "git config remote.origin.fetch '+refs/heads/x:refs/remotes/origin/main'", 'git config --add remote.origin.fetch +refs/heads/x:refs/remotes/origin/main',
-      'git config --replace-all remote.origin.fetch +refs/heads/x:refs/remotes/origin/main', 'git config --unset remote.origin.fetch', 'git config --unset-all remote.origin.fetch', 'git config --global remote.origin.fetch x', 'git config set remote.origin.fetch x']) {
+    for (const cmd of ['git update-ref -d refs/remotes/origin/main', 'git update-ref -d remotes/origin/main']) {
       const v = verdict(a, cmd);
       assert.ok(v.deny, `h: must deny: ${cmd}`);
-      assert.match(v.why, /remote-tracking refs locate the harness policy/, cmd);
+      assert.match(v.why, UPDATE_REF, `h: ${cmd} names the alternative`);
     }
-    for (const cmd of ['git -c remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main fetch', "git -c 'remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main' fetch origin",
-      'git --config-env=remote.origin.fetch=FETCHSPEC fetch', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=x git fetch', "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch=x'\" git fetch"]) {
-      const v = verdict(a, cmd);
-      assert.ok(v.deny, `h: must deny: ${cmd}`);
-      assert.match(v.why, /remote-tracking refs locate the harness policy; rewriting them locally is not allowed \(git fetch updates them\)/, cmd);
-    }
-    for (const cmd of ['gh repo edit --default-branch feat/x', 'gh repo edit o/r --description x']) {
-      const v = verdict(a, cmd);
-      assert.ok(v.deny, `h: must deny: ${cmd}`);
-      assert.match(v.why, /repo lifecycle and settings, secrets, and workflow triggers are human actions/, cmd);
-    }
-    for (const cmd of ['git config --get remote.origin.fetch', 'git config --get-all remote.origin.fetch', 'git config -l', 'git config --list', 'git config remote.origin.fetch', 'git config get remote.origin.fetch', 'git config user.name x', 'gh repo view', 'git -c color.ui=never fetch origin', 'git -c http.lowSpeedLimit=1 fetch'])
-      assert.ok(!verdict(a, cmd).deny, `h: must allow: ${cmd}`);
-    for (const cmd of ['git remote set-head origin --auto','git remote set-head origin -a', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git symbolic-ref HEAD', 'git fetch', 'git fetch origin', 'git fetch -q origin main', 'git remote -v'])
-      assert.ok(!verdict(a, cmd).deny, `h: must allow: ${cmd}`);
+    assert.match(verdict(a, 'git update-ref -d refs/heads/x').why, /history rewriting is not allowed/, 'h: update-ref -d on a local branch stays a history-rewriting deny');
+    assert.match(verdict(a, 'gh repo delete o/r').why, /guard: releases, repo lifecycle, secrets, and workflow triggers are human actions\n/, 'h: lifecycle message unchanged');
+    // none of the above may over-block ordinary fetch, pull, config, set-head --auto, or gh reads
+    for (const cmd of allowRemote) assert.ok(!verdict(a, cmd).deny, `h: must allow: ${cmd} (${verdict(a, cmd).why})`);
 
     // i. the reset --hard advice never suggests stash
     const ri = verdict(a, 'git reset --hard');
