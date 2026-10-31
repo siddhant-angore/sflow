@@ -177,6 +177,18 @@ for (const e of [execErr({ status: 1, stdout: Buffer.from(maxTurns), stderr: Buf
   assert.deepEqual(parseArgs(['--runs', '5']), { model: 'haiku', runs: 5, capped: false });
   for (const bad of [[], ['0'], ['-1'], ['abc'], ['1.5'], ['--model', 'x']]) assert.throws(() => parseArgs(['--runs', ...bad]), /--runs/, bad.join(' '));
   for (const bad of [['--model'], ['--model', ''], ['--model', '--runs', '2']]) assert.throws(() => parseArgs(bad), /--model/, bad.join(' '));
+  assert.throws(() => parseArgs(['--runs', '1', '--runs', '2']), /--runs given more than once/);
+  assert.throws(() => parseArgs(['--model', 'a', '--model', 'b']), /--model given more than once/);
+}
+
+// 11b. ENOBUFS is permanent and names the buffer; callClaude (via runClaude) passes maxBuffer 64 MiB to exec.
+{
+  const c = classifyFailure(execErr({ code: 'ENOBUFS' }));
+  assert.deepEqual([c.transient, c.reason], [false, 'output exceeded maxBuffer (64 MiB)']);
+  let seen;
+  const h = harness([good], { exec: (cmd, args, o) => { seen = o; return Buffer.from(good); } });
+  await h.go();
+  assert.equal(seen.maxBuffer, 64 * 1024 * 1024);
 }
 
 // 12. End to end: the real script as a child process against a fake `claude` on PATH. Never calls a real claude.
@@ -269,6 +281,18 @@ try {
     }
     assert.equal(f.callCount(), 0, 'no claude call on a usage error');
     assert.deepEqual(leftovers(f), []);
+  }
+
+  // (d3) Repeated flags: usage error, exit 2, no claude call.
+  {
+    const f = fake('dup-args', 'exit 99');
+    for (const [flag, args] of [['--runs', ['--runs', '1', '--runs', '2']], ['--model', ['--model', 'a', '--model', 'b']]]) {
+      const r = run(f, args);
+      assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${flag} given more than once`));
+      assert.match(r.stderr, /usage: node scripts\/eval-brake\.mjs/);
+    }
+    assert.equal(f.callCount(), 0, 'no claude call on a usage error');
   }
 
   // (e) --runs 9 prints the cap message and runs 5 times.

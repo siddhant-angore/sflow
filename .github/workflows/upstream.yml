@@ -33,15 +33,20 @@ jobs:
         id: upstream
         run: |
           set +e
-          node scripts/upstream.mjs > report.txt
-          code=$?
-          cat report.txt
+          check() {
+            node scripts/upstream.mjs --json > report.json 2> report.err
+            code=$?
+            node scripts/upstream.mjs --from-json report.json > report.txt || echo "(could not render report.json; exit $code)" > report.txt
+            if [ -s report.err ]; then
+              { echo; echo 'stderr:'; cat report.err; } >> report.txt
+            fi
+            cat report.txt
+          }
+          check
           if [ "$code" = "1" ]; then
             echo "exit 1; retrying once in 30s"
             sleep 30
-            node scripts/upstream.mjs > report.txt
-            code=$?
-            cat report.txt
+            check
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           exit 0
@@ -58,8 +63,14 @@ jobs:
           NUMBER: ${{ steps.issue.outputs.number }}
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          # Held sources are deferred, not current; name them so the deferral stays visible. A failed re-read says so rather than hiding them.
-          if node scripts/upstream.mjs --json > report.json && held=$(jq -r '.sources[] | select(.hold != null) | "- \(.source): \(.hold)"' report.json); then
+          # Held sources are deferred, not current; name them so the deferral stays visible. A held source that has caught up is a stale hold.
+          # Reads report.json from the check step (no second network run). A failed read says so rather than hiding them.
+          # An empty or invalid report.json would read as "no holds", so refuse to close on it.
+          if ! jq -e '.sources | type == "array"' report.json > /dev/null 2>&1; then
+            echo "::error::report.json is empty or invalid; not closing #$NUMBER. See the check step's log."
+            exit 1
+          fi
+          if held=$(jq -r '.sources[] | select(.hold != null) | "- \(.source): \(.hold) [\(.status)]" + (if .status == "current" then " \u2014 STALE HOLD: upstream is current; remove the hold" else "" end)' report.json); then
             :
           else
             held="- (could not read the held list; see the run log: $run_url)"
@@ -68,7 +79,7 @@ jobs:
             echo "All vendored sources are current as of $run_url; closing."
             if [ -n "$held" ]; then
               echo
-              echo 'Held (deferred, not current):'
+              echo 'Held sources:'
               printf '%s\n' "$held"
             fi
           } | head -c 60000 > comment.md

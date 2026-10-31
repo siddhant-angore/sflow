@@ -70,6 +70,7 @@ export function formatCliFailure(err) {
 const PERMANENT = /\b(authentication|unauthori[sz]ed|not logged in|invalid api key|api key|401|403)\b|\/login|please log ?in\b|invalid.{0,20}model|model.{0,30}(not found|invalid|does not exist)/i;
 const TRANSIENT = /rate.?limit|\b429\b|overloaded|\b5(?:00|02|03|04|29)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|connection error|socket hang up|fetch failed|network|timed? ?out|timeout/i;
 const CLI_TIMEOUT_MS = 600_000;
+const MAX_BUFFER = 64 * 1024 * 1024;
 
 // Transient = worth one retry. Anything not recognised is permanent: a retry costs money and hides real bugs.
 // Our own 600 s kill (execFileSync sets err.code ETIMEDOUT) is permanent: a run that hung that long will hang again, and a retry doubles the wait.
@@ -78,6 +79,7 @@ export function classifyFailure(err) {
   const j = parseResult(decode(err?.stdout));
   const msg = String(err?.message ?? '').split('\n')[0];
   const text = [msg.startsWith('Command failed') ? '' : msg, decode(err?.stderr), j ? j.result : decode(err?.stdout)].join('\n');
+  if (err?.code === 'ENOBUFS') return { transient: false, reason: `output exceeded maxBuffer (${MAX_BUFFER / 1024 / 1024} MiB)` };
   if (err?.code === 'ENOENT') return { transient: false, reason: 'claude CLI not found' };
   if (err?.code === 'ETIMEDOUT') return { transient: false, reason: `claude exceeded the ${CLI_TIMEOUT_MS / 1000} s timeout` };
   if (j?.subtype === 'error_max_turns') return { transient: false, reason: 'error_max_turns' };
@@ -90,7 +92,7 @@ export function classifyFailure(err) {
 const cliError = (message, stdout) => Object.assign(new Error(message), { status: 0, stdout, stderr: '' });
 
 function callClaude(exec, repo, model) {
-  const out = decode(exec('claude', ['-p', '--model', model, '--plugin-dir', root, '--max-turns', '12', '--output-format', 'json', '--allowedTools', 'Read,Write,Edit,Bash'], { cwd: repo, input: prompt, stdio: ['pipe', 'pipe', 'pipe'], timeout: CLI_TIMEOUT_MS }));
+  const out = decode(exec('claude', ['-p', '--model', model, '--plugin-dir', root, '--max-turns', '12', '--output-format', 'json', '--allowedTools', 'Read,Write,Edit,Bash'], { cwd: repo, input: prompt, stdio: ['pipe', 'pipe', 'pipe'], timeout: CLI_TIMEOUT_MS, maxBuffer: MAX_BUFFER }));
   const result = parseResult(out);
   if (!result) throw cliError('claude printed unparseable output', out);
   if (result.is_error || String(result.subtype ?? '').startsWith('error')) throw cliError('claude reported an error result', out);
@@ -150,6 +152,7 @@ export const USAGE = 'usage: node scripts/eval-brake.mjs [--model haiku] [--runs
 const MAX_RUNS = 5;
 
 export function parseArgs(argv) {
+  for (const flag of ['--runs', '--model']) if (argv.filter((a) => a === flag).length > 1) throw new Error(`${flag} given more than once`);
   const i = argv.indexOf('--runs');
   let requested = 1;
   if (i >= 0) {

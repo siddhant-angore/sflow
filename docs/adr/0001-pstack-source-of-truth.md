@@ -48,4 +48,4 @@ Skills and agents come from `harness/pstack/claude-code/` (Lauren's generated Cl
 
 ## Update 2026-10-31 (SID-43)
 
-SID-43 ported `c742dd6`: Orchestrate is agentic and the orch scripts are gone. The three `cursor/plugins/*` keys now track `cursor/plugins` head (`4dd1d05818d1`) and are bumped together. The `9f844cd` pin above is the original SID-44 decision and is kept as history; its "do not bump past" rule no longer applies.
+SID-43 ported `c742dd6`: Orchestrate is agentic and the orch scripts are gone. The three `cursor/plugins/*` keys are pinned at `4dd1d05818d1` (head on 2026-10-31) and are bumped together. The `9f844cd` pin above is the original SID-44 decision and is kept as history; its "do not bump past" rule no longer applies.
