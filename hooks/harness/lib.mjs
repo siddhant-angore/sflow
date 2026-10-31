@@ -69,8 +69,8 @@ function gitSub(rest) {
   }
 }
 
-// End index of the '...' or "..." that opens at s[i] (backslash escapes only inside "..."); the string end if it never closes.
-const quoteEnd = (s, i) => { for (let j = i + 1; j < s.length; j++) { if (s[j] === '\\' && s[i] === '"') j++; else if (s[j] === s[i]) return j + 1; } return s.length; };
+// End index of the '...', "..." or $'...' that opens at s[i] (backslash escapes inside "..." and $'...' only, so $'\'' is one word); s.length + 1 if it never closes.
+const quoteEnd = (s, i) => { const a = +(s[i] === '$'), q = s[i + a], esc = a || q === '"'; for (let j = i + 1 + a; j < s.length; j++) { if (s[j] === '\\' && esc) j++; else if (s[j] === q) return j + 1; } return s.length + 1; };
 
 // Drop shell redirections (`2>&1`, `&>f`, `>f`, `> f`, `<<EOF`, `HEAD>f`) and their targets, so none can hide or reorder arguments. Quoted text is untouched.
 const REDIR = /^(?:&>>?|>>|>\||>&|<&|<<<|<<-?|<>|>|<)/;
@@ -80,7 +80,7 @@ function stripRedirs(s) {
   for (let i = 0; i < s.length;) {
     const c = s[i], op = REDIR.exec(s.slice(i))?.[0];
     if (c === '\\') { cur += s.slice(i, i + 2); i += 2; }
-    else if (c === '"' || c === "'") { const e = quoteEnd(s, i); cur += s.slice(i, e); i = e; }
+    else if (c === '"' || c === "'" || (c === '$' && s[i + 1] === "'")) { const e = quoteEnd(s, i); cur += s.slice(i, e); i = e; }
     else if (/\s/.test(c)) { flush(); i++; }
     else if (op) { if (/^\d+$/.test(cur)) cur = ''; else flush(); drop = true; i += op.length; }
     else { cur += c; i++; }
@@ -105,12 +105,38 @@ export function normalize(seg) {
   return s;
 }
 
+// The word after << or <<-: [delimiter, quoted]. A quoted word (any of ' " \) means the body expands nothing. null when no word follows.
+function hereWord(s, j) {
+  let d = '', quoted = false; const j0 = j;
+  for (; j < s.length && !/[\s;&|()<>]/.test(s[j]); j++) {
+    if (s[j] === '\\') { quoted = true; d += s[++j] ?? ''; }
+    else if (s[j] === "'" || s[j] === '"') { quoted = true; const e = quoteEnd(s, j); d += s.slice(j + 1, e - 1).replace(/\\(.)/g, s[j] === '"' ? '$1' : '\\$1'); j = e - 1; }
+    else if (!(s[j] === '$' && s[j + 1] === "'")) d += s[j];
+  }
+  return j > j0 ? [d, quoted] : null;
+}
+
 // Split on shell operators (&& || ; | |& newline, a background & but not the & of 2>&1 or &>), on ( ) and on a word-start `{ ` or ` }`, but only outside quotes. The `$` of `$(` and the backtick stay on the left so `git push origin $(...)` still fails the literal-arguments rule.
 // Inside "..." a `$(` or backtick still runs a command, so its contents are split out; the rest of the string is text and dropped. A # comment (word-start # to end of line) is never run: it is dropped, so a quote in it opens nothing.
+// A heredoc body (after `<<WORD`, from the next newline to the line WORD) is not shell text: it is read raw into docs, owned by the segment holding the `<<`. open: a quote, $'..', $(, backtick or heredoc never closed.
 function split(cmd) {
-  const out = [], st = [{ close: null, depth: 0 }]; // frames: a command context, or a "..." string ({ dq })
-  let buf = '';
+  const out = [], docs = [], pending = [], st = [{ close: null, depth: 0 }]; // frames: a command context, or a "..." string ({ dq })
+  let buf = '', open = false;
   const cut = () => { out.push(buf); buf = ''; };
+  const bodies = (i) => { // read the pending heredoc bodies that start after the newline at i; the index of the last char consumed
+    let pos = i + 1;
+    for (const p of pending.splice(0)) {
+      const lines = []; let found = false;
+      while (pos <= cmd.length && !found) {
+        const e = cmd.indexOf('\n', pos), end = e < 0 ? cmd.length : e, line = cmd.slice(pos, end);
+        if ((p.strip ? line.replace(/^\t+/, '') : line) === p.delim) found = true; else lines.push(line);
+        pos = end + 1;
+      }
+      open ||= !found;
+      docs.push({ owner: p.owner, text: lines.join('\n'), quoted: p.quoted });
+    }
+    return pos - 1;
+  };
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i], n = cmd[i + 1], top = st.at(-1);
     if (top.dq) {
@@ -121,10 +147,18 @@ function split(cmd) {
       else put(c);
     }
     else if (c === '\\') { buf += cmd.slice(i, i + 2); i++; }
-    else if (c === "'") { const e = quoteEnd(cmd, i); buf += cmd.slice(i, e); i = e - 1; }
+    else if (c === "'" || (c === '$' && n === "'")) { const e = quoteEnd(cmd, i); open ||= e > cmd.length; buf += cmd.slice(i, e); i = e - 1; }
     else if (c === '"') { st.push({ dq: true }); buf += c; }
     else if (c === '`') { buf += c; cut(); if (top.close === '`') st.pop(); else st.push({ close: '`' }); }
     else if (c === '#' && (buf === '' || /\s$/.test(buf))) { const e = cmd.indexOf('\n', i); i = (e < 0 ? cmd.length : e) - 1; }
+    else if (c === '<' && n === '<' && cmd[i - 1] !== '<' && cmd[i + 2] !== '<') {
+      const strip = cmd[i + 2] === '-'; let j = i + 2 + strip;
+      while (/[ \t]/.test(cmd[j] ?? '')) j++;
+      const w = hereWord(cmd, j);
+      if (w) pending.push({ delim: w[0], quoted: w[1], strip, owner: out.length });
+      buf += '<<'; i++;
+    }
+    else if (c === '\n' && pending.length) { cut(); i = bodies(i); }
     else if (c === '(') { cut(); if (top.close === ')') top.depth++; }
     else if (c === ')') { cut(); if (top.close === ')' && --top.depth === 0) st.pop(); }
     else if ((c === '&' && n === '&') || (c === '|' && (n === '|' || n === '&'))) { cut(); i++; }
@@ -133,7 +167,7 @@ function split(cmd) {
     else buf += c;
   }
   cut();
-  return out;
+  return { out, docs, open: open || st.length > 1 || pending.length > 0 };
 }
 
 // Commands that run a string as a command line (`sh -c P`, `eval P`, `su -c P`, `script -c P`, `flock f -c P`, `watch P`, `ssh host P`): the unquoted payloads.
@@ -149,22 +183,65 @@ function cArg(r) {
     r = a;
   }
 }
+// `busybox sh` is `sh`: [word, basename, rest] after skipping the busybox applet prefix.
+function head(s) {
+  let [h, r] = take(s), b = h?.replace(/^.*\//, '');
+  if (b === 'busybox') { [h, r] = take(r); b = h?.replace(/^.*\//, ''); }
+  return [h, b, r];
+}
+const SHELL = /^(?:sh|ash|bash|zsh|dash|ksh|fish)$/;
 function payload(s) {
-  const [h, r] = take(s), b = h?.replace(/^.*\//, '');
+  const [h, b, r] = head(s);
   if (h === 'eval') return [unquote(r)];
   if (b === 'su' || b === 'script' || b === 'flock') return cArg(r);
   if (b === 'watch') { const w = skipOpts(r, WATCH_ARG); return w ? [unquote(w)] : []; }
   if (b === 'ssh') { const c = skipOpts(take(skipOpts(r, SSH_ARG))[1], SSH_ARG); return c ? [unquote(c)] : []; }
-  if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(b ?? '')) return [];
+  if (!SHELL.test(b ?? '')) return [];
   for (let rest = r;;) {
     const [t, after] = take(rest);
     if (t === null || !/^[-+]/.test(t)) return [];
-    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(t)) { const [p] = take(after); return p === null ? [] : [unquote(p)]; }
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(t)) {
+      for (rest = after;;) { // `bash -c -- 'P'`, `bash -c -x 'P'`: the string is the first word that is not an option
+        const [o, a] = take(rest);
+        if (o === '--') { rest = a; break; }
+        if (!/^[-+]/.test(o ?? '')) break;
+        rest = /^[-+][oO]$/.test(o) ? take(a)[1] : a;
+      }
+      const [p] = take(rest); return p === null ? [] : [unquote(p)];
+    }
     rest = /^[-+][oO]$/.test(t) ? take(after)[1] : after;
   }
 }
 
-export const segments = (cmd) => split(cmd).map((s) => normalize(s)).filter(Boolean).flatMap((s) => [s, ...payload(s).flatMap(segments)]);
+// A command reads a shell script from stdin: `bash`, `busybox sh`, `ssh host` (not `sh -c`). Heredoc text anywhere in a command that has such a segment may reach it (`cat <<E | sh`), so all its bodies count as commands.
+const feedsShell = (n) => { const b = head(n)[1] ?? ''; return (SHELL.test(b) || b === 'ssh') && payload(n).length === 0; };
+
+// Quoted text is only data when nothing in the command can execute it. `echo 'x; git push -f origin main' | sh` and `... > f.sh && bash f.sh` run it, and `git -c core.pager='...' log` or `GIT_PAGER='...' git log` execute it,
+// so quotes are honoured only when every segment (judged raw, after redirections) starts with a command that never runs its arguments; anything else also gets the quote-blind scan.
+const NON_EXEC = /^(?:(?:echo|printf|grep|cat|rg|cd|pwd|ls|true|false|:|test|\[|head|tail|wc|sort|uniq|cut|tr|mkdir|touch|tee|sleep)|git\s+(?:add|commit|status|log|diff|show|push|fetch|switch|checkout|restore|branch|rm|mv|tag|stash|reset|clean|rev-parse)|gh\s+(?:pr\s+(?:create|edit|comment|view)|issue\s+(?:create|comment|view)))(?:\s|$)/;
+const RUNS_ARG = /(?:^|\s)--(?:upload-pack|receive-pack|exec|compress-program)(?![\w-])/; // options whose value is executed (git runs it through a shell for local and ssh remotes; sort runs a program)
+const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s)); };
+
+// Everything that may run. Quote-aware segments (with $( ), backtick, heredoc-body and payload extraction) are always used. Unless quotes are honoured, the text is also split quote-blind on && || ; | newline, as before.
+export function segments(cmd) {
+  const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)); // backslash-newline continues the line
+  const { out, docs, open } = split(joined), raw = [...out], extra = [];
+  let unsure = open;
+  const reads = out.some((o) => feedsShell(normalize(o)));
+  for (const d of docs) {
+    if (!d.quoted) { const x = split(`"${d.text.replace(/\\[\s\S]|"/g, (m) => (m === '"' ? '\\"' : m))}"`); raw.push(...x.out.slice(1)); unsure ||= x.open || x.docs.length > 0; } // an unquoted body still expands $( ) and backticks
+    if (reads) extra.push(...segments(d.text));
+  }
+  const run = (s) => { const n = normalize(s); return n ? [n, ...payload(n).flatMap(segments)] : []; };
+  const qa = [...raw.flatMap(run), ...extra];
+  if (!unsure && raw.every(nonExec)) return qa;
+  const seen = new Set(qa), blind = [];
+  for (const s of [cmd, joined].flatMap((t) => t.split(/&&|\|\||;|\||\n/))) {
+    const n = normalize(s);
+    if (n && !seen.has(n)) { seen.add(n); blind.push(n, ...payload(n).flatMap(segments)); }
+  }
+  return [...new Set([...qa, ...blind])];
+}
 
 export function deny(reason, hookEventName = 'PreToolUse') {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');

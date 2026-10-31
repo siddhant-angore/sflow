@@ -8,7 +8,7 @@ const protectedTarget = (tok, prot, branch) => {
 };
 
 export function pushReason(seg, prot, branch) {
-  const m = /^git\s+push\b(.*)$/.exec(seg);
+  const m = /^git\s+push\b([\s\S]*)$/.exec(seg);
   if (!m) return null;
   const toks = m[1].trim().split(/\s+/).filter(Boolean), args = [];
   for (let i = 0; i < toks.length; i++) {

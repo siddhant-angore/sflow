@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { segments as newSegments } from '../hooks/harness/lib.mjs';
+import * as newRules from '../hooks/harness/guard-rules.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -19,7 +22,8 @@ const repo = mkdtempSync(join(tmpdir(), 'harness-test-'));
 sh(repo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 'echo base={base}'] }));
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
-const bash = (command, cwd = repo) => ({ tool_name: 'Bash', tool_input: { command }, cwd });
+const corpus = new Set(); // every command sent through bash(), reused by the regression check
+const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash', tool_input: { command }, cwd });
 
 const mustDeny = [
   'git push --force origin feat/x', 'git push -f', 'git push -fu origin feat/x', 'git push -uf origin feat/x', 'git push --force-with-lease origin main',
@@ -100,6 +104,28 @@ sh(repo, 'git checkout -q --detach');
 assert.ok(!denied('pre-bash.mjs', bash('git push origin HEAD')), 'detached HEAD is not a protected push (git refuses it)');
 assert.ok(denied('pre-bash.mjs', bash('git push origin HEAD:main')), 'detached HEAD:main is still denied by the destination');
 sh(repo, 'git checkout -q feat/x');
+
+// SID-79 review: $'..', heredoc bodies, line continuation, and launchers that only the quote-blind scan on main caught.
+const L = (...lines) => lines.join('\n');
+const classA = [String.raw`echo $'\''; git push -f origin main`, String.raw`echo $'\''; git push -f origin main; echo \'`, String.raw`printf '%s' $'it\'s'; git reset --hard`];
+const classB = [L('cat <<EOF', "it's", 'EOF', 'git push -f origin main'), L('cat > f <<EOF', "don't", 'EOF', 'git push -f origin main'), L("cat <<'EOF'", "it's", 'EOF', 'git push -f origin main'), L('cat <<"EOF"', "it's", 'EOF', 'git push -f origin main'),
+  L('cat <<-EOF', "\tit's", '\tEOF', 'git push -f origin main'), L('cat <<EOF', "it's", 'EOF', 'git push -f origin main', "echo don't"), L("bash <<'E'", 'sleep 1 & git push -f origin main', 'E'), L('cat <<EOF | sh', 'git push -f origin main', 'EOF'), L('cat <<EOF | sh', 'sleep 1 & git push -f origin main', 'EOF'),
+  L('cat <<EOF', '$(git push -f origin main)', 'EOF'), L("ssh host <<'E'", 'git reset --hard', 'E'),
+  L('cat <<EOF', "it's", 'EOF', 'sleep 1 & git push -f origin main'), L('cat << EOF', "it's", 'EOF', '(git push -f origin main)'), L('cat <<E"OF"', "it's", 'EOF', 'sleep 1 & git push -f origin main'), L('cat <<\\EOF', "it's", 'EOF', 'sleep 1 & git push -f origin main'),
+  L('cat <<A <<B', "it's", 'A', "don't", 'B', 'sleep 1 & git push -f origin main'), L('cat <<EOF', 'git push -f origin main'), L('cat <<EOF', "it's", 'git push -f origin main'), L('busybox sh <<E', 'sleep 1 & git reset --hard', 'E'), L('cat <<EOF', '`git push -f origin main`', 'EOF')];
+const classBAllow = [L("cat > notes.md <<'EOF'", "Don't run git push -f origin main; it's blocked", 'EOF'), L('cat <<EOF', "it's (fine) & ok; really", 'EOF', 'git status'), L("git commit -F - <<'EOF'", "fix: don't (git push -f) here", 'EOF'),
+  L("cat <<'EOF'", '$(git push -f origin main)', 'EOF'), L('cat <<EOF', 'x', 'EOF', 'git status'),
+  L('git commit -m "$(cat <<\'EOF\'', "fix: it's (git push -f) ok; really", 'EOF', ')"'), L('git add -A && git commit -m "$(cat <<\'EOF\'', "fix: don't; git reset --hard", 'EOF', ')"'),
+  L('gh pr create --title t --body "$(cat <<\'EOF\'', '## Summary', "- don't git push -f; ok", 'EOF', ')"')];
+const classC = [L('git push -f \\', ' origin main'), L('git push \\', ' origin main'), L('git reset \\', ' --hard'), L('git branch \\', ' -D x'), L('gh api \\', ' -X PUT repos/o/r/pulls/1/merge'), L("git push 'a", "b' -f origin main")];
+const classCAllow = [L('git log \\', ' --oneline'), L('git push \\', ' origin feat/x')];
+const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'true; git push -f origin main'", `perl -e 'system("true; git push -f origin main")'`, "tmux new 'true; git push -f origin main'", "busybox sh -c 'true; git push -f origin main'", "fish -c 'true; git push -f origin main'",
+  "docker exec c sh -c 'true; git push -f origin main'", "parallel ::: 'true; git push -f origin main'", "echo 'x; git push -f origin main' | sh", "echo 'x; git push -f origin main' > f.sh && bash f.sh", "git -c core.pager='true; git push -f origin main' log",
+  "GIT_PAGER='true; git push -f origin main' git log", "git fetch --upload-pack='x; git reset --hard' origin", "git push --exec='x; git reset --hard' origin feat/x", "git push --receive-pack='true; git push -f origin main' origin feat/x",
+  "git push --exec 'x; git reset --hard' origin feat/x", "sort --compress-program='x; git reset --hard' f", "bash -c -- 'git push -f origin main'", "bash -c -x 'git push -f origin main'", "echo 'x; git push -f origin main"];
+const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
+for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
+for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
@@ -208,4 +234,42 @@ for (const input of [JSON.stringify({ hook_event_name: 'SessionStart', source: '
 const startEntry = JSON.parse(readFileSync(join(hooks, '..', 'hooks.json'), 'utf8')).hooks.SessionStart;
 assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
+// Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
+const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+const baseRev = ['086c230', 'origin/main'].find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
+assert.ok(baseRev, 'regression check needs history: neither 086c230 nor origin/main exists here; fetch full history (git fetch --unshallow origin main)');
+const baseSha = gitHere('rev-parse', '--short', baseRev), baseDir = mkdtempSync(join(tmpdir(), 'harness-main-'));
+for (const f of ['lib.mjs', 'guard-rules.mjs']) writeFileSync(join(baseDir, f), gitHere('show', `${baseRev}:workflows/hooks/${f}`));
+const [oldLib, oldRules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(baseDir, f)).href)));
+const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const oldDenies = (c, b) => Boolean(oldRules.envReason(c) || oldLib.segments(c).some((s) => oldRules.reason(s, guardCfg, b)));
+const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
+const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
+const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`, (x) => `bash -c "true && ${x}"`, (x) => `bash -c -- 'true; ${x}'`, (x) => `sh -c '${x}'`, (x) => `setsid sh -c 'true; ${x}'`, (x) => `busybox sh -c 'true; ${x}'`, (x) => `fish -c 'true; ${x}'`,
+  (x) => `docker exec c sh -c 'true; ${x}'`, (x) => `tmux new 'true; ${x}'`, (x) => `perl -e 'system("true; ${x}")'`, (x) => `parallel ::: 'true; ${x}'`, (x) => `xargs sh -c 'true; ${x}'`, (x) => `ssh host 'cd x; ${x}'`, (x) => `nohup sh -c 'true; ${x}'`,
+  (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
+  (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
+  (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`];
+const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
+const everything = [...new Set([...corpus, ...generated])];
+// Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
+const ALLOWLIST = new Map([
+  ['echo "a && git push -f"', 'quoted text of echo, which runs nothing'],
+  ["git commit -m 'x; git reset --hard'", 'quoted text of git commit -m'],
+  ["git push origin feat/x # don't push main", 'a real comment, never run'],
+  [L('git add -A && git commit -m "$(cat <<\'EOF\'', "fix: don't; git reset --hard", 'EOF', ')"'), 'quoted-delimiter heredoc data of cat inside git commit -m; every segment is git add, git commit or cat, none runs it'],
+  [L('git push \\', ' origin feat/x'), 'line continuation: it is `git push origin feat/x`; main saw a bare `git push \\` and denied it on the protected branch'],
+]);
+const rows = everything.flatMap((c) => ['feat/x', 'main'].map((b) => ({ c, b, was: oldDenies(c, b), now: newDenies(c, b) })));
+const lost = rows.filter((r) => r.was && !r.now);
+assert.deepEqual([...new Set(lost.filter((r) => !ALLOWLIST.has(r.c)).map((r) => r.c))], [], `regression vs ${baseSha}: main denied these, the new guard allows them`);
+for (const [c, why] of ALLOWLIST) {
+  assert.ok(everything.includes(c), `stale ALLOWLIST entry (not in the corpus): ${c} (${why})`);
+  assert.ok(lost.some((r) => r.c === c), `stale ALLOWLIST entry (main does not deny it, or the new guard denies it): ${c} (${why})`);
+}
+const gaps = rows.filter((r) => generated.includes(r.c) && !r.now);
+assert.deepEqual(gaps.filter((r) => r.was).map((r) => `${r.b}: ${r.c}`), [], 'a generated body x template that main denied must stay denied');
+console.log(`regression vs ${baseSha}: ${everything.length} commands x 2 branches, main denies ${rows.filter((r) => r.was).length}, new allows ${lost.length} (all allowlisted)`);
+console.log(`generated ${generated.length} combinations x 2 branches: new denies all but ${gaps.length} that main also allows`);
+
 console.log('hooks ok');
