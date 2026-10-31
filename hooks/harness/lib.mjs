@@ -219,8 +219,11 @@ const feedsShell = (n) => { const b = head(n)[1] ?? ''; return (SHELL.test(b) ||
 // Quoted text is only data when nothing in the command can execute it. `echo 'x; git push -f origin main' | sh` and `... > f.sh && bash f.sh` run it, and `git -c core.pager='...' log` or `GIT_PAGER='...' git log` execute it,
 // so quotes are honoured only when every segment (judged raw, after redirections) starts with a command that never runs its arguments; anything else also gets the quote-blind scan.
 const NON_EXEC = /^(?:(?:echo|printf|grep|cat|rg|cd|pwd|ls|true|false|:|test|\[|head|tail|wc|sort|uniq|cut|tr|mkdir|touch|tee|sleep)|git\s+(?:add|commit|status|log|diff|show|push|fetch|switch|checkout|restore|branch|rm|mv|tag|stash|reset|clean|rev-parse)|gh\s+(?:pr\s+(?:create|edit|comment|view)|issue\s+(?:create|comment|view)))(?:\s|$)/;
-const RUNS_ARG = /(?:^|\s)--(?:upload-pack|receive-pack|exec|compress-program)(?![\w-])/; // options whose value is executed (git runs it through a shell for local and ssh remotes; sort runs a program)
-const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s)); };
+// Options whose value is executed (git runs it via a shell; sort runs a program), matched by prefix (--up, --rec, --ex, --com) because both accept unique abbreviations. Tested on a de-quoted copy, since bash joins `--u''pl=`, `-"-"exe`, `$'--rec'eive-p=`.
+// A dash-word containing `$` or a backtick (`--u$(echo)pl=`) can expand to anything, so it is never trusted. Harmless hits such as --recurse-submodules just fall back to the quote-blind scan, as on main.
+const RUNS_ARG = /(?:^|\s)--(?:up|rec|ex|com)/;
+const EXPANDS_OPT = /(?:^|\s)['"\\$]*-\S*[$`]/;
+const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s.replace(/\$?['"]|\\/g, '')) && !EXPANDS_OPT.test(s)); };
 
 // Everything that may run. Quote-aware segments (with $( ), backtick, heredoc-body and payload extraction) are always used. Unless quotes are honoured, the text is also split quote-blind on && || ; | newline, as before.
 export function segments(cmd) {
