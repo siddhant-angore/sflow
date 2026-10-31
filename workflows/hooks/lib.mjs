@@ -19,8 +19,22 @@ export function repoRoot(cwd = process.cwd()) {
 }
 
 // Full ref names throughout: `origin/<b>` would resolve refs/tags/origin/<b> or refs/heads/origin/<b> first, and an agent can create both.
+// Even `refs/remotes/origin/<b>` falls back to refs/tags/ and refs/heads/ of that name when the remote ref is missing (rev-parse DWIM),
+// so every revision handed to git is the sha that `show-ref --verify` (exact ref, no fallback) returned.
 const REMOTE = 'refs/remotes/origin/';
-export const remoteDefault = (root) => { try { const r = git(root, 'symbolic-ref', `${REMOTE}HEAD`); return r.startsWith(REMOTE) ? r.slice(REMOTE.length) || null : null; } catch { return null; } };
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const plausible = (b) => typeof b === 'string' && /^[A-Za-z0-9._+@\/-]+$/.test(b) && !b.startsWith('-') && !b.includes('..') && !b.includes('//') && !b.endsWith('/') && !b.endsWith('.lock');
+export const remoteSha = (root, b) => {
+  if (!plausible(b)) return null;
+  try { const sha = git(root, 'show-ref', '--verify', '--hash', `${REMOTE}${b}`); return SHA.test(sha) ? sha : null; } catch { return null; }
+};
+export const remoteDefault = (root) => {
+  try {
+    const r = git(root, 'symbolic-ref', `${REMOTE}HEAD`);
+    const target = r.startsWith(REMOTE) ? r.slice(REMOTE.length) : '';
+    return target && remoteSha(root, target) ? target : null;
+  } catch { return null; }
+};
 export const baseCandidates = (root) => [...new Set([remoteDefault(root), 'main', 'master'].filter(Boolean))];
 
 // The policy is the .harness.json committed on origin's base branch: origin/HEAD's branch, then main, then master.
@@ -30,19 +44,21 @@ export function config(cwd = process.cwd()) {
   const root = repoRoot(cwd);
   if (!root) return { ...DEFAULTS, root: null, present: false };
   const candidates = baseCandidates(root);
-  let text = null, source = null, base = null;
+  let text = null, source = null, base = null, baseSha = null;
   for (const b of candidates) {
-    try { text = git(root, 'show', `${REMOTE}${b}:.harness.json`); source = `origin/${b}`; base = b; break; } catch {}
+    const sha = remoteSha(root, b);
+    if (!sha) continue;
+    try { text = git(root, 'show', `${sha}:.harness.json`); source = `origin/${b}`; base = b; baseSha = sha; break; } catch {}
   }
   if (text === null) {
     const head = remoteDefault(root);
-    return { ...DEFAULTS, protectedBranches: [...new Set([...DEFAULTS.protectedBranches, head].filter(Boolean))], allowMerge: false, gate: [], dod: [], root, present: false, source: null, base: head ?? 'main', candidates, ignoredLocal: existsSync(join(root, '.harness.json')) };
+    return { ...DEFAULTS, protectedBranches: [...new Set([...DEFAULTS.protectedBranches, head].filter(Boolean))], allowMerge: false, gate: [], dod: [], root, present: false, source: null, base: head ?? 'main', baseSha: remoteSha(root, head ?? 'main'), candidates, ignoredLocal: existsSync(join(root, '.harness.json')) };
   }
   const parsed = JSON.parse(text);
   // A non-array protectedBranches is dropped. The base branch must itself be protected, or an agent could push a new policy there; [] (solo repo) is kept.
   let protectedBranches = Array.isArray(parsed.protectedBranches) ? parsed.protectedBranches : DEFAULTS.protectedBranches;
   if (protectedBranches.length && !protectedBranches.includes(base)) protectedBranches = [...protectedBranches, base];
-  return { ...DEFAULTS, ...parsed, protectedBranches, root, present: true, source, base, candidates };
+  return { ...DEFAULTS, ...parsed, protectedBranches, root, present: true, source, base, baseSha, candidates };
 }
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
