@@ -69,8 +69,28 @@ function gitSub(rest) {
   }
 }
 
+// End index of the '...' or "..." that opens at s[i] (backslash escapes only inside "..."); the string end if it never closes.
+const quoteEnd = (s, i) => { for (let j = i + 1; j < s.length; j++) { if (s[j] === '\\' && s[i] === '"') j++; else if (s[j] === s[i]) return j + 1; } return s.length; };
+
+// Drop shell redirections (`2>&1`, `&>f`, `>f`, `> f`, `<<EOF`, `HEAD>f`) and their targets, so none can hide or reorder arguments. Quoted text is untouched.
+const REDIR = /^(?:&>>?|>>|>\||>&|<&|<<<|<<-?|<>|>|<)/;
+function stripRedirs(s) {
+  const out = []; let cur = '', drop = false;
+  const flush = () => { if (cur) { if (drop) drop = false; else out.push(cur); cur = ''; } };
+  for (let i = 0; i < s.length;) {
+    const c = s[i], op = REDIR.exec(s.slice(i))?.[0];
+    if (c === '\\') { cur += s.slice(i, i + 2); i += 2; }
+    else if (c === '"' || c === "'") { const e = quoteEnd(s, i); cur += s.slice(i, e); i = e; }
+    else if (/\s/.test(c)) { flush(); i++; }
+    else if (op) { if (/^\d+$/.test(cur)) cur = ''; else flush(); drop = true; i += op.length; }
+    else { cur += c; i++; }
+  }
+  flush();
+  return out.join(' ');
+}
+
 export function normalize(seg) {
-  let s = seg.trim();
+  let s = stripRedirs(seg.trim());
   for (let prev = null; prev !== s;) {
     prev = s;
     const [t, rest] = take(s);
@@ -80,12 +100,71 @@ export function normalize(seg) {
     else if (Object.hasOwn(WRAPPERS, b)) s = unwrap(b, rest);
     else if (b === 'git') { const r = gitSub(rest); s = r ? `git ${r}` : 'git'; }
     else if (EXES.has(b)) s = rest ? `${b} ${rest}` : b;
+    s = stripRedirs(s);
   }
   return s;
 }
 
-// Split on shell operators and on subshell, group and substitution boundaries; the `$` of `$(` and the backtick stay on the left so `git push origin $(...)` still fails the literal-arguments rule.
-export const segments = (cmd) => cmd.replace(/\$\(/g, '$\n(').replace(/`/g, '`\n').split(/&&|\|\||;|\||&|\n|\(|\)|\{\s|\s\}/).map((s) => normalize(s.trim())).filter(Boolean);
+// Split on shell operators (&& || ; | |& newline, a background & but not the & of 2>&1 or &>), on ( ) and on a word-start `{ ` or ` }`, but only outside quotes. The `$` of `$(` and the backtick stay on the left so `git push origin $(...)` still fails the literal-arguments rule.
+// Inside "..." a `$(` or backtick still runs a command, so its contents are split out; the rest of the string is text and dropped. A # comment (word-start # to end of line) is never run: it is dropped, so a quote in it opens nothing.
+function split(cmd) {
+  const out = [], st = [{ close: null, depth: 0 }]; // frames: a command context, or a "..." string ({ dq })
+  let buf = '';
+  const cut = () => { out.push(buf); buf = ''; };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i], n = cmd[i + 1], top = st.at(-1);
+    if (top.dq) {
+      const put = (x) => { if (!top.drop) buf += x; };
+      if (c === '\\') { put(cmd.slice(i, i + 2)); i++; }
+      else if (c === '"') { st.pop(); if (top.drop) buf = ''; else buf += c; }
+      else if (c === '`' || (c === '$' && n === '(')) { put(c); cut(); top.drop = true; st.push(c === '`' ? { close: '`' } : { close: ')', depth: 1 }); if (c === '$') i++; }
+      else put(c);
+    }
+    else if (c === '\\') { buf += cmd.slice(i, i + 2); i++; }
+    else if (c === "'") { const e = quoteEnd(cmd, i); buf += cmd.slice(i, e); i = e - 1; }
+    else if (c === '"') { st.push({ dq: true }); buf += c; }
+    else if (c === '`') { buf += c; cut(); if (top.close === '`') st.pop(); else st.push({ close: '`' }); }
+    else if (c === '#' && (buf === '' || /\s$/.test(buf))) { const e = cmd.indexOf('\n', i); i = (e < 0 ? cmd.length : e) - 1; }
+    else if (c === '(') { cut(); if (top.close === ')') top.depth++; }
+    else if (c === ')') { cut(); if (top.close === ')' && --top.depth === 0) st.pop(); }
+    else if ((c === '&' && n === '&') || (c === '|' && (n === '|' || n === '&'))) { cut(); i++; }
+    else if (c === ';' || c === '\n' || c === '|' || (c === '&' && n !== '>' && !'<>&|'.includes(cmd[i - 1] ?? ' '))) cut();
+    else if ((c === '{' && /\s/.test(n ?? '')) || (c === '}' && /^[\s;&|)]?$/.test(n ?? ''))) { if (buf === '' || /\s$/.test(buf)) cut(); else buf += c; }
+    else buf += c;
+  }
+  cut();
+  return out;
+}
+
+// Commands that run a string as a command line (`sh -c P`, `eval P`, `su -c P`, `script -c P`, `flock f -c P`, `watch P`, `ssh host P`): the unquoted payloads.
+const unquote = (t) => t.replace(/"((?:\\.|[^"\\])*)"|'([^']*)'/g, (_, d, q) => d?.replace(/\\(.)/g, '$1') ?? q);
+const SSH_ARG = new Set([...'bcDEeFIiJLlmOopQRSWw'].map((c) => `-${c}`)), WATCH_ARG = new Set(['-n', '--interval']);
+const skipOpts = (r, withArg) => { for (;;) { const [t, a] = take(r); if (!t?.startsWith('-')) return r; r = withArg.has(t) ? take(a)[1] : a; } };
+function cArg(r) {
+  for (;;) {
+    const [t, a] = take(r);
+    if (t === null) return [];
+    if (/^-[a-zA-Z]*c$/.test(t) || t === '--command') { const [p] = take(a); return p === null ? [] : [unquote(p)]; }
+    if (t.startsWith('--command=')) return [unquote(t.slice(10))];
+    r = a;
+  }
+}
+function payload(s) {
+  const [h, r] = take(s), b = h?.replace(/^.*\//, '');
+  if (h === 'eval') return [unquote(r)];
+  if (b === 'su' || b === 'script' || b === 'flock') return cArg(r);
+  if (b === 'watch') { const w = skipOpts(r, WATCH_ARG); return w ? [unquote(w)] : []; }
+  if (b === 'ssh') { const c = skipOpts(take(skipOpts(r, SSH_ARG))[1], SSH_ARG); return c ? [unquote(c)] : []; }
+  if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(b ?? '')) return [];
+  for (let rest = r;;) {
+    const [t, after] = take(rest);
+    if (t === null || !/^[-+]/.test(t)) return [];
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(t)) { const [p] = take(after); return p === null ? [] : [unquote(p)]; }
+    rest = /^[-+][oO]$/.test(t) ? take(after)[1] : after;
+  }
+}
+
+export const segments = (cmd) => split(cmd).map((s) => normalize(s)).filter(Boolean).flatMap((s) => [s, ...payload(s).flatMap(segments)]);
 
 export function deny(reason, hookEventName = 'PreToolUse') {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');

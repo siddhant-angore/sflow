@@ -65,6 +65,21 @@ for (const c of ['git -P log', 'git -p log', 'git --no-pager diff', 'git --pagin
   'git push origin HEAD', 'git push -u origin HEAD', 'git push origin feat/x 2>&1', 'git push -o ci.skip origin feat/x', 'git push origin HEAD > /dev/null', 'git push -u origin HEAD 2>&1 | tail -1', 'git push origin @', 'git push origin HEAD:feat/x', 'nice git log', 'timeout 30 git fetch origin', '(cd sub && git status)', 'echo $(git rev-parse HEAD)', 'gitk --all', './scripts/git-helper push -f', 'echo "git -P push -f"', 'grep -rn "env git push --force" docs', 'ls -la'])
   assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79/80 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin $(git branch --show-current)'))), /literal/, 'command substitution in push arguments stays denied');
+// Redirections before the arguments must not hide flags or refspecs; splitting is quote-aware; sh -c / eval payloads are checked.
+for (const [c, why] of [['git push 2>&1 origin HEAD:main', /protected branch/], ['git push 2>&1 origin feat/x:main', /protected branch/], ['git push &>/dev/null origin HEAD:main', /protected branch/], ['git push >&2 origin HEAD:main', /protected branch/],
+  ['git push 2>/dev/null origin feat/x:main', /protected branch/], ['git push 2>&1 origin :main', /deletion/], ['git push >&2 origin :main', /deletion/], ['git push 2>&1 -f origin feat/x', /force push/], ['git push >/dev/null 2>&1 --force origin feat/x', /force push/],
+  ['git push 2>&1 --mirror', /mirror/], ['git push &>/dev/null --mirror', /mirror/], ['git reset 2>&1 --hard', /git reset --hard/], ['git reset >/dev/null --hard', /git reset --hard/], ['git branch 2>&1 -D x', /force-deleting/], ['git branch &>/dev/null -D x', /force-deleting/],
+  ['git clean 2>&1 -fdx', /git clean/], ['git clean 2> err.log -fdx', /git clean/], ['git checkout 2>&1 .', /discarding/], ['git checkout >&2 .', /discarding/], ['git commit 2>&1 --no-verify -m x', /no-verify/], ['git commit 2>&1 -n -m x', /no-verify/],
+  ['gh api 2>&1 -X PUT repos/o/r/pulls/1/merge', /GitHub API/], ['gh api >&2 -X PUT repos/o/r/pulls/1/merge', /GitHub API/], ['git push origin feat/x 2>&1 & git push 2>&1 origin feat/x:main', /protected branch/],
+  ['2>/dev/null git push -f origin feat/x', /force push/], ['>/dev/null git reset --hard', /git reset --hard/], ['git -C . 2>&1 push -f origin feat/x', /force push/], ['git push origin HEAD>/dev/null -f', /force push/],
+  ['bash -c "true; git push -f origin main"', /force push/], ["sh -c 'cd x && git reset --hard'", /git reset --hard/], ['bash -lc "git push origin HEAD:main"', /protected branch/], ['eval "git push --force"', /force push/], ['eval git reset --hard', /git reset --hard/],
+  ['ssh host "cd x; git push -f origin main"', /force push/], ['su -c "cd x && git reset --hard" me', /git reset --hard/], ['watch "true; git reset --hard"', /git reset --hard/], ['script -c "true; git push -f" /dev/null', /force push/], ['flock /tmp/l -c "true; git push -f"', /force push/],
+  ['echo "$(git push -f)"', /force push/], ['git push origin $(git branch --show-current)', /literal/]])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), why, `SID-79 must deny: ${c}`);
+for (const c of ['git commit -m "fix (git push -f) docs"', 'echo "{ git push }"', "echo 'a & b'", 'echo "a && git push -f"', "git commit -m 'x; git reset --hard'", 'git log --format="%h (%s)"', 'git push origin feat/x 2>&1', 'git push -u origin HEAD 2>&1 | tail -1', 'git log 2>&1 | head',
+  'sleep 1 & git status', 'echo "\\"quoted\\" (paren)"', 'bash -c "git status"', "echo '$(git push -f)'", 'git status 2>&1 & git log', 'echo "a" > out.txt', 'git log >/dev/null 2>&1; git status',
+  "git push origin feat/x # don't push main", 'git status # reset --hard later', 'ssh host "git status"', 'watch git status', 'su -c "git log" me'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
 // SID-80: on a protected branch HEAD and @ are that branch.
 sh(repo, 'git checkout -q main');
@@ -79,6 +94,8 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin +HEAD'))), /\+ r
 for (const c of ['git push origin 2>&1', 'git push origin > /dev/null', 'git push origin >/dev/null 2>&1', 'git push origin 2>/dev/null', 'git push -o ci.skip origin', 'git push --push-option ci.skip origin', 'git push --repo origin', 'git push --receive-pack git-receive-pack origin', 'git push --exec x origin'])
   assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /protected branch main; create a feature branch and push that/, `SID-80 redirection/option arg: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin HEAD > /dev/null'))), /feature branch/, 'HEAD with redirection still denied');
+for (const c of ['git push 2>&1 origin', 'git push >/dev/null origin', 'git push > /dev/null origin', 'git push origin HEAD>/dev/null', '2>&1 git push origin', 'git push origin 2>&1 & git status'])
+  assert.ok(denied('pre-bash.mjs', bash(c)), `SID-80 must deny on main: ${c}`);
 sh(repo, 'git checkout -q --detach');
 assert.ok(!denied('pre-bash.mjs', bash('git push origin HEAD')), 'detached HEAD is not a protected push (git refuses it)');
 assert.ok(denied('pre-bash.mjs', bash('git push origin HEAD:main')), 'detached HEAD:main is still denied by the destination');

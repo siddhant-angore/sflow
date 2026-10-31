@@ -12,8 +12,7 @@ export function pushReason(seg, prot, branch) {
   if (!m) return null;
   const toks = m[1].trim().split(/\s+/).filter(Boolean), args = [];
   for (let i = 0; i < toks.length; i++) {
-    if (/^\d*(>>?|<|&>|>&|<&)/.test(toks[i])) { if (/^\d*(>>?|<|&>|>&|<&)$/.test(toks[i])) i++; } // shell redirection and its target
-    else if (/^(-o|--push-option|--repo|--receive-pack|--exec)$/.test(toks[i])) i++; // option argument, not a refspec
+    if (/^(-o|--push-option|--repo|--receive-pack|--exec)$/.test(toks[i])) i++; // option argument, not a refspec
     else args.push(toks[i]);
   }
   const flags = args.filter((a) => a.startsWith('-'));
