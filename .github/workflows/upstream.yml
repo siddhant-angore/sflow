@@ -34,9 +34,12 @@ jobs:
         run: |
           set +e
           check() {
-            node scripts/upstream.mjs --json > report.json
+            node scripts/upstream.mjs --json > report.json 2> report.err
             code=$?
             node scripts/upstream.mjs --from-json report.json > report.txt || echo "(could not render report.json; exit $code)" > report.txt
+            if [ -s report.err ]; then
+              { echo; echo 'stderr:'; cat report.err; } >> report.txt
+            fi
             cat report.txt
           }
           check
@@ -62,6 +65,11 @@ jobs:
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # Held sources are deferred, not current; name them so the deferral stays visible. A held source that has caught up is a stale hold.
           # Reads report.json from the check step (no second network run). A failed read says so rather than hiding them.
+          # An empty or invalid report.json would read as "no holds", so refuse to close on it.
+          if ! jq -e '.sources | type == "array"' report.json > /dev/null 2>&1; then
+            echo "::error::report.json is empty or invalid; not closing #$NUMBER. See the check step's log."
+            exit 1
+          fi
           if held=$(jq -r '.sources[] | select(.hold != null) | "- \(.source): \(.hold) [\(.status)]" + (if .status == "current" then " \u2014 STALE HOLD: upstream is current; remove the hold" else "" end)' report.json); then
             :
           else
