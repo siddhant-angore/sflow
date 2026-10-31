@@ -7,21 +7,21 @@
     },
     "cursor/plugins/pstack": {
       "repo": "https://github.com/cursor/plugins",
-      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "sha": "4dd1d05818d19792e7cd6e818f1667f95f7e1dbe",
       "license": "MIT",
       "licensePath": "pstack/LICENSE",
-      "note": "pstack by Lauren Tan (poteto), Claude Code build from harness/pstack/claude-code. Pinned to the commit before c742dd6, which rewrites Orchestrate (SID-43)"
+      "note": "pstack by Lauren Tan (poteto), Claude Code build from harness/pstack/claude-code. Includes the agentic Orchestrate rewrite c742dd6 (SID-43)"
     },
     "cursor/plugins/cursor-team-kit": {
       "repo": "https://github.com/cursor/plugins",
-      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "sha": "4dd1d05818d19792e7cd6e818f1667f95f7e1dbe",
       "license": "MIT",
       "licensePath": "cursor-team-kit/LICENSE",
       "note": "Cursor, plugin author Eric Zakariasson; six skills only"
     },
     "cursor/plugins/thermos": {
       "repo": "https://github.com/cursor/plugins",
-      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "sha": "4dd1d05818d19792e7cd6e818f1667f95f7e1dbe",
       "license": "MIT",
       "licensePath": "thermos/LICENSE",
       "note": "Cursor; three skills and two review subagents only"
@@ -163,7 +163,7 @@
     "skills/poteto-mode/playbooks/investigation.md": "77571758c2c19a53a0cbed7b48524615e2f4bc67ab36f70e548c691f50cafc90",
     "skills/poteto-mode/playbooks/multi-phase-plan.md": "2b4fbb547e5ccfe46d1279d714eb0199d28e995f06bdc4eda4afbca9221fbbe6",
     "skills/poteto-mode/playbooks/opening-a-pr.md": "4fb896f794a8c9e841bef0093926d1b8d7dbcdbf72d6e75cc3def4f2a05325d6",
-    "skills/poteto-mode/playbooks/orchestrate.md": "6b7f360c8be1c8699b43b5707fc125a4ee42f3b9fbfcdca8b777e7cb0013fadd",
+    "skills/poteto-mode/playbooks/orchestrate.md": "9a092d4a3949126b6760ea9ed5f6f9f427f8c51e7ad36f3de570871dc792d8df",
     "skills/poteto-mode/playbooks/pause-safely.md": "b11289c03892cccd00f803eec2261d628c61c6fcf701670a622954884b696070",
     "skills/poteto-mode/playbooks/perf-issue.md": "8ec46e347b77312543b33fe7fe5d46d44d6dafca28ce132bb2d490b88ce7d18d",
     "skills/poteto-mode/playbooks/prototype.md": "7aa1f52c691c3d46d5afc527b23f90977fce869ce33573c73c81a4c7f0cde962",
@@ -184,10 +184,7 @@
     "skills/poteto-mode/scripts/bun.lock": "667d9cf7222e9aae3fa42a4be383e657784216e9df115da02227fbc5ac7bbe46",
     "skills/poteto-mode/scripts/check-plan.mjs": "e3d4e9ca638c6fb4a2b52c434c17c7af30da4fdd44605ccfe9906f82fe37b555",
     "skills/poteto-mode/scripts/check-plan.test.ts": "848d321f2b76299d1b2d7bb46c929dbaebef08ca4ba8669dbe09d1d5c86f96e2",
-    "skills/poteto-mode/scripts/orch/orch.test.ts": "c15bbcc17700acb812722bf3330e2b2ee2838407636cdb86784cdd9bb8ee93f3",
-    "skills/poteto-mode/scripts/orch/orch.ts": "47c92c57e8276616d8de94665a126bd832e748036afa8d0ffdbacb7946decb5c",
-    "skills/poteto-mode/scripts/orch/store.ts": "963c9a30c21f395d9b26a992fae83dc09afff614edbf7f1bc4909be73aa59443",
-    "skills/poteto-mode/scripts/package.json": "fd511a0c01f522e0c781ddd8eccea0e91697a0856c6e6a3261de78a6a0287c72",
+    "skills/poteto-mode/scripts/package.json": "c9db6bb9362c6e319e395b358b113ebc72ab06b6c5e3a095093f6ebfdafe1c57",
     "skills/poteto-mode/scripts/watch-pr/cli.test.ts": "a35592b4c6da96caf8d47987e9cd503fab6c7774ab87d11a43f24b4b5df2a9d1",
     "skills/poteto-mode/scripts/watch-pr/cli.ts": "89c08863089181a232be782c4b2ed90a1552f44aeecb0dcb7aac2c623620e680",
     "skills/poteto-mode/scripts/watch-pr/fakes.test-helper.ts": "cf0c5ee61b4a73444c1b775cfb6c81a40d312e055dd21a1f5eae6276e54de13f",
@@ -752,7 +749,7 @@
     "docs/guide/04-design.md": "2421f2793303a2cb02aabac5ecdc4bfafb5e68024a28123f4f134cc7df4a5211",
     "docs/guide/05-build-and-clean.md": "1284e80595ae4f214dfa7c5c5f7758ff90a47b3273aa7b8142e51e574f5c5290",
     "docs/guide/06-verify-and-ship.md": "3f761af6629969d1d7d957c6a2cdadb41f1c098c14d6bbe8c2a5d3855a4b4409",
-    "docs/guide/07-overnight.md": "82fe485fea210c72e742dd09c5ce340e2bba25768354b7485ecad91a76686ea7",
+    "docs/guide/07-overnight.md": "04a1709d62ad9b6f2423a8c19138c28769bc431db03893b24b887d298fe6f2e3",
     "docs/guide/08-principles.md": "0b26b85292f0c09768abe727c9e92987dbf81f5b439a4871034c2fd1c4cb1723",
     "docs/guide/09-make-it-yours.md": "50642f7f894988f7c263700f46478e7aed7eb94a257683350d91a9a0d70dc141",
     "docs/guide/10-recipes-and-pitfalls.md": "784da0a2373e58123c4591b778909efc8d01b2b1f820b6029fa85a3fe2491fb4",
