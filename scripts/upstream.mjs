@@ -2,6 +2,7 @@
 // Reports how far each vendored source has drifted from its upstream default branch. Read-only, network-only, no tokens.
 //   node scripts/upstream.mjs          # text report
 //   node scripts/upstream.mjs --json   # machine-readable report
+//   node scripts/upstream.mjs --from-json <file>   # text report from a saved --json report; no network, exit 0
 // Exit codes: 1 = error (pin missing/unreachable, manifest/lock sha mismatch or a key in only one of them, network), else 10 = drift (some source
 // behind), else 0. A behind source with `"hold": "<reason>"` in vendor.manifest.json reports 'held', not 'behind', and does not cause exit 10; errors still win.
 // SFLOW_UPSTREAM_ROOT overrides the repo root (manifest, lock, overlays, collision checks); the real-git test uses it.
@@ -188,6 +189,13 @@ function realOpenRepo() {
 }
 
 function main() {
+  const saved = process.argv.indexOf('--from-json');
+  if (saved >= 0) {
+    const file = process.argv[saved + 1];
+    if (!file || file.startsWith('--')) { console.error('--from-json needs a file'); process.exitCode = 2; return; }
+    console.log(formatText(JSON.parse(readFileSync(file, 'utf8'))));
+    return;
+  }
   const json = process.argv.includes('--json');
   const manifest = JSON.parse(readFileSync(join(root, 'vendor.manifest.json'), 'utf8'));
   const lock = JSON.parse(readFileSync(join(root, 'vendor.lock.json'), 'utf8'));
