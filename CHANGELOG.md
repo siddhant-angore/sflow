@@ -10,6 +10,25 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Changed
+
+- `addyosmani/agent-skills` bumped from `eb07f19f52c2` to [`8bfcc1f9916f`](https://github.com/addyosmani/agent-skills/commit/8bfcc1f9916f2eea55494d8c1fa7f4bde867dd9e) (upstream 0.6.15; 12 vendored files change and one is added, the lock goes from 916 to 917 files). `constraint-driven-development` wires `npm run check:security` and `npm run check:a11y` through the new `scripts/quality-gate.mjs` (#694), which only reads a semgrep or axe JSON report and exits 0 (below threshold), 1 (blocking findings) or 2 (unusable report or invocation), and adds a "run the real CI command against a known violation and a clean control" step; `test-driven-development` says to exercise the real boundary for crash and rollback behavior (#750); `security-and-hardening` adds session cookies to its description (#759) and, with `git-workflow-and-versioning`, `references/security-checklist.md` and `hardening-patterns.md`, the staged-secret scan now lists file names only (`git diff --cached -i -G... --name-only`) so credentials are not echoed (#718); `doubt-driven-development` says to strip reasoning but keep contradicting evidence (#754); `context-engineering` replaces the fixed 75% trim point with "compact well before the host's limit" (#739); `browser-testing-with-devtools` waits for fonts and resize observers to settle before measuring layout after a viewport or font change, and `references/accessibility-checklist.md` states the large-text contrast thresholds precisely (#733); `shipping-and-launch` types the `ErrorBoundary` example with `React.PropsWithChildren` (#683); `git-workflow-and-versioning` also applies to inline diffs (#620). (SID-106)
+
+**Upstream pins**
+
+`addyosmani/agent-skills` is bumped to upstream 0.6.15; the other seven pins are unchanged. The lock goes from 916 files at `v0.5.0` to 917.
+
+| Source | Author | License | Pin |
+|---|---|---|---|
+| `cursor/plugins/pstack` | Lauren Tan | MIT | unchanged: [`4dd1d05818d1`](https://github.com/cursor/plugins/commit/4dd1d05818d19792e7cd6e818f1667f95f7e1dbe) |
+| `cursor/plugins/cursor-team-kit` | Cursor (Eric Zakariasson) | MIT | unchanged: [`4dd1d05818d1`](https://github.com/cursor/plugins/commit/4dd1d05818d19792e7cd6e818f1667f95f7e1dbe) |
+| `cursor/plugins/thermos` | Cursor | MIT | unchanged: [`4dd1d05818d1`](https://github.com/cursor/plugins/commit/4dd1d05818d19792e7cd6e818f1667f95f7e1dbe) |
+| `mattpocock/skills` | Matt Pocock | MIT | unchanged: [`a496f5513d4a`](https://github.com/mattpocock/skills/commit/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa) |
+| `addyosmani/agent-skills` | Addy Osmani | MIT | bumped: [`8bfcc1f9916f`](https://github.com/addyosmani/agent-skills/commit/8bfcc1f9916f2eea55494d8c1fa7f4bde867dd9e) (was [`eb07f19f52c2`](https://github.com/addyosmani/agent-skills/commit/eb07f19f52c2669f2364897aaa293e2aaddd7b1c)) |
+| `flutter/agent-plugins` | Flutter team | BSD-3-Clause | unchanged: [`90fa51dc9d1b`](https://github.com/flutter/agent-plugins/commit/90fa51dc9d1bd6694cee226397e08ec8193e9e69) |
+| `VeryGoodOpenSource/vgv-ai-flutter-plugin` | Very Good Ventures | MIT | unchanged: [`e2231bfbd948`](https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin/commit/e2231bfbd94888eab8b179eaed8fa997d09c50bd) |
+| `VeryGoodOpenSource/vgv-wingspan` | Very Good Ventures | MIT | unchanged: [`e78608956d26`](https://github.com/VeryGoodOpenSource/vgv-wingspan/commit/e78608956d26777efcda2e6ecefb0a3e981fb115) |
+
 ## [0.5.0] - 2026-10-31
 
 Harness security hardening. The policy fails closed and is read only from the base branch on origin (SID-65, #13); the Bash guard normalises git invocations, wrappers, redirections and quoting, and resolves `HEAD`/`@` in pushes (SID-79, SID-80, #16); and the policy files can no longer be written from the shell (SID-66, #15). Breaking for 0.4.0 users of the harness: with no `.harness.json` committed on the base branch on origin, strict defaults apply (`main`, `master` and the remote default branch protected, merges denied, no gate), and an uncommitted or branch-only policy is ignored (see the Migration note under Fixed).
