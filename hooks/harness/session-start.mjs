@@ -2,10 +2,12 @@
 // Fail-open: any error exits 0 with no output, so a broken hook never blocks a session.
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { config, ignoredNote, readEvent } from './lib.mjs';
 
+const ev = readEvent();
 try {
   const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const context = [
+  const lines = [
     'You have sflow.',
     '',
     'Invoke the `sflow:sflow` skill and follow it when a task meets any of these:',
@@ -19,7 +21,9 @@ try {
     `The Skill tool refuses the pstack skills (tdd, how, why, arena, poteto-mode, and the principles). Read them with the Read tool instead: \`${join(pluginRoot, 'skills', '<name>', 'SKILL.md')}\`. docs/harness/claude-code.md in the same plugin explains the mapping.`,
     '',
     'User instructions (CLAUDE.md, AGENTS.md, direct requests) take precedence.',
-  ].join('\n');
+  ];
+  try { const cfg = config(ev.cwd ?? process.cwd()); if (cfg.ignoredLocal) lines.push('', ignoredNote(cfg)); } catch {} // own try: the note is optional
+  const context = lines.join('\n');
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }) + '\n');
 } catch {
   process.exit(0);

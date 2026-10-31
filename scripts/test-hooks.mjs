@@ -1,7 +1,7 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -139,6 +139,143 @@ writeFileSync(join(solo, '.harness.json'), JSON.stringify({ protectedBranches: [
 sh(solo, 'git add .harness.json && git commit -qm p && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin');
 assert.equal(run('pre-bash.mjs', bash('git push origin main', solo)), null, 'solo: push to main allowed');
 assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 'solo: force push still denied');
+
+// SID-65: the policy is the .harness.json committed on origin's base branch (origin/HEAD's branch, then main, then master).
+// The working tree is never policy. With none committed the guard fails closed: strict defaults, merges denied, no gate.
+// (No existing assertion above needed adapting: none relied on the working-tree fallback.)
+{
+  const { config } = await import(join(hooks, 'lib.mjs'));
+  const made = [];
+  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid65-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const mk = (name) => { // repo on feat/x, bare origin with main only (no policy), origin/HEAD unset
+    const d = scratch(name);
+    sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
+    return d;
+  };
+  const policyOn = (d, branch, obj) => sh(d, `git checkout -q -B ${branch} $(git rev-parse -q --verify origin/${branch} || echo HEAD) && printf '%s' '${JSON.stringify(obj)}' > .harness.json && git add .harness.json && git commit -qm policy && git push -q origin ${branch} && git checkout -q feat/x && git branch -q -D ${branch}`);
+  const verdict = (d, c) => { const r = run('pre-bash.mjs', bash(c, d)); return { deny: r?.hookSpecificOutput?.permissionDecision === 'deny', why: reasonOf(r) }; };
+  const local = { allowMerge: true, protectedBranches: ['develop'] };
+  try {
+    // a. untracked working-tree policy is ignored
+    const a = mk('a');
+    writeFileSync(join(a, '.harness.json'), JSON.stringify(local));
+    const ca = config(a);
+    assert.deepEqual([ca.present, ca.allowMerge, ca.source, ca.ignoredLocal], [false, false, null, true], 'a: untracked policy is not read');
+    const ma = verdict(a, 'gh pr merge 1');
+    assert.ok(ma.deny, 'a: merge denied');
+    assert.match(ma.why, /policy: none committed on origin \(checked origin\/main, origin\/master\)/);
+    assert.match(ma.why, /working-tree \.harness\.json is NOT trusted/);
+    assert.match(ma.why, /templates\/harness\.json/);
+    assert.match(ma.why, /git fetch origin/);
+    assert.ok(verdict(a, 'git push origin feat:main').deny, 'a: push to main denied');
+    assert.ok(!verdict(a, 'git push origin feat:develop').deny, 'a: the ignored file does not move protection to develop');
+
+    // b. committed on the feature branch only (badminton-stats case): still ignored
+    const b = mk('b');
+    writeFileSync(join(b, '.harness.json'), JSON.stringify(local));
+    sh(b, 'git add .harness.json && git commit -qm policy');
+    const cb = config(b);
+    assert.deepEqual([cb.present, cb.allowMerge, cb.ignoredLocal], [false, false, true], 'b: branch-only policy is not read');
+    assert.ok(verdict(b, 'gh pr merge 1').deny, 'b: merge denied');
+    assert.ok(verdict(b, 'git push origin feat:main').deny, 'b: push to main denied');
+
+    // c. policy only on origin/develop, origin/HEAD -> develop
+    const c = mk('c');
+    policyOn(c, 'develop', { gate: [] });
+    sh(c, 'git remote set-head origin develop');
+    const cc = config(c);
+    assert.deepEqual([cc.present, cc.source, cc.base], [true, 'origin/develop', 'develop'], 'c: found beyond main/master');
+    const pc = verdict(c, 'git push origin feat:develop');
+    assert.ok(pc.deny, 'c: push to develop denied');
+    assert.match(pc.why, /policy: \.harness\.json on origin\/develop/);
+    assert.ok(verdict(c, 'gh pr merge 1').deny, 'c: allowMerge defaults to false');
+    policyOn(c, 'develop', { gate: [], allowMerge: true });
+    sh(c, 'git fetch -q origin');
+    assert.ok(!verdict(c, 'gh pr merge 1').deny, 'c: a committed allowMerge is honoured');
+    assert.match(verdict(c, 'git push origin feat:develop').why, /policy: \.harness\.json on origin\/develop/);
+
+    // d. origin/HEAD unset, policy only on origin/master
+    const d = mk('d');
+    policyOn(d, 'master', { gate: [] });
+    const cd = config(d);
+    assert.deepEqual([cd.present, cd.source, cd.base], [true, 'origin/master', 'master'], 'd: master fallback');
+
+    // e. no policy, origin/HEAD -> develop: develop is protected by the defaults, main still is
+    const e = mk('e');
+    sh(e, 'git push -q origin feat/x:develop && git fetch -q origin && git remote set-head origin develop');
+    const ce = config(e);
+    assert.deepEqual([ce.present, ce.base, [...ce.protectedBranches].sort()], [false, 'develop', ['develop', 'main', 'master']], 'e: remote default is protected');
+    assert.ok(verdict(e, 'git push origin feat:develop').deny, 'e: push to develop denied');
+    assert.ok(verdict(e, 'git push origin feat:main').deny, 'e: push to main denied');
+    assert.match(verdict(e, 'gh pr merge 1').why, /protected: main, master, develop/);
+
+    // f. committed protectedBranches without the base: the base is added
+    const f = mk('f');
+    policyOn(f, 'main', { protectedBranches: ['release'] });
+    const cf = config(f);
+    assert.deepEqual([...cf.protectedBranches].sort(), ['main', 'release'], 'f: base added');
+    assert.ok(verdict(f, 'git push origin feat:main').deny, 'f: main still protected');
+    assert.ok(verdict(f, 'git push origin feat:release').deny, 'f: release protected');
+    assert.ok(!verdict(f, 'git push origin feat/x').deny, 'f: a feature branch is not');
+
+    // g. the documented adoption path: no policy, a human merges one on origin, git fetch origin
+    const g = mk('g');
+    assert.ok(verdict(g, 'gh pr merge 1').deny, 'g: denied before adoption');
+    assert.ok(!verdict(g, 'git push origin feat/x').deny && !existsSync(join(g, 'gate-ran')), 'g: no policy, no gate run');
+    const human = scratch('g-human');
+    sh(human, `git clone -q "${g}.origin.git" . && git config user.email h@h && git config user.name h && printf '%s' '${JSON.stringify({ allowMerge: true, gate: ['touch gate-ran'] })}' > .harness.json && git add .harness.json && git commit -qm policy && git push -q origin main`);
+    assert.equal(config(g).present, false, 'g: stale origin/main until fetch');
+    sh(g, 'git fetch -q origin');
+    const cg = config(g);
+    assert.deepEqual([cg.present, cg.source, cg.allowMerge], [true, 'origin/main', true], 'g: adopted after fetch');
+    assert.ok(!verdict(g, 'gh pr merge 1').deny, 'g: merge allowed after adoption');
+    assert.ok(!verdict(g, 'git push origin feat/x').deny && existsSync(join(g, 'gate-ran')), 'g: the committed gate runs');
+
+    // h. remote-tracking refs locate the policy, so local rewrites are refused
+    for (const cmd of ['git remote set-head origin feat/x', 'git remote set-head origin -d', 'git remote set-head origin --delete', 'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/x',
+      'git symbolic-ref -d refs/remotes/origin/HEAD', 'git update-ref refs/remotes/origin/main HEAD', 'git fetch origin feat/x:refs/remotes/origin/main', 'git fetch origin +feat/x:refs/remotes/origin/main', "git fetch origin 'feat/x:refs/remotes/origin/main'"]) {
+      const v = verdict(a, cmd);
+      assert.ok(v.deny, `h: must deny: ${cmd}`);
+      assert.match(v.why, /remote-tracking refs locate the harness policy; rewriting them locally is not allowed \(git fetch updates them\)/, cmd);
+    }
+    for (const cmd of ['git config remote.origin.fetch +refs/heads/x:refs/remotes/origin/main', "git config remote.origin.fetch '+refs/heads/x:refs/remotes/origin/main'", 'git config --add remote.origin.fetch +refs/heads/x:refs/remotes/origin/main',
+      'git config --replace-all remote.origin.fetch +refs/heads/x:refs/remotes/origin/main', 'git config --unset remote.origin.fetch', 'git config --unset-all remote.origin.fetch', 'git config --global remote.origin.fetch x', 'git config set remote.origin.fetch x']) {
+      const v = verdict(a, cmd);
+      assert.ok(v.deny, `h: must deny: ${cmd}`);
+      assert.match(v.why, /remote-tracking refs locate the harness policy/, cmd);
+    }
+    for (const cmd of ['git -c remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main fetch', "git -c 'remote.origin.fetch=+refs/heads/x:refs/remotes/origin/main' fetch origin",
+      'git --config-env=remote.origin.fetch=FETCHSPEC fetch', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=x git fetch', "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch=x'\" git fetch"]) {
+      const v = verdict(a, cmd);
+      assert.ok(v.deny, `h: must deny: ${cmd}`);
+      assert.match(v.why, /remote-tracking refs locate the harness policy; rewriting them locally is not allowed \(git fetch updates them\)/, cmd);
+    }
+    for (const cmd of ['gh repo edit --default-branch feat/x', 'gh repo edit o/r --description x']) {
+      const v = verdict(a, cmd);
+      assert.ok(v.deny, `h: must deny: ${cmd}`);
+      assert.match(v.why, /repo lifecycle and settings, secrets, and workflow triggers are human actions/, cmd);
+    }
+    for (const cmd of ['git config --get remote.origin.fetch', 'git config --get-all remote.origin.fetch', 'git config -l', 'git config --list', 'git config remote.origin.fetch', 'git config get remote.origin.fetch', 'git config user.name x', 'gh repo view', 'git -c color.ui=never fetch origin', 'git -c http.lowSpeedLimit=1 fetch'])
+      assert.ok(!verdict(a, cmd).deny, `h: must allow: ${cmd}`);
+    for (const cmd of ['git remote set-head origin --auto','git remote set-head origin -a', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git symbolic-ref HEAD', 'git fetch', 'git fetch origin', 'git fetch -q origin main', 'git remote -v'])
+      assert.ok(!verdict(a, cmd).deny, `h: must allow: ${cmd}`);
+
+    // i. the reset --hard advice never suggests stash
+    const ri = verdict(a, 'git reset --hard');
+    assert.ok(ri.deny && !/stash/.test(ri.why) && /git restore/.test(ri.why), 'i: reset advice names git restore, not stash');
+
+    // j. SessionStart says so when it ignores a working-tree policy; stays quiet otherwise
+    const ctxOf = (cwd) => run('session-start.mjs', { hook_event_name: 'SessionStart', cwd }).hookSpecificOutput.additionalContext;
+    assert.match(ctxOf(a), /working-tree \.harness\.json is ignored/);
+    assert.match(ctxOf(a), /templates\/harness\.json/);
+    assert.match(ctxOf(b), /working-tree \.harness\.json is ignored/);
+    assert.doesNotMatch(ctxOf(g), /\.harness\.json is ignored/, 'j: committed policy, nothing ignored');
+    assert.doesNotMatch(ctxOf(tmpdir()), /\.harness\.json is ignored/, 'j: non-repo cwd unchanged');
+    assert.equal(JSON.parse(execFileSync('node', [join(hooks, 'session-start.mjs')], { input: 'not json', cwd: tmpdir() }).toString()).hookSpecificOutput.hookEventName, 'SessionStart', 'j: garbage input still valid');
+  } finally {
+    for (const d of made) rmSync(d, { recursive: true, force: true });
+  }
+}
 
 // SessionStart hook: valid additionalContext JSON naming the router and the Read-by-path rule; fails open on garbage input.
 for (const input of [JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }), 'not json', '']) {

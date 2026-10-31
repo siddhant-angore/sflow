@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const DEFAULTS = { protectedBranches: ['main', 'master'], gate: [], allowMerge: false, dod: [] };
 export const PLACEHOLDER = 'replace with the project checks';
@@ -17,22 +18,39 @@ export function repoRoot(cwd = process.cwd()) {
   try { return git(cwd, 'rev-parse', '--show-toplevel'); } catch { return null; }
 }
 
-// The policy comes from the protected branch on origin, so an agent edit in the working tree changes nothing.
-// A repo without .harness.json anywhere is not under the harness: config().present is false.
+export const remoteDefault = (root) => { try { return git(root, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').replace(/^origin\//, '') || null; } catch { return null; } };
+export const baseCandidates = (root) => [...new Set([remoteDefault(root), 'main', 'master'].filter(Boolean))];
+
+// The policy is the .harness.json committed on origin's base branch: origin/HEAD's branch, then main, then master.
+// The working tree is never read as policy, so an agent edit changes nothing. With no committed policy the config fails
+// closed: strict defaults (merges denied, no gate, no Stop items) and present is false. Parse errors throw; pre-bash denies on throw.
 export function config(cwd = process.cwd()) {
   const root = repoRoot(cwd);
   if (!root) return { ...DEFAULTS, root: null, present: false };
-  const local = join(root, '.harness.json');
-  let text = null, source = null;
-  for (const b of DEFAULTS.protectedBranches) {
-    try { text = git(root, 'show', `origin/${b}:.harness.json`); source = `origin/${b}`; break; } catch {}
+  const candidates = baseCandidates(root);
+  let text = null, source = null, base = null;
+  for (const b of candidates) {
+    try { text = git(root, 'show', `origin/${b}:.harness.json`); source = `origin/${b}`; base = b; break; } catch {}
   }
-  if (text === null && existsSync(local)) { text = readFileSync(local, 'utf8'); source = 'working tree'; }
-  if (text === null) return { ...DEFAULTS, root, present: false };
+  if (text === null) {
+    const head = remoteDefault(root);
+    return { ...DEFAULTS, protectedBranches: [...new Set([...DEFAULTS.protectedBranches, head].filter(Boolean))], allowMerge: false, gate: [], dod: [], root, present: false, source: null, base: head ?? 'main', candidates, ignoredLocal: existsSync(join(root, '.harness.json')) };
+  }
   const parsed = JSON.parse(text);
-  if (!Array.isArray(parsed.protectedBranches)) delete parsed.protectedBranches;
-  return { ...DEFAULTS, ...parsed, root, present: true, source };
+  // A non-array protectedBranches is dropped. The base branch must itself be protected, or an agent could push a new policy there; [] (solo repo) is kept.
+  let protectedBranches = Array.isArray(parsed.protectedBranches) ? parsed.protectedBranches : DEFAULTS.protectedBranches;
+  if (protectedBranches.length && !protectedBranches.includes(base)) protectedBranches = [...protectedBranches, base];
+  return { ...DEFAULTS, ...parsed, protectedBranches, root, present: true, source, base, candidates };
 }
+
+const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const ADOPT = (base) => ` The working-tree .harness.json is NOT trusted until it is on origin/${base}: a human commits it on a branch (start from ${join(pluginRoot, 'templates', 'harness.json')}), opens a PR, merges it into ${base}, then run git fetch origin.`;
+
+// One line saying which policy is in force, for deny messages.
+export const policyNote = (cfg) => cfg.present
+  ? `policy: .harness.json on origin/${cfg.base}`
+  : `policy: none committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}); strict defaults, protected: ${cfg.protectedBranches.join(', ')}, merges denied.${cfg.ignoredLocal ? ADOPT(cfg.base) : ''}`;
+export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: no policy is committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}), so strict defaults apply (protected: ${cfg.protectedBranches.join(', ')}, merges denied, no gate).${ADOPT(cfg.base)}`;
 
 export const gitDir = (root) => git(root, 'rev-parse', '--absolute-git-dir');
 export const currentBranch = (root) => { try { return git(root, 'symbolic-ref', '--short', 'HEAD'); } catch { return null; } };

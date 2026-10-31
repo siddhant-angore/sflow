@@ -51,14 +51,15 @@ pstack's Claude Code build tells its skills to read `docs/harness/claude-code.md
 
 ## Harness hooks
 
-sflow ships the hooks that a review found every harness assumes and most lack. They activate when a repository has `.harness.json` on its protected branch:
+sflow ships the hooks that a review found every harness assumes and most lack. The guard is always on, in every git repository: with no policy committed, the protected branches are `main`, `master` and the remote default branch (`origin/HEAD`), and merges are denied. A `.harness.json` committed on the base branch on origin adds the gate, the Stop/DoD hook, `allowMerge` and custom `protectedBranches`:
 
 ```json
 { "protectedBranches": ["main"], "allowMerge": false, "gate": ["npm run lint && npm test"], "dod": [] }
 ```
 
 - Guard: no force or `+` push, no push to a protected branch, no `reset --hard`, `clean -f`, `branch -D`, history rewrite, `--no-verify`, `gh pr merge`, GitHub write API call, release, or publish. `protectedBranches: []` turns off only the push rule for a solo repo.
-- Policy: `.harness.json` and `.claude/settings.json` are read-only to the agent, and the policy is read from `origin/<protected>`, not the working tree.
+- Policy: `.harness.json` and `.claude/settings.json` are read-only to the agent. The policy is read from the base branch on origin (the branch `origin/HEAD` points at, then `main`, then `master`) and the base branch stays protected unless `protectedBranches` is `[]`. The working tree is never read as policy: an uncommitted or branch-only `.harness.json` is ignored until it is merged, and deny messages and the SessionStart context say which policy is in force. Local rewrites of remote-tracking refs (`git remote set-head <remote> <branch>`, `git symbolic-ref`/`git update-ref` on `refs/remotes/`, `git fetch` into `refs/remotes/`, writes to `remote.<name>.fetch` via `git config`, `-c`, or `GIT_CONFIG_*` env) are refused, because they locate the policy. `gh repo edit` is refused too (it can change the default branch).
+- Adopting a policy: a human commits `.harness.json` (start from `templates/harness.json`) on a branch, opens a PR and merges it, then runs `git fetch origin`. If the repo was not cloned (no `origin/HEAD`), run `git remote set-head origin --auto` once.
 - Gate: `git push` and `gh pr create` run the `gate` commands first (`{base}` is the merge base), skip when HEAD already passed, and scan the pushed range for secret-shaped text.
 - Stop: unmet definition-of-done items block the turn once per repo state; after three non-converging attempts the hook demands an auditable failure report and then lets the turn end. Hooks fail closed.
 - Run record: `<git dir>/harness/runs.jsonl` holds every gate result and Stop decision; the Retro playbook turns repeats into structure.

@@ -3,7 +3,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, PLACEHOLDER, readEvent, record, segments } from './lib.mjs';
+import { config, currentBranch, deny, git, gitDir, PLACEHOLDER, policyNote, readEvent, record, segments } from './lib.mjs';
 import { envReason, reason } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -14,11 +14,11 @@ try {
   if (!cfg.root) process.exit(0);
   const branch = currentBranch(cfg.root);
   const env = envReason(cmd);
-  if (env) { deny(`harness guard: ${env}`); process.exit(0); }
+  if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
   const segs = segments(cmd);
   for (const seg of segs) {
     const why = reason(seg, cfg, branch);
-    if (why) { deny(`harness guard: ${why}\n  in: ${seg}`); process.exit(0); }
+    if (why) { deny(`harness guard: ${why}\n  in: ${seg}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
 
   const pushes = segs.some((s) => /^git\s+push\b|^gh\s+pr\s+(create|ready)\b/.test(s));
@@ -30,14 +30,13 @@ try {
   const dir = join(gitDir(cfg.root), 'harness-gate');
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
-  const prot = cfg.protectedBranches[0] ?? 'main';
-  const base = (() => { try { return git(cfg.root, 'merge-base', 'HEAD', `origin/${prot}`); } catch { return null; } })();
+  const base = (() => { try { return git(cfg.root, 'merge-base', 'HEAD', `origin/${cfg.base}`); } catch { return null; } })();
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
   const secret = base ? secretHits(cfg.root, base) : [];
   if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
   for (const raw of cfg.gate) {
-    const command = raw.replaceAll('{base}', base ?? `origin/${prot}`);
+    const command = raw.replaceAll('{base}', base ?? `origin/${cfg.base}`);
     const started = Date.now();
     try {
       execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
