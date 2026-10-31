@@ -3,7 +3,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, PLACEHOLDER, policyNote, readEvent, record, segments } from './lib.mjs';
+import { config, currentBranch, deny, git, gitDir, NO_REPLACE_ENV, PLACEHOLDER, policyNote, readEvent, record, segments } from './lib.mjs';
 import { envReason, reason } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -31,17 +31,16 @@ try {
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
   const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
-  const emptyTree = () => { try { return git(cfg.root, 'hash-object', '-t', 'tree', '/dev/null'); } catch { return '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; } };
-  const base = mergeBase ?? cfg.baseSha ?? emptyTree(); // a sha, never a ref name: names can be shadowed by tags and branches
+  const base = mergeBase ?? cfg.baseSha; // a sha, never a ref name: names can be shadowed by tags and branches. A present policy implies a verified baseSha, so there is no further fallback.
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
-  const secret = mergeBase ?? cfg.baseSha ? secretHits(cfg.root, base) : [];
+  const secret = base ? secretHits(cfg.root, base) : [];
   if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
   for (const raw of cfg.gate) {
     const command = raw.replaceAll('{base}', base);
     const started = Date.now();
     try {
-      execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
+      execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], env: NO_REPLACE_ENV, timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
       log(`pass ${Date.now() - started} ${command}`);
     } catch (e) {
       log(`fail ${Date.now() - started} ${command}`);
@@ -66,7 +65,7 @@ function secretHits(root, base) {
     ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
   ];
   let diff = '';
-  try { diff = execSync(`git diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
+  try { diff = execSync(`git --no-replace-objects diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
   const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
   return patterns.filter(([, re]) => re.test(added)).map(([n]) => n);
 }

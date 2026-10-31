@@ -31,6 +31,9 @@ const mustDeny = [
   'git stash clear', 'git stash drop', 'git commit --no-verify -m x', 'git commit -n -m x', 'git merge --no-verify feat', 'git -c core.hooksPath=/dev/null commit -m x', 'HUSKY=0 git commit -m x',
   'git filter-branch --all', 'git update-ref -d refs/heads/x', 'gh pr merge 1', 'gh pr merge 1 --auto', 'gh pr close 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'gh api --method DELETE repos/o/r',
   'gh api repos/o/r/issues -f title=x', 'gh release create v1', 'gh repo delete o/r', 'npm publish', 'pnpm publish --access public', 'git merge feat && git push origin main',
+  'git update-ref refs/replace/abc def', 'git update-ref -d refs/replace/abc', 'git replace abc def', 'git replace -f abc def', 'git replace -d abc', 'git replace --graft abc', 'git replace --edit abc',
+  'echo "update refs/replace/abc def" | git update-ref --stdin', "printf 'update refs/remotes/origin/main abc\\n' | git update-ref --stdin",
+  'git symbolic-ref HEAD refs/remotes/origin/main', 'git symbolic-ref -m x HEAD refs/remotes/origin/main', 'git symbolic-ref -m "x y" HEAD refs/remotes/origin/main', 'git symbolic-ref HEAD refs/tags/v1', 'git symbolic-ref HEAD refs/replace/abc',
 ];
 for (const c of mustDeny) assert.ok(denied('pre-bash.mjs', bash(c)), `must deny: ${c}`);
 
@@ -41,9 +44,13 @@ const mustAllow = [
   'git push -u origin feat/x', 'git push', 'git push origin HEAD', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push origin sid-12-fix-main-nav', 'git push -u origin feat/main-menu',
   'git push -u origin sid-7-master-detail-view', 'git status', 'git branch -d x', 'git checkout -- a.txt', 'git restore a.txt', 'git checkout main', 'git stash', 'git stash pop', 'git commit -m "no -n here"',
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
+  'git replace -l', 'git replace --list', 'git symbolic-ref -q HEAD', 'git symbolic-ref HEAD refs/heads/feat/x', 'git symbolic-ref -m switch HEAD refs/heads/feat/x', 'echo "update refs/heads/tmp HEAD" | git update-ref --stdin',
   ...allowRemote, // SID-65: remote-tracking rules must not touch ordinary fetch/pull/config/gh reads
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+
+for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
+assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
 
 // On a protected branch, a bare push is denied; on a feature branch it is a gated push.
 sh(repo, 'git checkout -q main');
@@ -370,6 +377,26 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     sh(k6g, 'git commit -q --allow-empty -m work && git tag refs/remotes/origin/master HEAD');
     const g6 = config(k6g);
     assert.deepEqual([g6.present, g6.baseSha === remoteSha(k6g, 'main')], [false, true], 'k6 gate: not present, baseSha is the real main');
+
+    // k7. replace refs: `git show <sha>:.harness.json` follows refs/replace/<sha>, so the hooks run git with --no-replace-objects.
+    const REPLACE = /replace refs can change what the harness policy reads/;
+    const plant = (d) => sh(d, `git update-ref refs/replace/$(git rev-parse refs/remotes/origin/main) ${evilCommit(d, 'evil')}`); // bypasses the hook on purpose
+    const k7 = mk('k7'); // no policy on origin
+    const cmd7 = `git update-ref refs/replace/${sh(k7, 'git rev-parse refs/remotes/origin/main')} ${evilCommit(k7, 'evil')}`;
+    assert.match(verdict(k7, cmd7).why, REPLACE, 'k7: the guard denies planting the replace');
+    sh(k7, cmd7);
+    const c7 = config(k7);
+    assert.deepEqual([c7.present, c7.allowMerge, c7.protectedBranches.includes('main')], [false, false, true], 'k7: replace does not conjure a policy');
+    assert.ok(verdict(k7, 'gh pr merge 1').deny, 'k7: merge denied');
+    const k7s = strictRepo('k7s');
+    plant(k7s);
+    holdsStrict(k7s, 'k7 strict');
+    const k7t = strictRepo('k7t'); // replace the policy blob too
+    sh(k7t, `git update-ref refs/replace/$(git rev-parse refs/remotes/origin/main:.harness.json) $(printf '%s' '${JSON.stringify(permissive)}' | git hash-object -w --stdin)`);
+    holdsStrict(k7t, 'k7 strict blob');
+    const k7h = strictRepo('k7h'); // HEAD steering: pointing HEAD at origin/main then resetting would move it
+    assert.match(verdict(k7h, 'git symbolic-ref HEAD refs/remotes/origin/main').why, /git switch/, 'k7 symref: denied');
+    assert.ok(!verdict(k7h, 'git symbolic-ref HEAD refs/heads/feat/x').deny && !verdict(k7h, 'git symbolic-ref HEAD').deny, 'k7 symref: local branch and reads allowed');
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }
