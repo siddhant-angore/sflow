@@ -265,11 +265,13 @@ const feedsShell = (n) => { const b = head(n)[1] ?? ''; return (SHELL.test(b) ||
 // Quoted text is only data when nothing in the command can execute it. `echo 'x; git push -f origin main' | sh` and `... > f.sh && bash f.sh` run it, and `git -c core.pager='...' log` or `GIT_PAGER='...' git log` execute it,
 // so quotes are honoured only when every segment (judged raw, after redirections) starts with a command that never runs its arguments; anything else also gets the quote-blind scan.
 const NON_EXEC = /^(?:(?:echo|printf|grep|cat|rg|cd|pwd|ls|true|false|:|test|\[|head|tail|wc|sort|uniq|cut|tr|mkdir|touch|tee|sleep)|git\s+(?:add|commit|status|log|diff|show|push|fetch|switch|checkout|restore|branch|rm|mv|tag|stash|reset|clean|rev-parse)|gh\s+(?:pr\s+(?:create|edit|comment|view)|issue\s+(?:create|comment|view)))(?:\s|$)/;
-// Options whose value is executed (git runs it via a shell; sort runs a program), matched by prefix (--up, --rec, --e, --com) because both accept unique abbreviations. `--e` is a unique prefix of push's --exec; --u, --up, --r and --re are ambiguous in git (git refuses them), so they are safe and are not tested. Tested on a de-quoted copy, since bash joins `--u''pl=`, `-"-"exe`, `$'--rec'eive-p=`.
-// A dash-word containing `$` or a backtick (`--u$(echo)pl=`) can expand to anything, so it is never trusted. Harmless hits such as --recurse-submodules just fall back to the quote-blind scan, as on main.
-const RUNS_ARG = /(?:^|\s)--(?:up|rec|e|com)/;
-const EXPANDS_OPT = /(?:^|\s)['"\\$]*-\S*[$`]/;
-const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s.replace(/\$?['"]|\\/g, '')) && !EXPANDS_OPT.test(s)); };
+// Options whose value is executed (git runs it via a shell; sort runs a program), matched by prefix (--up, --rec, --e, --co) because both accept unique abbreviations. `--e` is a unique prefix of push's --exec; --u, --up, --r and --re are ambiguous in git (git refuses them), so they are safe and are not tested. Tested on a de-quoted copy, since bash joins `--u''pl=`, `-"-"exe`, `$'--rec'eive-p=`.
+// GNU sort accepts `--co=` for --compress-program. A dash-word containing `$`, a backtick, or a brace or glob character can expand to anything, so it is never trusted: bash brace expansion and globs can produce or rename an option (`--{e,e}=`, `-{-,-}e=`, `--u{p,p}l=`, `--[e]=`).
+// Brace expansion can also CREATE a dash-word from a word that does not start with a dash (`{--e,--e}='payload'` expands to `--e='payload' --e='payload'`), so a word with a brace list or range is never trusted either. Harmless hits such as --recurse-submodules just fall back to the quote-blind scan, as on main.
+const RUNS_ARG = /(?:^|\s)--(?:up|rec|e|co)/;
+const EXPANDS_OPT = /(?:^|\s)['"\\$]*-\S*[$`{[*?]/;
+const BRACE_WORD = /(?:^|\s)[^\s'"]*\{[^\s}]*(?:,|\.\.)[^\s}]*\}/;
+const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_EXEC.test(s) && !BRACE_WORD.test(s) && !(/^rg\s/.test(s) && /\s--pre/.test(s)) && !RUNS_ARG.test(s.replace(/\$?['"]|\\/g, '')) && !EXPANDS_OPT.test(s)); };
 
 // Shell writes into a git directory: [{ path, kind }], kind config | hooks | info | modules. Git runs what such files hold (core.pager, aliases, hooks), so text quoted in a command that writes them is not data.
 // Works on a de-quoted copy: quoted characters are hidden (private-use code points) so a quoted `;`, `>` or space never splits or redirects. Reads (cat, grep, cp from, sed without -i) are not writes.
@@ -290,9 +292,37 @@ function dequote(s) { // q: s single, d double, a $'..'
   return out;
 }
 const GIT_SEP = /&&|\|\||;|\n|`|[()]|(?<!>)\||(?<![<>&\d])&(?![>&])/, GIT_REDIR = /(?<![-=])\d*(?:&>>?|>>|>\||<>|>&|>)\s*([^\s<>|&;()]+)/g;
-const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|info|modules\/.+))?\/*$/, GIT_CMDS = new Set(['tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
+const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|info|modules\/.+))?\/*$/, GIT_CMDS = new Set(['sort', 'uniq', 'git', 'tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
 const GIT_WRAP = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'time', 'timeout', 'stdbuf', 'ionice', 'xargs']), GIT_KW = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const NO_FILE = /^\/dev\/(?:null|stdout|stderr|tty)$/;
+// Output files named by sort (-o FILE, -oFILE, clusters like -uo FILE, --output and its unique abbreviations) and uniq (second operand). Both write the file, so they count as file writes.
+function sortOut(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') break;
+    const lm = /^--(o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?)(?:=(.*))?$/.exec(a);
+    if (lm) { if (lm[2] !== undefined) out.push(lm[2]); else if (args[i + 1] !== undefined) out.push(args[++i]); continue; }
+    if (/^-[^-]/.test(a)) {
+      for (let k = 1; k < a.length; k++) {
+        const c = a[k];
+        if (c === 'o') { const rest = a.slice(k + 1); if (rest) out.push(rest); else if (args[i + 1] !== undefined) out.push(args[++i]); break; }
+        if ('ktST'.includes(c)) { if (k + 1 >= a.length) i++; break; }
+      }
+    }
+  }
+  return out;
+}
+function uniqOut(args) {
+  const ops = []; let rest = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (rest || a === '-' || !a.startsWith('-')) { ops.push(a); continue; }
+    if (a === '--') { rest = true; continue; }
+    if (/^(?:-[fsw]|--skip-fields|--skip-chars|--check-chars)$/.test(a)) i++;
+  }
+  return ops.slice(1, 2);
+}
 // One pass over one string: { writes: git-dir/config writes as [{ path, kind }], files: every file it writes }. Commands inside $( ) in a quoted string are hidden here; scanAll adds them.
 function scan(cmd) {
   const text = cmd.replace(/\\\n/g, '').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
@@ -314,7 +344,10 @@ function scan(cmd) {
     const at = GIT_CMDS.has(base(w[0])) ? 0 : GIT_WRAP.has(base(w[0])) ? w.findIndex((x, j) => j > 0 && GIT_CMDS.has(base(x))) : -1;
     if (at < 0) continue;
     const name = base(w[at]), args = w.slice(at + 1), operands = args.filter((a) => !a.startsWith('-'));
-    if (name === 'tee' || name === 'truncate') operands.forEach(put);
+    if (name === 'sort') sortOut(args).forEach(put);
+    else if (name === 'uniq') uniqOut(args).forEach(put);
+    else if (name === 'git') args.forEach((a, j) => { if (a === '--output' && args[j + 1]) put(args[j + 1]); else if (a.startsWith('--output=')) put(a.slice(9)); });
+    else if (name === 'tee' || name === 'truncate') operands.forEach(put);
     else if (name === 'dd') args.filter((a) => a.startsWith('of=')).forEach((a) => put(a.slice(3)));
     else if (name === 'sed' || name === 'perl') { if (args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith('--in-place'))) operands.forEach(put); }
     else { // cp mv ln install: the destination is -t DIR or the last operand

@@ -159,7 +159,11 @@ const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'tru
   "git push --rec 'true; git branch -D main' origin feat/x", "git push '--receive-p=true; git branch -D main' origin feat/x", "sort --com='x; git reset --hard' f", "sort --compress 'x; git reset --hard' f",
   `git fetch "--"upl='true; git reset --hard' origin`, `git fetch --u''pl='true; git reset --hard' origin`, `git push -"-"exe='true; git reset --hard' origin feat/x`, `git push $'--rec'eive-p='true; git branch -D main' origin feat/x`,
   String.raw`git push --re\ceive-p='true; git branch -D main' origin feat/x`, `git fetch --u$(echo)pl='true; git reset --hard' origin`, "git fetch --u`echo`pl='true; git reset --hard' origin", "git fetch --u${X}pl='true; git reset --hard' origin", "git fetch -$X-upl='true; git reset --hard' origin",
-  "git push --e='true; git reset --hard; git-receive-pack' origin feat/x", "git push --e 'true; git reset --hard; git-receive-pack' origin feat/x"];
+  "git push --e='true; git reset --hard; git-receive-pack' origin feat/x", "git push --e 'true; git reset --hard; git-receive-pack' origin feat/x",
+  "git push --{e,e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push -{-,-}e='true; git reset --hard; git-receive-pack' origin feat/x", "git fetch --u{p,p}l='true; git reset --hard; git-upload-pack' origin", "git push {--e,--e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push --[e]='true; git reset --hard; git-receive-pack' origin feat/x",
+  String.raw`printf '[core]\nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"\n' | sort -o .git/config`, `git log -1 --output=.git/config --format='[core]%nrepositoryformatversion = 0%nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"'`,
+  String.raw`printf 'touch MARK; git reset --hard\n' | uniq - f.sh`, "git log -1 --output=f.sh --format='true; git reset --hard'", String.raw`printf 'touch MARK; git reset --hard\n' | sort -o f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | uniq - .git/config`,
+  String.raw`printf 'touch MARK; git reset --hard\n' | sort --outp=f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | sort -uo f.sh`, "sort --co='x; git reset --hard' f"];
 const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
 for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
 for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
@@ -176,6 +180,8 @@ for (const kw of ['then', 'if', 'do', 'while', '!']) {
   const bad = L('bash <<EOF', 'then git push -f is never allowed.', 'EOF');
   assert.ok(denied('pre-bash.mjs', bash(bad)), `SID-79 round 6 must deny: ${JSON.stringify(bad)}`);
 }
+// SID-79 review round 7: plain sort/uniq/git output options and sort option clusters stay allowed.
+for (const ok of ['sort -o out.txt in.txt', 'uniq in.txt out.txt', 'git log -1 --output=/tmp/log.txt', 'git diff --output=patch.diff', 'sort -k2 -t, data.csv', "git log --oneline -- '*.mjs'"]) assert.ok(!denied('pre-bash.mjs', bash(ok)), `SID-79 round 7 must allow: ${JSON.stringify(ok)} (${reasonOf(run('pre-bash.mjs', bash(ok)))})`);
 
 // Writes into a git dir make quoted text code (git runs core.pager, aliases, hooks): no quote trust, and the write itself is denied.
 const CFG = /writing a git config file directly/, HOOK = /writing into a hooks directory/, INFO = /write into \.git\/info or \.git\/modules/, PAGER = String.raw`printf '[core]\n\tpager = true; git reset --hard\n'`;
@@ -188,7 +194,8 @@ const gitWriteDeny = [[`${PAGER} >> .git/config && git log`, CFG], [String.raw`p
   ['git --git-dir=/tmp/g.d status; printf x >> /tmp/g.d/hooks/pre-commit', HOOK],
   [`${PAGER} >> $HOME/.gitconfig && git log`, CFG], [`${PAGER} >> \${HOME}/.gitconfig`, CFG], [`${PAGER} >> ~/.config/git/config && git log`, CFG], [`${PAGER} >> $HOME/.config/git/config`, CFG], [`${PAGER} >> $XDG_CONFIG_HOME/git/config`, CFG],
   [`${PAGER} >> \${XDG_CONFIG_HOME}/git/config`, CFG], [`${PAGER} | sudo tee -a /etc/gitconfig`, CFG], [`${PAGER} >> /home/u/.gitconfig`, CFG], [`${PAGER} >> ~/.gitconfig`, CFG],
-  [String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, CFG]];
+  [String.raw`echo "$(printf '[core]\n\tpager = true; git reset --hard\n' >> .git/config)" && git log`, CFG],
+  [String.raw`printf 'x\n' | sort -o .git/config`, CFG], [String.raw`printf 'x\n' | uniq - .git/config`, CFG], ['git log -1 --output=.git/config --format=x', CFG], ['git diff --output .git/config', CFG], ['sort -uo .git/config f', CFG], [String.raw`printf 'x\n' | sort -o .git/hooks/pre-commit`, HOOK]];
 const gitWriteAllow = ['cat .git/config', 'ls .git/hooks', 'ls -la .git/hooks/', 'git config --get core.pager', 'grep x .git/config', 'sed -n 1p .git/config', 'cp .git/config /tmp/sflow-bak', 'cat .git/config > /tmp/sflow-x', "printf 'x' > .git/info/exclude", "printf 'notes' > notes.md && git commit -m x", 'echo hi > config && git status'];
 for (const [c, why] of gitWriteDeny) { assert.ok(denied('pre-bash.mjs', bash(c)), `git write must deny: ${c}`); assert.match(reasonOf(run('pre-bash.mjs', bash(c))), why, `git write reason: ${c}`); }
 for (const c of gitWriteAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `git write must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
@@ -691,7 +698,10 @@ const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`,
   (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
   (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
   (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`,
-  (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`];
+  (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`,
+  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
+  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
+  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`];
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
 const everything = [...new Set([...corpus, ...generated])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
