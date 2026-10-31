@@ -1,12 +1,13 @@
 # sflow
 
-One rigorous engineering workflow for coding agents, as a single installable thing. sflow merges three MIT-licensed skill sets, pinned by commit:
+One rigorous engineering workflow for coding agents, as a single installable thing. sflow merges MIT-licensed skill sets, pinned by commit:
 
-- **pstack** (Lauren Tan, Claude Code port by Michael Denyer): the router (`poteto-mode`), 24 principles, 28 playbooks, multi-model review, verification discipline.
+- **pstack by Lauren Tan (poteto)**, https://github.com/cursor/plugins/tree/main/pstack, taken from its Claude Code build in `harness/pstack/claude-code/`: the router (`poteto-mode`), 24 principles, 23 playbooks, multi-model review, verification discipline. sflow's overlays add 5 more playbooks.
+- **Cursor's `cursor-team-kit` and `thermos` plugins** (https://github.com/cursor/plugins, same commit as pstack): the `deslop`, `fix-ci`, `fix-merge-conflicts`, `get-pr-comments`, `make-pr-easy-to-review`, and `what-did-i-get-done` skills from `cursor-team-kit` (plugin author Eric Zakariasson), and the `thermos`, `thermo-nuclear-review`, and `thermo-nuclear-code-quality-review` skills with their two review subagents from `thermos`.
 - **Matt Pocock's skills**: grilling, glossary and ADRs, specs and tracer-bullet tickets, triage, diagnosis, deep-module design, retro, writing for agents.
 - **Addy Osmani's agent-skills**: the define-to-ship lifecycle skills with anti-rationalization tables, seven checklists, four review personas.
 
-Every skill is in `skills/` under one namespace. The playbooks in `skills/poteto-mode/playbooks/` carry the merged steps, marked **sflow (before|after|in)**, so the agent reads one file per task. `docs/skill-map.md` says where each of the 130 skills is used.
+Every skill is in `skills/` under one namespace. The playbooks in `skills/poteto-mode/playbooks/` carry the merged steps, marked **sflow (before|after|in)**, so the agent reads one file per task. `docs/skill-map.md` says where each of the 131 skills is used.
 
 ## Install
 
@@ -33,7 +34,7 @@ Other agents (Codex, Cursor, Copilot, Gemini CLI, and any host that reads `skill
 npx skills add siddhant-angore/sflow
 ```
 
-pstack's own adapters for Codex, Copilot, Muse, and Pi ship in `hooks/` and `pi/`; its `poteto-mode` skill names the Claude Code mapping it reads first.
+pstack's Claude Code build tells its skills to read `docs/harness/claude-code.md` first, which maps pstack's Cursor tool and model names to Claude Code; sflow vendors that file. The Codex, Copilot, Muse, and Pi adapters from the former community port are not shipped (see `docs/adr/0001-pstack-source-of-truth.md`). The original marks its router, principles, and playbooks `disable-model-invocation: true`, so the `Skill` tool refuses them and the model reads them by path instead. sflow's own SessionStart hook (`workflows/hooks/session-start.mjs`) tells the agent to invoke `sflow:sflow` for multi-file, design, and unknown-cause work, and how to read the pstack skills.
 
 ## Use
 
@@ -66,9 +67,9 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 
 ## Maintain
 
-- `npm run sync` fetches the three sources at the pinned commits, renames the two name collisions (`tdd` and `teach` from Pocock become `tdd-vertical-slices` and `teach-workspace`), applies the overlays in `workflows/`, and writes the hash lock. A stale overlay anchor fails the build.
+- `npm run sync` fetches every source in `vendor.manifest.json` at its pinned commit, renames the two name collisions (`tdd` and `teach` from Pocock become `tdd-vertical-slices` and `teach-workspace`), applies the overlays in `workflows/`, and writes the hash lock. A stale overlay anchor fails the build.
 - `npm run check` re-hashes every vendored and built file, validates the plugin, and prints the description-collision report.
-- To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/`, or `pi/` by hand.
-- To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`.
+- To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/` (`workflows/hooks/` builds all of it), or `docs/harness/` by hand.
+- To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`. The three `cursor/plugins/*` sources share one repo and sha but have separate keys, because that repo has no top-level license: each key's `licensePath` points at the plugin's own `LICENSE`. Bump all three together. Do not move past `9f844cd` before SID-43 ports the Orchestrate rewrite.
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.

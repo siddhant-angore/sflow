@@ -50,6 +50,21 @@
 | setup-matt-pocock-skills, setup-pre-commit, setup-ts-deep-modules, wizard, git-guardrails-claude-code | Pocock | Setup, Retro | tracker and domain docs as the shape; hooks; human-only steps |
 | writing-fragments, writing-beats, writing-shape, loop-me, teach-workspace, wait-what | Pocock | Writing, Investigation | non-code prose |
 
+## Cursor skills beside pstack
+
+pstack's own skills come from `cursor/plugins` `pstack/` (Claude Code build) and are not listed one by one. These nine come from two sibling Cursor plugins at the same commit. Only `deslop` is named by pstack's playbooks (Opening a PR, Multi-phase plan, Autopilot full). The rest are invoked by name. `make-bot-ui` is a pstack skill that the original ships and the former port did not.
+
+| skill | source | playbook | role |
+|---|---|---|---|
+| deslop | cursor-team-kit | Opening a PR, Multi-phase plan, Autopilot full | strips AI slop from the diff |
+| make-pr-easy-to-review | cursor-team-kit | none | cleans history and the description, no behavior change |
+| fix-ci, fix-merge-conflicts, get-pr-comments | cursor-team-kit | none | CI failures, conflicts, and review comments on an open PR; pstack's Babysit playbook covers the same ground without them |
+| what-did-i-get-done | cursor-team-kit | none | a summary of what a session or branch changed |
+| thermos, thermo-nuclear-review, thermo-nuclear-code-quality-review | thermos | none | deep audits; `thermos` is user-invoked only (`disable-model-invocation`); the two review subagents are in `agents/` |
+| make-bot-ui | pstack | none | a Grok Bot webhook UI; user-invoked only |
+
+pstack's `babysit` skill from the former port is gone. The original has a Babysit playbook (`skills/poteto-mode/playbooks/babysit.md`) and no such skill.
+
 ## Present but not run as written
 
 | skill | source | why |
