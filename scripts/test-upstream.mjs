@@ -1,7 +1,12 @@
 #!/usr/bin/env node
-// Offline tests for scripts/upstream.mjs. A stub git runner models a tiny upstream history; no network, no real git.
+// Offline tests for scripts/upstream.mjs. A stub git runner models a tiny upstream history; one test drives the real script against a
+// local bare repo over file:// (real git, no network).
 //   node scripts/test-upstream.mjs
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { buildReport, formatText, localToUpstream, readOverlays } from './upstream.mjs';
 
 // Fake upstream: commits oldest-first, each { sha, changes: { path: 'A'|'M'|'D' } }. `orphans` exist on the server but are not on the default branch.
@@ -118,7 +123,7 @@ test('pin that exists but is not an ancestor of head is an error', () => {
   const m = manifestFor({ s: src('https://github.com/o/s', A) }, [{ source: 's', from: 'skills/*', to: 'skills' }]);
   const { report } = run(m, { 'https://github.com/o/s': r });
   assert.equal(report.sources[0].status, 'error');
-  assert.match(report.sources[0].errors[0], /not an ancestor/);
+  assert.match(report.sources[0].errors[0], /is not on main \(rewritten, or pinned from another branch or PR\)/);
   assert.equal(report.exitCode, 1);
 });
 
@@ -128,6 +133,62 @@ test('manifest and lock sha mismatch is an error', () => {
   const { report } = run(pstackManifest, { 'https://github.com/o/p': r }, { lock });
   assert.equal(report.sources[0].status, 'error');
   assert.match(report.sources[0].errors[0], /manifest\/lock sha mismatch/);
+  assert.equal(report.exitCode, 1);
+});
+
+test('a key only in vendor.lock.json is its own error entry and its repo is not opened', () => {
+  const r = fakeRepo({ commits: [{ sha: A, changes: { 'plugins/pstack/README.md': 'A' } }] });
+  const lock = { sources: { ...lockFor(pstackManifest).sources, stale: src('https://github.com/o/stale', B) } };
+  const { report, opened } = run(pstackManifest, { 'https://github.com/o/p': r }, { lock });
+  assert.deepEqual(opened, ['https://github.com/o/p']);
+  assert.equal(report.sources[0].status, 'current');
+  const stale = report.sources.find((x) => x.source === 'stale');
+  assert.equal(stale.status, 'error');
+  assert.deepEqual(stale.errors, ['stale is in vendor.lock.json but not in vendor.manifest.json; run sync']);
+  assert.equal(stale.hold, null);
+  assert.equal(report.exitCode, 1);
+});
+
+test('a licence change upstream counts as relevant drift (default LICENSE and licensePath)', () => {
+  const r = fakeRepo({ commits: [
+    { sha: A, changes: { 'plugins/pstack/README.md': 'A', LICENSE: 'A', 'legal/LICENSE.txt': 'A' } },
+    { sha: B, changes: { LICENSE: 'M' } },
+    { sha: C, changes: { 'legal/LICENSE.txt': 'M' } }] });
+  const { report } = run(pstackManifest, { 'https://github.com/o/p': r });
+  assert.equal(report.sources[0].relevantAhead, 1);
+  assert.deepEqual(report.sources[0].changed, [{ status: 'M', path: 'LICENSE' }]);
+  const m = manifestFor({ p: { ...src('https://github.com/o/p', A), licensePath: 'legal/LICENSE.txt' } }, pstackManifest.entries);
+  assert.deepEqual(run(m, { 'https://github.com/o/p': r }).report.sources[0].changed, [{ status: 'M', path: 'legal/LICENSE.txt' }]);
+});
+
+const behindRepo = () => fakeRepo({ commits: [{ sha: A, changes: { 'skills/a/SKILL.md': 'A' } }, { sha: B, changes: { 'skills/a/SKILL.md': 'M' } }] });
+
+test('held: a behind source with a hold reports held, exit 0, and the text shows the reason', () => {
+  const m = manifestFor({ s: { ...src('https://github.com/o/s', A), hold: 'SID-43' } }, [{ source: 's', from: 'skills/*', to: 'skills' }]);
+  const { report } = run(m, { 'https://github.com/o/s': behindRepo() });
+  assert.equal(report.sources[0].status, 'held');
+  assert.equal(report.sources[0].hold, 'SID-43');
+  assert.deepEqual(report.summary, { current: 0, behind: 0, held: 1, error: 0 });
+  assert.equal(report.exitCode, 0);
+  const text = formatText(report);
+  assert.match(text, /\[HELD\]/);
+  assert.match(text, /^  hold      SID-43$/m);
+  assert.match(text, /0 current, 0 behind, 1 held, 0 error  \(exit 0\)/);
+});
+
+test('held plus another behind source is exit 10', () => {
+  const m = manifestFor({ h: { ...src('https://github.com/o/h', A), hold: 'SID-43' }, s: src('https://github.com/o/s', A) },
+    [{ source: 'h', from: 'skills/*', to: 'skills' }, { source: 's', from: 'skills/*', to: 'skills2' }]);
+  const { report } = run(m, { 'https://github.com/o/h': behindRepo(), 'https://github.com/o/s': behindRepo() });
+  assert.deepEqual(report.sources.map((x) => x.status), ['held', 'behind']);
+  assert.equal(report.exitCode, 10);
+});
+
+test('held plus a missing pin is an error, exit 1', () => {
+  const m = manifestFor({ h: { ...src('https://github.com/o/h', D), hold: 'SID-43' } }, [{ source: 'h', from: 'skills/*', to: 'skills' }]);
+  const { report } = run(m, { 'https://github.com/o/h': behindRepo() });
+  assert.equal(report.sources[0].status, 'error');
+  assert.equal(report.sources[0].hold, 'SID-43');
   assert.equal(report.exitCode, 1);
 });
 
@@ -193,6 +254,88 @@ test('localToUpstream reverses rename and respects include/exclude', () => {
 test('readOverlays maps extends to the poteto-mode playbook on the real repo', () => {
   const o = readOverlays();
   assert.ok(o.some((x) => x.overlay === 'workflows/bug-fix.md' && x.target === 'skills/poteto-mode/playbooks/bug-fix.md'));
+});
+
+test('readOverlays reads domains/*/playbooks after workflows, sorted, with repo-relative names', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sflow-overlays-'));
+  try {
+    const put = (rel, body) => { mkdirSync(join(dir, dirname(rel)), { recursive: true }); writeFileSync(join(dir, rel), body); };
+    put('workflows/bug-fix.md', '---\nextends: bug-fix\n---\n');
+    put('domains/zeta/playbooks/spec.md', '---\nextends: spec\n---\n');
+    put('domains/alpha/playbooks/setup.md', '---\ntarget: skills/x/SKILL.md\n---\n');
+    put('domains/alpha/playbooks/none.md', 'no frontmatter\n');
+    put('domains/nopb/README.md', 'x');
+    assert.deepEqual(readOverlays(dir), [
+      { overlay: 'workflows/bug-fix.md', target: 'skills/poteto-mode/playbooks/bug-fix.md' },
+      { overlay: 'domains/alpha/playbooks/setup.md', target: 'skills/x/SKILL.md' },
+      { overlay: 'domains/zeta/playbooks/spec.md', target: 'skills/poteto-mode/playbooks/spec.md' }]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Real git, no network: a bare repo over file://, a fake sflow root, and the real main() in a child process.
+test('real git: main() over file:// reports behind (exit 10), then current (exit 0) when pinned at head', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'sflow-upstream-test-'));
+  try {
+    const home = join(tmp, 'home'), bare = join(tmp, 'up.git'), work = join(tmp, 'work'), fake = join(tmp, 'root');
+    for (const d of [home, work, fake]) mkdirSync(d);
+    const env = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(home, '.gitconfig'), GIT_TERMINAL_PROMPT: '0',
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.file.allow', GIT_CONFIG_VALUE_0: 'always' };
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args],
+      { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    git('init', '-q', '--bare', bare);
+    git('-C', bare, 'config', 'uploadpack.allowFilter', 'true');
+    git('-C', bare, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+    git('-C', bare, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+    git('init', '-q', '-b', 'main', work);
+    const commit = (path, body, msg) => {
+      mkdirSync(join(work, dirname(path)), { recursive: true });
+      writeFileSync(join(work, path), body);
+      git('-C', work, 'add', '-A');
+      git('-C', work, 'commit', '-q', '-m', msg);
+      return git('-C', work, 'rev-parse', 'HEAD');
+    };
+    const first = commit('skills/a/SKILL.md', 'one\n', 'first');
+    commit('docs/unrelated.md', 'x\n', 'unrelated');
+    const second = commit('skills/a/SKILL.md', 'two\n', 'touch skills');
+    git('-C', work, 'push', '-q', bare, 'main:main');
+    git('-C', work, 'checkout', '-q', '-b', 'side', first);
+    const side = commit('skills/b/SKILL.md', 'side\n', 'side branch');
+    git('-C', work, 'push', '-q', bare, 'side:side');
+
+    const runMain = (pin) => {
+      const sources = { s: { repo: `file://${bare}`, sha: pin, license: 'MIT' } };
+      writeFileSync(join(fake, 'vendor.manifest.json'), JSON.stringify({ sources, entries: [{ source: 's', from: 'skills/*', to: 'skills' }] }));
+      writeFileSync(join(fake, 'vendor.lock.json'), JSON.stringify({ sources }));
+      const script = join(dirname(new URL(import.meta.url).pathname), 'upstream.mjs');
+      return spawnSync(process.execPath, [script, '--json'], { env: { ...env, SFLOW_UPSTREAM_ROOT: fake }, encoding: 'utf8' });
+    };
+
+    const behind = runMain(first);
+    assert.equal(behind.status, 10, behind.stderr + behind.stdout);
+    const report = JSON.parse(behind.stdout);
+    assert.deepEqual(Object.keys(report).sort(), ['exitCode', 'sources', 'summary']);
+    const s = report.sources[0];
+    assert.deepEqual(Object.keys(s).sort(), ['branch', 'changed', 'compare', 'errors', 'head', 'hold', 'newSkills', 'overlayFlags', 'pinned',
+      'relevantAhead', 'removedSkills', 'repo', 'source', 'status', 'totalAhead']);
+    assert.equal(s.status, 'behind');
+    assert.equal(s.relevantAhead, 1);
+    assert.equal(s.totalAhead, 2);
+    assert.equal(s.branch, 'main');
+    assert.equal(s.head, second);
+    assert.deepEqual(s.changed, [{ status: 'M', path: 'skills/a/SKILL.md' }]);
+
+    const current = runMain(second);
+    assert.equal(current.status, 0, current.stderr + current.stdout);
+    assert.equal(JSON.parse(current.stdout).sources[0].status, 'current');
+
+    // Lazy fetch finds a pin that lives only on another branch, so it fails the ancestor check, not the existence check.
+    const offBranch = runMain(side);
+    assert.equal(offBranch.status, 1, offBranch.stderr + offBranch.stdout);
+    assert.match(JSON.parse(offBranch.stdout).sources[0].errors[0], /is not on main \(rewritten, or pinned from another branch or PR\)/);
+    const missing = runMain('0123456789abcdef0123456789abcdef01234567');
+    assert.equal(missing.status, 1);
+    assert.match(JSON.parse(missing.stdout).sources[0].errors[0], /no longer exists upstream/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 let failed = 0;

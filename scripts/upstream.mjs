@@ -2,7 +2,9 @@
 // Reports how far each vendored source has drifted from its upstream default branch. Read-only, network-only, no tokens.
 //   node scripts/upstream.mjs          # text report
 //   node scripts/upstream.mjs --json   # machine-readable report
-// Exit codes: 0 = every source current, 10 = drift (some source behind), 1 = error (pin missing/unreachable, manifest/lock mismatch, network). Error beats drift.
+// Exit codes: 1 = error (pin missing/unreachable, manifest/lock sha mismatch or a key in only one of them, network), else 10 = drift (some source
+// behind), else 0. A behind source with `"hold": "<reason>"` in vendor.manifest.json reports 'held', not 'behind', and does not cause exit 10; errors still win.
+// SFLOW_UPSTREAM_ROOT overrides the repo root (manifest, lock, overlays, collision checks); the real-git test uses it.
 // "Behind" counts only commits that touch the paths sflow vendors, so unrelated monorepo commits never trigger it.
 // Each run fetches trees (no blobs) into a fresh temp dir, never the vendor cache, so a warm cache cannot hide a deleted SHA.
 import { execFileSync } from 'node:child_process';
@@ -10,7 +12,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-const root = join(dirname(new URL(import.meta.url).pathname), '..');
+const root = process.env.SFLOW_UPSTREAM_ROOT || join(dirname(new URL(import.meta.url).pathname), '..');
 const short = (s) => s.slice(0, 12);
 const uniq = (a) => [...new Set(a)];
 const lines = (s) => s.split('\n').filter(Boolean);
@@ -53,22 +55,25 @@ function children(git, ref, entry) {
 
 function inspectSource({ name, src, lockSrc, entries, repo, head, branch, git, overlays, exists }) {
   const r = { source: name, repo: src.repo, pinned: src.sha, head: head.sha, branch, relevantAhead: null, totalAhead: null, status: 'current',
-    compare: null, changed: [], newSkills: [], removedSkills: [], overlayFlags: [], errors: [] };
+    compare: null, changed: [], newSkills: [], removedSkills: [], overlayFlags: [], errors: [], hold: src.hold ?? null };
   if (!lockSrc) r.errors.push(`${name} is in the manifest but not in vendor.lock.json; run sync`);
   else if (lockSrc.sha !== src.sha) r.errors.push(`manifest/lock sha mismatch: manifest ${short(src.sha)}, lock ${short(lockSrc.sha)}; run sync`);
   if (/^https:\/\/github\.com\//.test(src.repo)) r.compare = `${src.repo.replace(/\.git$/, '')}/compare/${short(src.sha)}...${short(head.sha)}`;
 
   const ok = (args) => { try { git(args); return true; } catch { return false; } };
+  // Relies on partial-clone lazy fetch: the temp repo fetched only the head with --filter=blob:none from a promisor remote, so `cat-file -e`
+  // on a pin not reachable from head makes git lazily fetch that object from the remote. A pin that exists on another branch or PR is found
+  // (and then fails the ancestor check below); one deleted upstream is not.
   if (!ok(['cat-file', '-e', `${src.sha}^{commit}`])) { r.errors.push(`pinned sha ${short(src.sha)} no longer exists upstream (deleted or force-pushed away)`); r.status = 'error'; return r; }
-  if (!ok(['merge-base', '--is-ancestor', src.sha, head.sha])) { r.errors.push(`pinned sha ${short(src.sha)} is not an ancestor of ${branch ?? 'HEAD'} (${short(head.sha)}); history was rewritten`); r.status = 'error'; return r; }
+  if (!ok(['merge-base', '--is-ancestor', src.sha, head.sha])) { r.errors.push(`pinned sha ${short(src.sha)} is not on ${branch ?? 'the default branch'} (rewritten, or pinned from another branch or PR)`); r.status = 'error'; return r; }
   if (r.errors.length) r.status = 'error';
 
   const range = `${src.sha}..${head.sha}`;
-  const specs = uniq(entries.flatMap(entryPathspecs));
+  const specs = uniq([...entries.flatMap(entryPathspecs), src.licensePath ?? 'LICENSE']);   // a licence change upstream is relevant drift
   r.totalAhead = Number(git(['rev-list', '--count', range]).trim());
   r.relevantAhead = Number(git(['rev-list', '--count', range, '--', ...specs]).trim());
   if (r.relevantAhead === 0) return r;
-  if (r.status !== 'error') r.status = 'behind';
+  if (r.status !== 'error') r.status = r.hold ? 'held' : 'behind';
 
   r.changed = lines(git(['diff', '--name-status', '--no-renames', src.sha, head.sha, '--', ...specs])).map((l) => { const [status, path] = l.split('\t'); return { status, path }; });
 
@@ -90,6 +95,9 @@ function inspectSource({ name, src, lockSrc, entries, repo, head, branch, git, o
   return r;
 }
 
+const errorEntry = (name, src, extra, error) => ({ source: name, repo: src.repo, pinned: src.sha, head: null, branch: null, relevantAhead: null, totalAhead: null,
+  status: 'error', compare: null, changed: [], newSkills: [], removedSkills: [], overlayFlags: [], ...extra, errors: [error], hold: src.hold ?? null });
+
 // Pure: manifest + lock + an injected `openRepo(url)` -> { head, branch, git(args) } give the report. No clock, no network, no disk but `exists`.
 export function buildReport({ manifest, lock, openRepo, overlays = [], exists = () => false }) {
   const byRepo = new Map();
@@ -101,21 +109,23 @@ export function buildReport({ manifest, lock, openRepo, overlays = [], exists = 
     for (const name of names) {
       const src = manifest.sources[name];
       if (failure) {
-        sources.push({ source: name, repo, pinned: src.sha, head: null, branch: null, relevantAhead: null, totalAhead: null, status: 'error', compare: null,
-          changed: [], newSkills: [], removedSkills: [], overlayFlags: [], errors: [`cannot reach upstream: ${failure.message.split('\n')[0]}`] });
+        sources.push(errorEntry(name, src, {}, `cannot reach upstream: ${failure.message.split('\n')[0]}`));
         continue;
       }
       const entries = manifest.entries.filter((e) => e.source === name);
       try {
         sources.push(inspectSource({ name, src, lockSrc: lock.sources?.[name], entries, repo, head: { sha: handle.head }, branch: handle.branch, git: handle.git, overlays, exists }));
       } catch (e) {
-        sources.push({ source: name, repo, pinned: src.sha, head: handle.head, branch: handle.branch, relevantAhead: null, totalAhead: null, status: 'error', compare: null,
-          changed: [], newSkills: [], removedSkills: [], overlayFlags: [], errors: [`git failed: ${e.message.split('\n')[0]}`] });
+        sources.push(errorEntry(name, src, { head: handle.head, branch: handle.branch }, `git failed: ${e.message.split('\n')[0]}`));
       }
     }
   }
+  // A key only in the lock means the two files disagree; report it without opening its repo.
+  for (const [name, lockSrc] of Object.entries(lock.sources ?? {})) {
+    if (!(name in manifest.sources)) sources.push(errorEntry(name, lockSrc, {}, `${name} is in vendor.lock.json but not in vendor.manifest.json; run sync`));
+  }
   const count = (s) => sources.filter((x) => x.status === s).length;
-  const summary = { current: count('current'), behind: count('behind'), error: count('error') };
+  const summary = { current: count('current'), behind: count('behind'), held: count('held'), error: count('error') };
   return { sources, summary, exitCode: summary.error ? 1 : summary.behind ? 10 : 0 };
 }
 
@@ -124,6 +134,7 @@ export function formatText(report, { maxFiles = 25 } = {}) {
   for (const s of report.sources) {
     out.push(`${s.source}  [${s.status.toUpperCase()}]`);
     out.push(`  repo      ${s.repo}`);
+    if (s.hold) out.push(`  hold      ${s.hold}`);
     out.push(`  pinned    ${short(s.pinned)}   head ${s.head ? short(s.head) : '?'}   branch ${s.branch ?? '?'}`);
     if (s.relevantAhead !== null) out.push(`  ahead     ${s.relevantAhead} relevant commit(s) on vendored paths, ${s.totalAhead} total`);
     if (s.compare && s.status !== 'current') out.push(`  compare   ${s.compare}`);
@@ -139,19 +150,20 @@ export function formatText(report, { maxFiles = 25 } = {}) {
     out.push('');
   }
   const m = report.summary;
-  out.push(`${m.current} current, ${m.behind} behind, ${m.error} error  (exit ${report.exitCode})`);
+  out.push(`${m.current} current, ${m.behind} behind, ${m.held} held, ${m.error} error  (exit ${report.exitCode})`);
   return out.join('\n');
 }
 
 // Overlay -> vendored file: `extends: X` is skills/poteto-mode/playbooks/X.md; `target:` is a path from the repo root (see build-workflows.mjs).
+// Overlays live in workflows/*.md and domains/*/playbooks/*.md; `overlay` is the repo-relative path. Workflows first, then domains, each sorted.
 export function readOverlays(dir = root) {
-  const wf = join(dir, 'workflows');
-  if (!existsSync(wf)) return [];
-  return readdirSync(wf).filter((f) => f.endsWith('.md')).sort().flatMap((f) => {
-    const fm = readFileSync(join(wf, f), 'utf8').replace(/^﻿/, '').replaceAll('\r\n', '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+  const mdIn = (rel) => existsSync(join(dir, rel)) ? readdirSync(join(dir, rel)).filter((f) => f.endsWith('.md')).sort().map((f) => `${rel}/${f}`) : [];
+  const domains = existsSync(join(dir, 'domains')) ? readdirSync(join(dir, 'domains')).sort() : [];
+  return [...mdIn('workflows'), ...domains.flatMap((d) => mdIn(`domains/${d}/playbooks`))].flatMap((overlay) => {
+    const fm = readFileSync(join(dir, overlay), 'utf8').replace(/^﻿/, '').replaceAll('\r\n', '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
     const field = (k) => fm.match(new RegExp(`^${k}:[ \\t]*(.*)$`, 'm'))?.[1].trim() ?? '';
     const target = field('target') || (field('extends') && `skills/poteto-mode/playbooks/${field('extends')}.md`);
-    return target ? [{ overlay: `workflows/${f}`, target }] : [];
+    return target ? [{ overlay, target }] : [];
   });
 }
 
@@ -182,7 +194,7 @@ function main() {
   const real = realOpenRepo();
   let report;
   try {
-    report = buildReport({ manifest, lock, openRepo: real.open, overlays: readOverlays(), exists: (p) => existsSync(join(root, p)) });
+    report = buildReport({ manifest, lock, openRepo: real.open, overlays: readOverlays(root), exists: (p) => existsSync(join(root, p)) });
   } finally { real.cleanup(); }
   console.log(json ? JSON.stringify(report, null, 2) : formatText(report));
   process.exitCode = report.exitCode;
