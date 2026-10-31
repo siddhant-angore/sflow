@@ -83,11 +83,6 @@
     },
     {
       "source": "cursor/plugins/pstack",
-      "from": "pstack/assets",
-      "to": "assets"
-    },
-    {
-      "source": "cursor/plugins/pstack",
       "from": "harness/pstack/claude-code/docs/harness",
       "to": "docs/harness"
     },

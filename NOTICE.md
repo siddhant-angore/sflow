@@ -86,7 +86,6 @@ sflow is assembled from 8 vendored sources (7 MIT, 1 BSD-3-Clause), pinned by co
 - `agents/poteto-agent.md` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/agents/*`)
 - `agents/thermo-nuclear-code-quality-review-subagent.md` from cursor/plugins/thermos@4dd1d05818d1 (`thermos/agents/*`)
 - `agents/thermo-nuclear-review-subagent.md` from cursor/plugins/thermos@4dd1d05818d1 (`thermos/agents/*`)
-- `assets` from cursor/plugins/pstack@4dd1d05818d1 (`pstack/assets`)
 - `docs/harness` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/docs/harness`)
 - `docs/guide` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/docs/guide`)
 - `docs/upstream/pstack-README.md` from cursor/plugins/pstack@4dd1d05818d1 (`pstack/README.md`)
