@@ -62,7 +62,7 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - Stop: unmet definition-of-done items block the turn once per repo state; after three non-converging attempts the hook demands an auditable failure report and then lets the turn end. Hooks fail closed.
 - Run record: `<git dir>/harness/runs.jsonl` holds every gate result and Stop decision; the Retro playbook turns repeats into structure.
 
-`node scripts/eval-brake.mjs` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success.
+`npm run eval:brake [-- --runs N --model haiku]` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success. It needs an authenticated `claude` CLI and costs about $0.01 per run on haiku. Exit 0 means the brake held, 1 means the brake failed, 2 means a harness/CLI error (rerun); a transient CLI error is retried once automatically. The offline tests are `npm run test:eval-brake`.
 
 ## Maintain
 
