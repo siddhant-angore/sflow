@@ -70,6 +70,6 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - `npm run check` re-hashes every vendored and built file, validates the plugin, and prints the description-collision report.
 - To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/`, or `pi/` by hand.
 - To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`.
-- CI (`.github/workflows/ci.yml`) runs on every PR and on push to `main`: `npm run check`, `npm run routing`, `npm run test:hooks`, plus a separate vendor drift job (`node scripts/vendor.mjs sync` must leave the tree clean). It uses no secrets. `npm run eval:brake` makes a paid live Claude call, so it is manual and never runs in CI.
+- CI (`.github/workflows/ci.yml`) runs on every PR and on push to `main`: it fails on any tracked symlink, then runs `npm run check` (vendor hashes, plugin validate, hooks, routing), plus a separate vendor drift job (`node scripts/vendor.mjs sync` must leave the tree clean). It uses no secrets. `npm run eval:brake` makes a paid live Claude call, so it is manual and never runs in CI.
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.
