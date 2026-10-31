@@ -5,10 +5,26 @@
       "sha": "90fa51dc9d1bd6694cee226397e08ec8193e9e69",
       "license": "BSD-3-Clause"
     },
-    "michael-denyer/pstack-claude": {
-      "repo": "https://github.com/michael-denyer/pstack-claude",
-      "sha": "22b5e137e945cb65dd29dac5fc703c13d83a00aa",
-      "license": "MIT"
+    "cursor/plugins/pstack": {
+      "repo": "https://github.com/cursor/plugins",
+      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "license": "MIT",
+      "licensePath": "pstack/LICENSE",
+      "note": "pstack by Lauren Tan (poteto), Claude Code build from harness/pstack/claude-code. Pinned to the commit before c742dd6, which rewrites Orchestrate (SID-43)"
+    },
+    "cursor/plugins/cursor-team-kit": {
+      "repo": "https://github.com/cursor/plugins",
+      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "license": "MIT",
+      "licensePath": "cursor-team-kit/LICENSE",
+      "note": "Cursor, plugin author Eric Zakariasson; six skills only"
+    },
+    "cursor/plugins/thermos": {
+      "repo": "https://github.com/cursor/plugins",
+      "sha": "9f844cdaac06aeaa1b2d17fbcb57e078979c6f99",
+      "license": "MIT",
+      "licensePath": "thermos/LICENSE",
+      "note": "Cursor; three skills and two review subagents only"
     },
     "mattpocock/skills": {
       "repo": "https://github.com/mattpocock/skills",
@@ -33,38 +49,56 @@
   },
   "entries": [
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/skills/*",
+      "source": "cursor/plugins/pstack",
+      "from": "harness/pstack/claude-code/skills/*",
       "to": "skills"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/agents",
+      "source": "cursor/plugins/cursor-team-kit",
+      "from": "cursor-team-kit/skills/*",
+      "to": "skills",
+      "include": [
+        "deslop",
+        "fix-ci",
+        "fix-merge-conflicts",
+        "get-pr-comments",
+        "make-pr-easy-to-review",
+        "what-did-i-get-done"
+      ]
+    },
+    {
+      "source": "cursor/plugins/thermos",
+      "from": "thermos/skills/*",
+      "to": "skills"
+    },
+    {
+      "source": "cursor/plugins/pstack",
+      "from": "harness/pstack/claude-code/agents/*",
       "to": "agents"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/hooks",
-      "to": "hooks"
+      "source": "cursor/plugins/thermos",
+      "from": "thermos/agents/*",
+      "to": "agents"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/assets",
+      "source": "cursor/plugins/pstack",
+      "from": "pstack/assets",
       "to": "assets"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/pi",
-      "to": "pi"
+      "source": "cursor/plugins/pstack",
+      "from": "harness/pstack/claude-code/docs/harness",
+      "to": "docs/harness"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/models.json",
-      "to": "models.json"
+      "source": "cursor/plugins/pstack",
+      "from": "harness/pstack/claude-code/docs/guide",
+      "to": "docs/guide"
     },
     {
-      "source": "michael-denyer/pstack-claude",
-      "from": "plugins/pstack/README.md",
+      "source": "cursor/plugins/pstack",
+      "from": "pstack/README.md",
       "to": "docs/upstream/pstack-README.md"
     },
     {

@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PR runs share a group per PR, so a new push cancels the superseded run; push and manual runs are keyed on the commit SHA, so every commit to main gets its own run and none is cancelled or skipped.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# NOT run here: `npm run eval:brake`. It makes a live, paid Claude call and
+# needs auth. Run it manually. CI uses no secrets: `claude plugin validate`
+# is local and needs no authentication.
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: No tracked symlinks
+        run: |
+          if paths=$(git ls-files -s | awk -F'\t' 'split($1,a," ") && a[1]=="120000"{print $2; f=1} END{exit !f}'); then
+            while IFS= read -r p; do
+              echo "::error file=$p::Tracked symlink: $p. Commit the real file instead."
+            done <<< "$paths"
+            exit 1
+          fi
+          echo "No tracked symlinks."
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # scripts/check.mjs shells out to `claude plugin validate`.
+      # The version is pinned; only this package's install scripts are allowed.
+      - name: Install Claude Code CLI
+        run: npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.316
+
+      # check.mjs runs vendor check, plugin validate (root and domains/flutter), test-hooks and check-routing.
+      - name: npm run check
+        run: npm run check
+
+  vendor-drift:
+    name: vendor drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Cache vendored upstream checkouts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/sflow-vendor
+          key: vendor-${{ hashFiles('vendor.manifest.json') }}
+
+      # Re-vendor from the manifest, then require the tree to be unchanged.
+      - name: Sync vendored sources
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          node scripts/vendor.mjs sync || {
+            echo "::warning::vendor sync failed; retrying once with a clean cache"
+            rm -rf "$RUNNER_TEMP/sflow-vendor"
+            sleep 10
+            node scripts/vendor.mjs sync
+          }
+
+      - name: Fail if the committed tree differs from the manifest
+        run: |
+          git diff --exit-code
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Untracked or modified files after sync. Run 'npm run sync' and commit."
+            git status --porcelain
+            exit 1
+          fi

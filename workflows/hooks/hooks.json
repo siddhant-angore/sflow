@@ -1,4 +1,7 @@
 {
+  "SessionStart": [
+    { "matcher": "startup|resume|clear|compact", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/session-start.mjs\"" } ] }
+  ],
   "PreToolUse": [
     { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/pre-bash.mjs\"", "timeout": 900 } ] },
     { "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/policy.mjs\"" } ] }

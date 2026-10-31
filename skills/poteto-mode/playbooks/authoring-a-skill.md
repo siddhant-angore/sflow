@@ -2,7 +2,7 @@
 
 **You own the skill's voice.**
 
-1. Use the **plugin-dev:skill-development** skill (Claude Code's authoring guidance for SKILL.md files).
+1. Use the **create-skill** skill (Cursor's built-in for authoring SKILL.md files).
 2. Validate the skill: frontmatter has `name` and `description`, referenced files exist, cross-skill links resolve.
    - **sflow (in):** Write and prune the text per the **writing-for-agents** skill (context pointers, information hierarchy, leading words, `SKILL-MECHANICS.md` for frontmatter). Run `node scripts/check-routing.mjs` from the sflow root so the new description does not collide with an existing skill's.
 3. Test cases if structural. Skip if subjective.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Vendors the three sources by commit SHA into one flat skill tree, applies the workflow overlays, and pins everything with a hash lock.
+// Vendors every source in vendor.manifest.json by commit SHA into one flat skill tree, applies the workflow overlays, and pins everything with a hash lock.
 //   node scripts/vendor.mjs sync   # fetch at the pinned shas, copy, rename collisions, build workflows, write vendor.lock.json + NOTICE.md
 //   node scripts/vendor.mjs check  # re-hash every pinned file; exit 1 on drift or a missing file
 import { createHash } from 'node:crypto';
@@ -17,9 +17,14 @@ const sha256 = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
 const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
 
+// A source key is a license scope, not always a repo: several keys may share one repo and sha (cursor/plugins ships one license per plugin subtree).
+// The checkout is keyed by repo URL + sha so those keys share one fetch.
+const repoSlug = (repo) => new URL(repo).pathname.replace(/^\/|\.git$/g, '').replaceAll('/', '__');
+const licenseName = (name) => name.replaceAll('/', '__') + '.LICENSE';
+
 function checkout(name) {
   const { repo, sha } = manifest.sources[name];
-  const dir = join(tmpdir(), 'sflow-vendor', name.replace('/', '__'), sha);
+  const dir = join(tmpdir(), 'sflow-vendor', repoSlug(repo), sha);
   if (!existsSync(join(dir, '.git'))) {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
@@ -40,12 +45,15 @@ function copyResolved(from, to, srcRoot) {
   } else copyFileSync(real, to);
 }
 
+// `include` narrows an entry to named children, so one entry can take a few files or skills from a larger tree.
+// `exclude` does the opposite. On a `/*` entry the names are children's file names; on a directory entry they are its top-level names.
 function expand(srcRoot, entry) {
   if (!entry.from.endsWith('/*')) return [[join(srcRoot, entry.from), join(root, entry.to)]];
   const parent = join(srcRoot, entry.from.slice(0, -2));
   return readdirSync(parent, { withFileTypes: true })
     .filter((e) => e.isDirectory() || (basename(entry.to) === 'agents' && e.name.endsWith('.md')))
     .filter((e) => !(entry.exclude ?? []).includes(e.name))
+    .filter((e) => !entry.include || entry.include.includes(e.name))
     .map((e) => [join(parent, e.name), join(root, entry.to, entry.rename?.[e.name] ?? e.name)]);
 }
 
@@ -61,7 +69,9 @@ function alignName(dir) {
 function sync() {
   const lock = { sources: manifest.sources, files: {} };
   for (const t of new Set(manifest.entries.map((e) => e.to))) rmSync(join(root, t), { recursive: true, force: true });
-  const notice = ['# NOTICE', '', 'sflow is assembled from three MIT-licensed sources, vendored by commit and listed here with their licenses in `LICENSES/`. Do not edit vendored files in place; bump `vendor.manifest.json` and run `node scripts/vendor.mjs sync`. The workflow overlays in `workflows/` are the only sflow-authored change to those files, applied by `scripts/build-workflows.mjs`.', ''];
+  const sources = Object.entries(manifest.sources);
+  const sourceLine = ([name, s]) => `- ${name} (${s.license}), ${s.repo}@${s.sha.slice(0, 12)}, license in \`LICENSES/${licenseName(name)}\`${s.note ? `. ${s.note}` : ''}`;
+  const notice = ['# NOTICE', '', `sflow is assembled from ${sources.length} vendored sources, pinned by commit. Each source's license text is in \`LICENSES/\`. Do not edit vendored files in place; bump \`vendor.manifest.json\` and run \`node scripts/vendor.mjs sync\`. The workflow overlays in \`workflows/\` are the only sflow-authored change to those files, applied by \`scripts/build-workflows.mjs\`.`, '', '## Sources', '', ...sources.map(sourceLine), '', '## Files', ''];
   const seen = new Map();
   for (const entry of manifest.entries) {
     const srcRoot = checkout(entry.source);
@@ -69,13 +79,14 @@ function sync() {
       if (seen.has(to)) throw new Error(`collision: ${relative(root, to)} from ${seen.get(to)} and ${entry.source}; add a rename to the manifest`);
       seen.set(to, entry.source);
       mkdirSync(dirname(to), { recursive: true });
-      copyResolved(from, to, srcRoot);
+      const top = entry.from.endsWith('/*') ? null : entry.include;
+      if (top) { mkdirSync(to,{recursive:true}); for (const e of readdirSync(from)) if (top.includes(e)) copyResolved(join(from,e), join(to,e), srcRoot); } else copyResolved(from, to, srcRoot);
       if (statSync(to).isDirectory() && basename(dirname(to)) === 'skills') alignName(to);
       notice.push(`- \`${relative(root, to)}\` from ${entry.source}@${manifest.sources[entry.source].sha.slice(0, 12)} (\`${entry.from}\`)`);
     }
-    const lic = join(root, 'LICENSES', entry.source.replace('/', '__') + '.LICENSE');
+    const lic = join(root, 'LICENSES', licenseName(entry.source));
     mkdirSync(dirname(lic), { recursive: true });
-    cpSync(join(srcRoot, 'LICENSE'), lic);
+    cpSync(join(srcRoot, manifest.sources[entry.source].licensePath ?? 'LICENSE'), lic);
     // Vendored skill dirs that are not SKILL.md skills (e.g. wingspan's shared/) are left as-is; Claude Code ignores them.
   }
   execFileSync('node', [join(root, 'scripts', 'build-workflows.mjs')], { stdio: 'inherit' });
