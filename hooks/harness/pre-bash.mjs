@@ -51,13 +51,13 @@ try {
   const dir = join(gitDir(cfg.root), 'harness-gate');
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
-  const base = (() => { try { return git(cfg.root, 'merge-base', 'HEAD', `origin/${cfg.base}`); } catch { return null; } })();
+  const base = (() => { try { return git(cfg.root, 'merge-base', 'HEAD', `refs/remotes/origin/${cfg.base}`); } catch { return null; } })();
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
   const secret = base ? secretHits(cfg.root, base) : [];
   if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
   for (const raw of cfg.gate) {
-    const command = raw.replaceAll('{base}', base ?? `origin/${cfg.base}`);
+    const command = raw.replaceAll('{base}', base ?? `refs/remotes/origin/${cfg.base}`);
     const started = Date.now();
     try {
       execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
