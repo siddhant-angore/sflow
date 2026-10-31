@@ -1,1 +1,15 @@
-/private/var/folders/1g/7v03gmkx4b3dxjn6dq7dp8x80000gn/T/sflow-vendor/VeryGoodOpenSource__vgv-wingspan/e78608956d26777efcda2e6ecefb0a3e981fb115/skills/shared/scripts/detect-base-branch.sh
+#!/usr/bin/env bash
+# Detect the default/base branch of the repository.
+# Checks main, master, develop in order. Outputs the first one found.
+# Exits 1 if none exist.
+
+for branch in main master develop; do
+  if git rev-parse --verify "$branch" &>/dev/null ||
+     git rev-parse --verify "origin/$branch" &>/dev/null; then
+    echo "$branch"
+    exit 0
+  fi
+done
+
+echo "ERROR: no base branch found (checked main, master, develop)" >&2
+exit 1
