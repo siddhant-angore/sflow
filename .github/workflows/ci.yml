@@ -33,7 +33,7 @@ jobs:
 
       - name: No tracked symlinks
         run: |
-          if paths=$(git ls-files -s | awk '$1=="120000"{print $4; f=1} END{exit !f}'); then
+          if paths=$(git ls-files -s | awk -F'\t' 'split($1,a," ") && a[1]=="120000"{print $2; f=1} END{exit !f}'); then
             while IFS= read -r p; do
               echo "::error file=$p::Tracked symlink: $p. Commit the real file instead."
             done <<< "$paths"
