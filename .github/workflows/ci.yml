@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per PR/ref; a new push cancels the superseded PR run.
+# Pushes to main are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# NOT run here: `npm run eval:brake`. It makes a live, paid Claude call and
+# needs auth. Run it manually. CI uses no secrets: `claude plugin validate`
+# is local and needs no authentication.
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # scripts/check.mjs shells out to `claude plugin validate`.
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # check also runs routing and hooks; they get their own steps so a
+      # failure is easy to read.
+      - name: npm run check
+        run: npm run check
+
+      - name: npm run routing
+        run: npm run routing
+
+      - name: npm run test:hooks
+        run: npm run test:hooks
+
+  vendor-drift:
+    name: vendor drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Re-vendor from the manifest, then require the tree to be unchanged.
+      - name: Sync vendored sources
+        run: node scripts/vendor.mjs sync
+
+      - name: Fail if the committed tree differs from the manifest
+        run: |
+          git diff --exit-code
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Untracked or modified files after sync. Run 'npm run sync' and commit."
+            git status --porcelain
+            exit 1
+          fi
