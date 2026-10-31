@@ -1,0 +1,144 @@
+# Changelog
+
+All notable changes to sflow are documented in this file.
+
+The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Each release has an "Upstream pins" table: the commit of every vendored source that the release was built from (`vendor.manifest.json`, locked by `vendor.lock.json`). Credit for the vendored work belongs to its authors; licenses are in `LICENSES/` and attribution is in `NOTICE.md`.
+
+## [Unreleased]
+
+> Entries marked "pending" come from open pull requests (#2, #3, #4) and are not merged. Entries marked "merged" are on main but not yet in a release. The release step moves them under a version heading.
+
+### Added
+
+- This changelog (SID-48).
+- GitHub Actions CI that runs `npm run check`, the routing check, `npm run test:hooks`, and a vendor drift job on pull requests and on `main`. [#2](https://github.com/siddhant-angore/sflow/pull/2) (SID-42), pending.
+- `npm run upstream`, a drift check of each pinned source against its upstream. Exit code 0 (no drift), 10 (drift), or 1 (error). Supports `--json`. Fails if a pinned SHA no longer exists upstream. Also adds a weekly upstream-drift workflow. [#4](https://github.com/siddhant-angore/sflow/pull/4) (SID-50), pending.
+- `make-bot-ui` skill, from the pstack source change below. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
+- A sflow-authored `SessionStart` hook, replacing the hooks that came with the port. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
+
+### Changed
+
+- pstack is now vendored from Lauren Tan (poteto)'s original in `cursor/plugins`, pinned at `9f844cd`, which is before the Orchestrate rewrite (`c742dd6`). It replaces the `michael-denyer/pstack-claude` port. The `cursor-team-kit` and `thermos` skills are sourced from their own plugins. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
+  - Pending pin change: `michael-denyer/pstack-claude` [`22b5e137e945`](https://github.com/michael-denyer/pstack-claude/commit/22b5e137e945cb65dd29dac5fc703c13d83a00aa) → `cursor/plugins` [`9f844cdaac06`](https://github.com/cursor/plugins/commit/9f844cdaac06aeaa1b2d17fbcb57e078979c6f99) (new source).
+
+### Removed
+
+- From the pstack source change: the `babysit` skill, `pi/`, `models.json`, and the port's hooks. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), pending.
+
+### Fixed
+
+- `vendor.mjs` now materializes upstream symlinks. 29 Flutter wingspan files were dangling absolute symlinks into a macOS temp directory, so `npm run check` failed on a fresh clone. `npm run check` now rejects vendored symlinks. It makes no pin change. [#1](https://github.com/siddhant-angore/sflow/pull/1) (SID-41), merged in `7bda5c0`.
+
+## [0.3.0] - 2026-10-30
+
+Harness hooks, a loop brake, and a behavioral eval. Tag `v0.3.0` points at `5cf8fff`.
+
+### Added
+
+- Harness hooks in `hooks/harness/` (`guard-rules.mjs`, `lib.mjs`, `policy.mjs`, `pre-bash.mjs`, `stop.mjs`), built from `workflows/hooks/` and registered in `hooks/hooks.json`. They activate when a repository has `.harness.json` on its protected branch. Hooks fail closed.
+  - Guard: blocks force and `+` pushes, pushes to a protected branch, `reset --hard`, `clean -f`, `branch -D`, history rewrites, `--no-verify`, `gh pr merge`, GitHub write API calls, releases, and publishes.
+  - Policy: `.harness.json` and `.claude/settings.json` are read-only to the agent. The policy is read from `origin/<protected>`, not the working tree.
+  - Gate: `git push` and `gh pr create` run the `gate` commands first, skip when HEAD already passed, and scan the pushed range for secret-shaped text.
+  - Stop (loop brake): unmet definition-of-done items block the turn once per repo state. After three non-converging attempts on the same unmet items, the hook demands an auditable failure report and then lets the turn end.
+- Run record: gate results and Stop decisions are appended to `<git dir>/harness/runs.jsonl`. The Retro playbook reads it first.
+- `templates/harness.json`, a starter `.harness.json`.
+- `npm run test:hooks` (`scripts/test-hooks.mjs`).
+- `npm run eval:brake` (`scripts/eval-brake.mjs`), a behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim the push succeeded. It costs one short headless model run.
+- "Harness hooks" section in `README.md`.
+
+### Changed
+
+- Overlay edits: sensors before judges in the Opening a PR playbook, specs are committed in the Spec playbook, MCP authoring points at the 2026-07-28 revision (Setup playbook), the Retro playbook reads the run record first, and the sflow entry skill gains a symptom-to-layer table. The Flutter pack's Retro overlay was updated to match.
+- `scripts/build-workflows.mjs` builds the hook files; `scripts/check.mjs` was extended (one line).
+- Plugin version bumped 0.2.0 → 0.3.0 in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json`. All three agree at this tag.
+
+### Upstream pins
+
+No pin changed. The lock grew from 970 to 975 files; the five new entries are the `hooks/harness/*.mjs` files above, and `hooks/hooks.json` and a few playbook files changed hash because of the overlays. No vendored upstream file changed.
+
+| Source | Author | License | Pin |
+|---|---|---|---|
+| `michael-denyer/pstack-claude` | Lauren Tan's pstack, Claude Code port by Michael Denyer | MIT | unchanged: [`22b5e137e945`](https://github.com/michael-denyer/pstack-claude/commit/22b5e137e945cb65dd29dac5fc703c13d83a00aa) |
+| `mattpocock/skills` | Matt Pocock | MIT | unchanged: [`a496f5513d4a`](https://github.com/mattpocock/skills/commit/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa) |
+| `addyosmani/agent-skills` | Addy Osmani | MIT | unchanged: [`eb07f19f52c2`](https://github.com/addyosmani/agent-skills/commit/eb07f19f52c2669f2364897aaa293e2aaddd7b1c) |
+| `flutter/agent-plugins` | Flutter team | BSD-3-Clause | unchanged: [`90fa51dc9d1b`](https://github.com/flutter/agent-plugins/commit/90fa51dc9d1bd6694cee226397e08ec8193e9e69) |
+| `VeryGoodOpenSource/vgv-ai-flutter-plugin` | Very Good Ventures | MIT | unchanged: [`e2231bfbd948`](https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin/commit/e2231bfbd94888eab8b179eaed8fa997d09c50bd) |
+| `VeryGoodOpenSource/vgv-wingspan` | Very Good Ventures | MIT | unchanged: [`e78608956d26`](https://github.com/VeryGoodOpenSource/vgv-wingspan/commit/e78608956d26777efcda2e6ecefb0a3e981fb115) |
+
+Notable upstream changes: none.
+
+## [0.2.0] - 2026-10-30
+
+Flutter domain pack. Tag `v0.2.0` points at `8f00181`.
+
+### Added
+
+- `sflow-flutter`, a second plugin in the same marketplace (`domains/flutter/`). Install with `/plugin install sflow-flutter@sflow`. The core router applies it when the repository matches (a `pubspec.yaml`).
+  - Per the commit message: the Flutter team's 25 skills and hot-reload rule; Very Good Ventures' 15 skills, 11 agents, and hooks (format and analyze after every Dart edit, CLI-workaround blocking); wingspan's skills and agents. This changelog did not recount them.
+  - MCP servers: the Dart MCP server (`cli` and `flutter_app_lifecycle` categories enabled) and `very_good mcp`.
+- Nine per-playbook overlays (Bug fix, Feature, Investigation, Opening a PR, Perf issue, Refactoring, Retro, Setup, Spec) that name the Flutter skill or MCP tool at each quoted step. Domain overlays are checked against the core playbooks on sync.
+- A `flutter` entry skill carrying the house standard (VGV conventions, Flutter-team mechanics) and the hot-reload rule, because Claude Code does not load rules from `rules/`.
+- A domain-pack rule in the core router, `domains/flutter/README.md`, an `LICENSES/` file per new source, and new `NOTICE.md` and `docs/skill-map.md` entries.
+- `README.md` documents domain packs.
+
+### Changed
+
+- Flutter state standard is Bloc. Mocking: `mocktail` by default (no codegen); `mockito` generated mocks where a package already runs `build_runner` and the interface is large. One discipline for both: `thenAnswer` for async, mocks at boundaries only, `MockBloc` for blocs, never both libraries in one package.
+- `scripts/vendor.mjs` dereferences wingspan's `shared` references on vendoring; they are no longer vendored as a separate `wingspan-shared` skill directory.
+
+### Known issues
+
+- **Version mismatch.** The `v0.2.0` tag does not contain the 0.2.0 version bump. At the tag, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` still say `0.1.0`, so a `v0.2.0` checkout reports itself as 0.1.0. The bump is commit `2746be6` (`chore: version 0.2.0`), made 16 seconds after the tag was created (tag 15:33:21, commit 15:33:37 IST), and it is not in the tag. The tag was not moved. `v0.3.0` and later have consistent versions.
+
+### Upstream pins
+
+Three pins are unchanged from 0.1.0. Three sources are new. The lock grew from 776 to 970 files.
+
+| Source | Author | License | Pin |
+|---|---|---|---|
+| `michael-denyer/pstack-claude` | Lauren Tan's pstack, Claude Code port by Michael Denyer | MIT | unchanged: [`22b5e137e945`](https://github.com/michael-denyer/pstack-claude/commit/22b5e137e945cb65dd29dac5fc703c13d83a00aa) |
+| `mattpocock/skills` | Matt Pocock | MIT | unchanged: [`a496f5513d4a`](https://github.com/mattpocock/skills/commit/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa) |
+| `addyosmani/agent-skills` | Addy Osmani | MIT | unchanged: [`eb07f19f52c2`](https://github.com/addyosmani/agent-skills/commit/eb07f19f52c2669f2364897aaa293e2aaddd7b1c) |
+| `flutter/agent-plugins` | Flutter team | BSD-3-Clause | added: [`90fa51dc9d1b`](https://github.com/flutter/agent-plugins/commit/90fa51dc9d1bd6694cee226397e08ec8193e9e69) |
+| `VeryGoodOpenSource/vgv-ai-flutter-plugin` | Very Good Ventures | MIT | added: [`e2231bfbd948`](https://github.com/VeryGoodOpenSource/vgv-ai-flutter-plugin/commit/e2231bfbd94888eab8b179eaed8fa997d09c50bd) |
+| `VeryGoodOpenSource/vgv-wingspan` | Very Good Ventures | MIT | added: [`e78608956d26`](https://github.com/VeryGoodOpenSource/vgv-wingspan/commit/e78608956d26777efcda2e6ecefb0a3e981fb115) |
+
+Notable upstream changes: initial pin for the three added sources; none for the unchanged ones.
+
+## [0.1.0] - 2026-10-30
+
+Initial release. Tag `v0.1.0` points at `a83b213`, which includes the initial import `42726ec`.
+
+### Added
+
+- sflow, one workflow plugin that merges three MIT-licensed skill sets under one namespace, vendored by commit with a hash lock (`vendor.lock.json`, 776 files at the tag):
+  - pstack (Lauren Tan, Claude Code port by Michael Denyer): the `poteto-mode` router, principles, playbooks, multi-model review, verification discipline.
+  - Matt Pocock's skills: all 38, with the `tdd` and `teach` name collisions renamed to `tdd-vertical-slices` and `teach-workspace`.
+  - Addy Osmani's agent-skills: all 25, with references, checklists, and review personas.
+- Overlays in `workflows/`, merged into pstack's playbooks at build time so each task reads one playbook that carries the sflow steps. A stale overlay anchor fails the build.
+- Five new playbooks (Spec, Triage, Retro, Setup, Writing), registered in the router.
+- The sflow entry skill, review personas, checklists, and `docs/skill-map.md`, which places every skill (130 per the README at the tag).
+- `npm run sync`, `npm run check`, and `npm run routing`.
+
+### Fixed
+
+- The authored sflow skill is now installed at build time. The sync wipes `skills/` before vendoring, so an authored skill there was lost; authored skills now live under `workflows/<name>/` and the build copies them in. (`a83b213`)
+
+### Upstream pins
+
+Initial pin of all three sources.
+
+| Source | Author | License | Pin |
+|---|---|---|---|
+| `michael-denyer/pstack-claude` | Lauren Tan's pstack, Claude Code port by Michael Denyer | MIT | added: [`22b5e137e945`](https://github.com/michael-denyer/pstack-claude/commit/22b5e137e945cb65dd29dac5fc703c13d83a00aa) |
+| `mattpocock/skills` | Matt Pocock | MIT | added: [`a496f5513d4a`](https://github.com/mattpocock/skills/commit/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa) |
+| `addyosmani/agent-skills` | Addy Osmani | MIT | added: [`eb07f19f52c2`](https://github.com/addyosmani/agent-skills/commit/eb07f19f52c2669f2364897aaa293e2aaddd7b1c) |
+
+Notable upstream changes: initial pin.
+
+[Unreleased]: https://github.com/siddhant-angore/sflow/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/siddhant-angore/sflow/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/siddhant-angore/sflow/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/siddhant-angore/sflow/releases/tag/v0.1.0
