@@ -111,6 +111,25 @@ export const policyDeny = (p) => p + policyText(p);
 export const gitDir = (root) => git(root, 'rev-parse', '--absolute-git-dir');
 export const currentBranch = (root) => { try { return git(root, 'symbolic-ref', '--short', 'HEAD'); } catch { return null; } };
 
+// Command wrappers (sudo, nice, timeout, ...): unwrap(name, rest) drops the wrapper's options and the values they take, and for timeout its duration, leaving the wrapped command.
+const WRAPPERS = { env: 'uC', command: '', builtin: '', exec: 'a', nice: 'n', nohup: '', time: 'of', timeout: 'ks', stdbuf: 'ioe', ionice: 'cnpPu', sudo: 'ugCDhprtTU', doas: 'uC', xargs: 'nILPsdEa' }; // short options that take a separate argument
+const LONG_ARG = new Set(['--user', '--group', '--chdir', '--unset', '--host', '--prompt', '--role', '--type', '--other-user', '--close-from', '--command-timeout', '--adjustment', '--kill-after', '--signal', '--max-args', '--max-procs', '--max-lines', '--replace', '--delimiter', '--eof', '--arg-file']);
+const take = (s) => { const m = /^\s*((?:"[^"]*"|'[^']*'|\S)+)\s*/.exec(s); return m ? [m[1], s.slice(m[0].length)] : [null, '']; };
+
+function unwrap(name, rest) {
+  for (;;) {
+    const [t, r] = take(rest);
+    if (t === null || !(t.startsWith('-') || (name === 'env' && /^\w+=/.test(t)))) break;
+    rest = r;
+    if (t === '--') break;
+    const m = name === 'env' && /^(-S|--split-string)=?(.*)$/.exec(t);
+    if (m) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
+    if ((t.length === 2 && WRAPPERS[name].includes(t[1])) || LONG_ARG.has(t)) rest = take(r)[1];
+  }
+  return name === 'timeout' ? take(rest)[1] : rest;
+}
+export { WRAPPERS, take, unwrap };
+
 // `git -C x -c k=v --no-pager push` becomes `git push`, so every rule matches the subcommand.
 export const normalize = (cmd) => cmd.replace(/\bgit((\s+(-C|-c|--git-dir|--work-tree|--exec-path)(=|\s+)\S+)|\s+--no-pager|\s+--no-optional-locks)+\s+/g, 'git ');
 // Leading `VAR=value` words (and `env`) are dropped, so `GIT_DIR=x git push` is matched as `git push` by every rule.
