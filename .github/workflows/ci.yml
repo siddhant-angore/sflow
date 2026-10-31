@@ -27,13 +27,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: No tracked symlinks
+        run: |
+          if paths=$(git ls-files -s | awk '$1=="120000"{print $4; f=1} END{exit !f}'); then
+            while IFS= read -r p; do
+              echo "::error file=$p::Tracked symlink: $p. Commit the real file instead."
+            done <<< "$paths"
+            exit 1
+          fi
+          echo "No tracked symlinks."
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       # scripts/check.mjs shells out to `claude plugin validate`.
+      # The version is pinned; only this package's install scripts are allowed.
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.316
 
       # check also runs routing and hooks; they get their own steps so a
       # failure is easy to read.
