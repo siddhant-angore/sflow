@@ -24,6 +24,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - Licenses are per source (`licensePath`), copied into `LICENSES/cursor__plugins__*.LICENSE`, and the `NOTICE.md` header is generated from the manifest.
   - Routing follows upstream: **108 → 48 model-invocable skills**. Upstream marks pstack's router, principle and playbook skills (and the thermos skills) `disable-model-invocation: true`, so the model reads them by path. Slash commands still work.
   - Upstream pins: `cursor/plugins` added at [`9f844cdaac06`](https://github.com/cursor/plugins/commit/9f844cdaac06aeaa1b2d17fbcb57e078979c6f99) (three source keys: `pstack`, `cursor-team-kit`, `thermos`); `michael-denyer/pstack-claude` removed; the other five pins are unchanged. The lock now holds 919 files.
+- Review follow-ups for #4 and #6: the upstream-drift workflow runs the network check once and reuses its `--json` report, and its close comment lists each held source with its status and flags stale holds; `eval:brake` rejects a repeated `--runs`/`--model` (exit 2), names an `ENOBUFS` failure and raises `maxBuffer` to 64 MiB; the CI comment lists every test `check.mjs` runs. (SID-56)
 
 ### Removed
 

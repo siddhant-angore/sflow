@@ -184,10 +184,25 @@ test('json contract: the workflow lists held sources from source + hold, includi
   const held = report.sources.filter((s) => s.hold != null).map((s) => `- ${s.source}: ${s.hold}`);
   assert.deepEqual(held, ['- b: SID-43', '- c: pinned for legal']);
   assert.equal(report.exitCode, 0);
-  const filter = '.sources[] | select(.hold != null) | "- \\(.source): \\(.hold)"';
+  const filter = '.sources[] | select(.hold != null) | "- \\(.source): \\(.hold) [\\(.status)]" + (if .status == "current" then " \\u2014 STALE HOLD: upstream is current; remove the hold" else "" end)';
   const jq = spawnSync('jq', ['-r', filter], { input: JSON.stringify(report), encoding: 'utf8' });
   if (jq.error) console.log('  (jq not installed; skipped the jq filter check)');
-  else assert.deepEqual(jq.stdout.trim().split('\n'), held);
+  else assert.deepEqual(jq.stdout.trim().split('\n'), ['- b: SID-43 [held]', '- c: pinned for legal [current] \u2014 STALE HOLD: upstream is current; remove the hold']);
+});
+
+test('--from-json renders a saved report as text without the network, exit 0', () => {
+  const m = manifestFor({ h: { ...src('https://github.com/o/h', A), hold: 'SID-43' } }, [{ source: 'h', from: 'skills/*', to: 'skills' }]);
+  const { report } = run(m, { 'https://github.com/o/h': behindRepo() });
+  const tmp = mkdtempSync(join(tmpdir(), 'test-from-json-'));
+  try {
+    const file = join(tmp, 'report.json');
+    writeFileSync(file, JSON.stringify(report));
+    const script = join(dirname(new URL(import.meta.url).pathname), 'upstream.mjs');
+    const r = spawnSync(process.execPath, [script, '--from-json', file], { encoding: 'utf8', env: { ...process.env, SFLOW_UPSTREAM_ROOT: tmp } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trimEnd(), formatText(report));
+    assert.equal(spawnSync(process.execPath, [script, '--from-json'], { encoding: 'utf8' }).status, 2);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('held plus another behind source is exit 10', () => {
