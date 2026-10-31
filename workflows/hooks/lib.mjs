@@ -10,8 +10,10 @@ export function readEvent() {
   try { return JSON.parse(readFileSync(0, 'utf8')); } catch { return {}; }
 }
 
+// Replace refs (refs/replace/) can swap any object git reads, including the commit and file the policy comes from, so they are off for every call.
+export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
 export function git(root, ...args) {
-  return execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  return execFileSync('git', ['--no-replace-objects', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
 }
 
 export function repoRoot(cwd = process.cwd()) {
