@@ -10,6 +10,11 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Fixed
+
+- Harness: text piped into a shell is now scanned as commands (SID-107, security). On 0.5.0 `echo 'git reset --hard' | sh` ran, because quoted text was treated as data whenever a segment was not itself a command. When a line has a segment that reads its script from stdin or a process substitution (`| sh`, `| bash -s`, `tee >(sh)`, `> >(sh)`, `sh <(...)`, `source <(...)`, `| source /dev/stdin`, `xargs sh -c` with `{}`/the `-I` string/positional args, or a `sh -c`/`eval` payload built from `$( )` or backticks), every quoted string (with `\n`/`\t` escapes decoded) and the arguments of the other segments go through the guard rules. `curl ... | sh`, `echo ls | sh`, `printf 'echo hi\n' | sh`, `cat script.sh | bash`, `echo hi | tee >(wc -l)`, `eval "$(ssh-agent -s)"` and `find ... | xargs -I{} git add {}` stay allowed.
+- Harness: an unquoted glob that can match an option-named file is denied in git transport commands (SID-108, security). `git push [-]-e* origin feat/x` with a file named `--e=<cmd>` in the directory ran `<cmd>` as the receive-pack. `git push|fetch|pull|clone|ls-remote|archive|submodule` now refuse an unquoted word that starts with `*`, `?`, or a `[...]` set containing `-`, `!` or `^`; quote it or spell the names out. `git push origin feat/*`, quoted refspec globs, and globs in other commands (`git add *.mjs`) stay allowed.
+
 ## [0.5.0] - 2026-10-31
 
 Harness security hardening. The policy fails closed and is read only from the base branch on origin (SID-65, #13); the Bash guard normalises git invocations, wrappers, redirections and quoting, and resolves `HEAD`/`@` in pushes (SID-79, SID-80, #16); and the policy files can no longer be written from the shell (SID-66, #15). Breaking for 0.4.0 users of the harness: with no `.harness.json` committed on the base branch on origin, strict defaults apply (`main`, `master` and the remote default branch protected, merges denied, no gate), and an uncommitted or branch-only policy is ignored (see the Migration note under Fixed).
