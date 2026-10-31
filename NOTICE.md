@@ -88,6 +88,7 @@ sflow is assembled from 8 vendored sources, pinned by commit. Each source's lice
 - `agents/thermo-nuclear-review-subagent.md` from cursor/plugins/thermos@9f844cdaac06 (`thermos/agents/*`)
 - `assets` from cursor/plugins/pstack@9f844cdaac06 (`pstack/assets`)
 - `docs/harness` from cursor/plugins/pstack@9f844cdaac06 (`harness/pstack/claude-code/docs/harness`)
+- `docs/guide` from cursor/plugins/pstack@9f844cdaac06 (`harness/pstack/claude-code/docs/guide`)
 - `docs/upstream/pstack-README.md` from cursor/plugins/pstack@9f844cdaac06 (`pstack/README.md`)
 - `skills/ask-matt` from mattpocock/skills@a496f5513d4a (`skills/engineering/*`)
 - `skills/code-review` from mattpocock/skills@a496f5513d4a (`skills/engineering/*`)

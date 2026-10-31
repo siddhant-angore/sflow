@@ -2,7 +2,7 @@
 
 One rigorous engineering workflow for coding agents, as a single installable thing. sflow merges MIT-licensed skill sets, pinned by commit:
 
-- **pstack by Lauren Tan (poteto)**, https://github.com/cursor/plugins/tree/main/pstack, taken from its Claude Code build in `harness/pstack/claude-code/`: the router (`poteto-mode`), 24 principles, 23 playbooks, multi-model review, verification discipline. sflow's overlays add 5 more playbooks.
+- **pstack by Lauren Tan (poteto)**, https://github.com/cursor/plugins/tree/main/pstack, taken from its Claude Code build in `harness/pstack/claude-code/`: the router (`poteto-mode`), 24 principles, 23 playbooks, multi-model review, verification discipline. sflow's overlays add 5 more playbooks. pstack's own README is vendored at `docs/upstream/pstack-README.md` and its guide at `docs/guide/`; pstack links to `../../README.md` (for example in `poteto-help`) land on this file, because sflow's plugin root is this repo's root.
 - **Cursor's `cursor-team-kit` and `thermos` plugins** (https://github.com/cursor/plugins, same commit as pstack): the `deslop`, `fix-ci`, `fix-merge-conflicts`, `get-pr-comments`, `make-pr-easy-to-review`, and `what-did-i-get-done` skills from `cursor-team-kit` (plugin author Eric Zakariasson), and the `thermos`, `thermo-nuclear-review`, and `thermo-nuclear-code-quality-review` skills with their two review subagents from `thermos`.
 - **Matt Pocock's skills**: grilling, glossary and ADRs, specs and tracer-bullet tickets, triage, diagnosis, deep-module design, retro, writing for agents.
 - **Addy Osmani's agent-skills**: the define-to-ship lifecycle skills with anti-rationalization tables, seven checklists, four review personas.

@@ -93,6 +93,11 @@
     },
     {
       "source": "cursor/plugins/pstack",
+      "from": "harness/pstack/claude-code/docs/guide",
+      "to": "docs/guide"
+    },
+    {
+      "source": "cursor/plugins/pstack",
       "from": "pstack/README.md",
       "to": "docs/upstream/pstack-README.md"
     },
