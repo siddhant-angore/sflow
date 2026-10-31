@@ -1,1 +1,26 @@
-/private/var/folders/1g/7v03gmkx4b3dxjn6dq7dp8x80000gn/T/sflow-vendor/VeryGoodOpenSource__vgv-wingspan/e78608956d26777efcda2e6ecefb0a3e981fb115/skills/shared/references/plan-templates/minimal.md
+---
+title: [Issue Title]
+type: [feat|fix|refactor]
+date: YYYY-MM-DD
+---
+
+## [Issue Title] - Minimal
+
+[Brief problem/feature description]
+
+## Success Criteria
+
+Embed the machine-checkable block defined in [success-criteria.md](success-criteria.md), with the placeholders filled in.
+
+## Context
+
+[Any critical information]
+
+## MVP
+
+[add here any potential code snippets that might inform the solution]
+
+## References
+
+- Related issue: #[issue_number]
+- Documentation: [relevant_docs_url]

@@ -1,1 +1,12 @@
-/private/var/folders/1g/7v03gmkx4b3dxjn6dq7dp8x80000gn/T/sflow-vendor/VeryGoodOpenSource__vgv-wingspan/e78608956d26777efcda2e6ecefb0a3e981fb115/skills/shared/references/validate-and-fix.md
+# Validate and Fix
+
+Run static analysis — detect and use the project's linter/analyzer. If MCP tools are available for the project's analyzer, prefer them over shell commands.
+
+Run tests — detect and use the project's test runner. If MCP tools are available for the project's test runner, prefer them over shell commands.
+
+If failures occur:
+- Fix the issue and re-run
+- Up to 3 attempts per failure
+- After 3 failed attempts, use **AskUserQuestion** to ask the user for guidance with context on what failed and what you tried
+
+Fix all lint warnings before proceeding.
