@@ -23,17 +23,19 @@ try {
   for (const t of w.through) {
     if (t.includes('$')) continue;
     let real = null;
-    try { real = realpathSync(resolve(ev.cwd ?? cfg.root, t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
+    try { real = realpathSync(resolve(ev.cwd ?? cfg.root ?? process.cwd(), t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
     if (real && isPolicyPath(real)) { deny(`harness guard: ${t} is a symlink to ${policyDeny(real)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
   // A policy-named source copied into a directory lands as <dir>/<name>. Copying FROM a policy file is a read: deny only when that landing is the repo-root .harness.json or a .claude/settings*.json. Dir = trailing slash, ., .., -t, or an existing directory; resolved against the event cwd (and any `cd` earlier in the command).
   const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
   const real = (p) => { try { return realpathSync(p); } catch { return p; } };
-  const rootPolicy = [cfg.root, real(cfg.root)].map((r) => resolve(r, '.harness.json').toLowerCase());
+  // No root (git can't read the repo, or there is none): the cwd stands in for the root, so copies onto ./.harness.json are refused and copies out (cp .harness.json /tmp/) stay allowed.
+  const rootDir = cfg.root ?? resolve(ev.cwd ?? process.cwd());
+  const rootPolicy = [rootDir, real(rootDir)].map((r) => resolve(r, '.harness.json').toLowerCase());
   const landsOnPolicy = (p) => rootPolicy.includes(p.toLowerCase()) || (isPolicyPath(p) && !/\.harness\.json$/i.test(p));
   for (const { dest, names, dir, cds } of w.into) {
     if (dest.includes('$') || cds.some((c) => c.includes('$'))) continue;
-    const start = resolve(ev.cwd ?? cfg.root);
+    const start = resolve(ev.cwd ?? cfg.root ?? process.cwd());
     for (const from of cds.length ? [start, resolve(start, ...cds.map(tilde))] : [start]) {
       const abs = resolve(from, tilde(dest));
       let isDir = dir;

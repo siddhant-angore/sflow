@@ -430,11 +430,16 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
         assert.ok(verdict(d, cmd).deny, `k8 ${tag}: must deny: ${cmd}`);
       assert.match(verdict(d, 'gh pr merge 1').why, /could not read a repository/, `k8 ${tag}: message says git could not read the repository`);
       for (const cmd of ['ls', 'gh pr view 1 -R o/r', 'npm test', 'git status']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: must allow: ${cmd}`);
+      // SID-66 shell-write rules still apply with no readable repo (the cwd stands in for the root); reads and copies out stay allowed
+      for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .', 'cp a .claude/settings.json']) assert.ok(verdict(d, cmd).deny, `k8 ${tag}: SID-66 must deny: ${cmd}`);
+      for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'jq . .harness.json']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: SID-66 must allow: ${cmd} (${verdict(d, cmd).why})`);
     }
     const nonRepo = mkdtempSync(join(tmpdir(), 'harness-sid65-k8n-'));
     made.push(nonRepo);
     for (const cmd of ['gh pr merge 1 -R o/r', 'git push -f origin HEAD:main']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: must deny: ${cmd}`);
     for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
+    for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must deny: ${cmd}`);
+    for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'cp .harness.json backup/']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must allow: ${cmd} (${verdict(nonRepo, cmd).why})`);
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }
