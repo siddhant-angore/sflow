@@ -5,21 +5,20 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { versionProblems } from './check-versions.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const ENABLE_ORPHAN_TEST = false; // main does not remove orphan LICENSES yet; PR #10 (SID-46) adds it
 const POTETO = { 'skills/poteto-mode/SKILL.md': '---\nname: poteto-mode\n---\n- **Opening a PR.** Invoked at the end of every other playbook.\n', 'skills/poteto-mode/playbooks/x.md': '# x\n\n1. Do the thing.\n' };
 
 const withTmp = (fn) => {
   const tmp = mkdtempSync(join(tmpdir(), 'sflow-sid51-'));
   try { return fn(tmp); } finally { rmSync(tmp, { recursive: true, force: true }); }
 };
-const env = (tmp) => ({ ...process.env, TMPDIR: tmp, GIT_CONFIG_NOSYSTEM: '1' });
+const env = (tmp) => ({ ...process.env, TMPDIR: tmp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' });
 const git = (tmp, dir, ...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { env: env(tmp), stdio: 'pipe', encoding: 'utf8' }).trim();
 
 // files: path -> text, { link: target }, or null (omit). LICENSE is added unless the files say null.
@@ -62,6 +61,20 @@ const simple = (tmp, files, entry = {}, extra = {}) => {
   const up = upstream(tmp, 'up', files);
   return { up, f: fixture(tmp, { sources: { up: up.source(extra) }, entries: [{ source: 'up', from: 'skills/*', to: 'skills', ...entry }] }) };
 };
+// Source one vendors into the root, source two into the pack domains/x (a marketplace plugin installed from its own dir, as packs() finds it).
+const GRANT = 'MIT License\n\nCopyright (c) t\n\n';
+function packFixture(tmp) {
+  const u1 = upstream(tmp, 'one', { 'skills/a/SKILL.md': SKILL('a') }), u2 = upstream(tmp, 'two', { 'skills/b/SKILL.md': SKILL('b') });
+  const f = fixture(tmp, { sources: { one: u1.source(), two: u2.source() }, entries: [{ source: 'one', from: 'skills/*', to: 'skills' }, { source: 'two', from: 'skills/*', to: 'domains/x/skills' }] });
+  const put = (p, s) => { mkdirSync(dirname(join(f.root, p)), { recursive: true }); writeFileSync(join(f.root, p), s); };
+  put('LICENSE', GRANT + 'sflow vendors other work.\n'); put('domains/x/LICENSE', GRANT + 'This covers the pack.\n');
+  put('.claude-plugin/marketplace.json', JSON.stringify({ name: 'm', plugins: [{ name: 'sflow', source: './' }, { name: 'x', source: './domains/x' }] }));
+  put('domains/x/.claude-plugin/plugin.json', JSON.stringify({ name: 'x', version: '0.0.1' }));
+  f.goodSync();
+  return f;
+}
+const failsWith = (f, s) => { const r = f.check(); assert.equal(r.status, 1, r.out); assert.equal(lines(r.out, s).length, 1, `${s}\n${r.out}`); };
+
 const SKILL = (n) => `---\nname: ${n}\ndescription: d\n---\nbody of ${n}\n`;
 const lines = (out, s) => out.split('\n').filter((l) => l.includes(s));
 const walkAll = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walkAll(join(dir, e.name)) : [join(dir, e.name)]);
@@ -125,6 +138,11 @@ const tests = [
     const { f } = simple(tmp, { 'skills/a/SKILL.md': SKILL('a'), LICENSE: null });
     const r = f.sync(); assert.notEqual(r.status, 0); assert.match(r.out, /LICENSE/);
   })],
+  ['k: a LICENSES file no source owns is removed by sync', () => withTmp((tmp) => {
+    const { f } = simple(tmp, { 'skills/a/SKILL.md': SKILL('a') });
+    f.goodSync(); writeFileSync(join(f.root, 'LICENSES/bogus.LICENSE'), 'x\n'); f.goodSync();
+    assert.throws(() => f.read('LICENSES/bogus.LICENSE'));
+  })],
   ['l1: check reports missing, drift and unexpected files', () => withTmp((tmp) => {
     const { f } = simple(tmp, { 'skills/a/SKILL.md': SKILL('a'), 'skills/a/f.md': 'f\n', 'skills/a/g.md': 'g\n' });
     f.goodSync();
@@ -184,14 +202,56 @@ const tests = [
     const r = spawnSync('node', [join(repoRoot, 'scripts/check-versions.mjs')], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /versions ok: \S+ \(4 fields agree\)/);
   })],
+  ['p2: check-versions run through a path with a space or a symlink still checks', () => withTmp((tmp) => {
+    const root = join(tmp, 'a root'), files = ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'domains/flutter/.claude-plugin/plugin.json'];
+    for (const p of ['scripts/check-versions.mjs', ...files]) { mkdirSync(dirname(join(root, p)), { recursive: true }); copyFileSync(join(repoRoot, p), join(root, p)); }
+    const j = JSON.parse(readFileSync(join(root, files[2]), 'utf8')); j.version = '9.9.9'; writeFileSync(join(root, files[2]), JSON.stringify(j));
+    symlinkSync(join(root, 'scripts/check-versions.mjs'), join(tmp, 'link.mjs'));
+    for (const script of [join(root, 'scripts/check-versions.mjs'), join(tmp, 'link.mjs')]) {
+      const r = spawnSync('node', [script], { env: env(tmp), encoding: 'utf8' });
+      assert.equal(r.status, 1, `${script}\n${r.stdout}${r.stderr}`); assert.match(r.stderr, /^version disagreement: .*domains\/flutter\/\.claude-plugin\/plugin\.json version = 9\.9\.9/m);
+    }
+  })],
+  ['q1: sync copies a pack its own licenses and writes its NOTICE.md', () => withTmp((tmp) => {
+    const f = packFixture(tmp);
+    assert.deepEqual(readdirSync(join(f.root, 'domains/x/LICENSES')), ['two.LICENSE']); assert.equal(f.read('domains/x/LICENSES/two.LICENSE'), 'licence of two\n');
+    const n = f.read('domains/x/NOTICE.md');
+    assert.match(n, /^# NOTICE\n\nx is assembled from 1 vendored sources \(1 MIT\), pinned by commit\./); assert.match(n, /^- two \(MIT\), file:\/\/.*license in `LICENSES\/two\.LICENSE`$/m); assert.match(n, /^- `skills\/b` from two@/m); assert.doesNotMatch(n, /\bone\b/);
+    const c = f.check(); assert.equal(c.status, 0, c.out);
+  })],
+  ['q2: an orphan pack license is reported by check and removed by sync', () => withTmp((tmp) => {
+    const f = packFixture(tmp);
+    copyFileSync(join(f.root, 'LICENSES/one.LICENSE'), join(f.root, 'domains/x/LICENSES/one.LICENSE'));
+    failsWith(f, 'orphan license: domains/x/LICENSES/one.LICENSE (no source vendors into domains/x)');
+    const r = f.goodSync(); assert.match(r.out, /removed orphan license: domains\/x\/LICENSES\/one\.LICENSE/);
+    assert.equal(existsSync(join(f.root, 'domains/x/LICENSES/one.LICENSE')), false); const c = f.check(); assert.equal(c.status, 0, c.out);
+  })],
+  ['q3: check fails on a stale or missing pack license', () => withTmp((tmp) => {
+    const f = packFixture(tmp), p = join(f.root, 'domains/x/LICENSES/two.LICENSE');
+    writeFileSync(p, 'edited\n'); failsWith(f, 'stale license: domains/x/LICENSES/two.LICENSE differs from LICENSES/two.LICENSE; run sync');
+    rmSync(p); failsWith(f, 'missing license: domains/x/LICENSES/two.LICENSE for two');
+  })],
+  ['q4: check fails on a stale or missing pack NOTICE.md', () => withTmp((tmp) => {
+    const f = packFixture(tmp), p = join(f.root, 'domains/x/NOTICE.md');
+    writeFileSync(p, f.read('domains/x/NOTICE.md') + 'extra\n'); failsWith(f, 'stale domains/x/NOTICE.md; run sync');
+    rmSync(p); failsWith(f, 'missing: domains/x/NOTICE.md');
+  })],
+  ['q5: check fails on a missing pack LICENSE', () => withTmp((tmp) => {
+    const f = packFixture(tmp); rmSync(join(f.root, 'domains/x/LICENSE')); failsWith(f, 'missing: domains/x/LICENSE');
+  })],
+  ['q6: check fails when the pack LICENSE alters the MIT grant', () => withTmp((tmp) => {
+    const f = packFixture(tmp); writeFileSync(join(f.root, 'domains/x/LICENSE'), GRANT.replace('(c) t', '(c) someone else') + 'This covers the pack.\n');
+    failsWith(f, 'stale domains/x/LICENSE: must start with the MIT grant in LICENSE');
+  })],
+  ['q7: sync repairs a stale pack', () => withTmp((tmp) => {
+    const f = packFixture(tmp), lic = f.read('domains/x/LICENSES/two.LICENSE'), notice = f.read('domains/x/NOTICE.md');
+    writeFileSync(join(f.root, 'domains/x/LICENSES/two.LICENSE'), 'edited\n'); rmSync(join(f.root, 'domains/x/NOTICE.md'));
+    assert.equal(f.check().status, 1);
+    f.goodSync();
+    const c = f.check(); assert.equal(c.status, 0, c.out);
+    assert.equal(f.read('domains/x/LICENSES/two.LICENSE'), lic); assert.equal(f.read('domains/x/NOTICE.md'), notice);
+  })],
 ];
-
-const orphan = ['k: a LICENSES file no source owns is removed by sync', () => withTmp((tmp) => {
-  const { f } = simple(tmp, { 'skills/a/SKILL.md': SKILL('a') });
-  f.goodSync(); writeFileSync(join(f.root, 'LICENSES/bogus.LICENSE'), 'x\n'); f.goodSync();
-  assert.throws(() => f.read('LICENSES/bogus.LICENSE'));
-})];
-if (ENABLE_ORPHAN_TEST) tests.push(orphan); else console.log(`todo ${orphan[0]} (lands with #10, SID-46)`);
 
 let failed = 0;
 for (const [name, fn] of tests) {

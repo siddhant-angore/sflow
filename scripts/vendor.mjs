@@ -156,7 +156,7 @@ function sync() {
     cpSync(real, stage, { recursive: true, verbatimSymlinks: true, filter: (f) => !['.git', 'node_modules'].includes(relative(real, f).split(sep)[0]) });
     root = stage;
     try { syncInPlace(); } finally { root = real; }
-    const outs = [...new Set([...manifest.entries.map((e) => e.to), 'LICENSES', 'NOTICE.md', 'vendor.lock.json', 'hooks'])];
+    const outs = [...new Set([...manifest.entries.map((e) => e.to), 'LICENSES', 'NOTICE.md', 'vendor.lock.json', 'hooks', ...packList.flatMap((p) => [`${p.dir}/LICENSES`, `${p.dir}/NOTICE.md`])])];
     for (const p of outs.filter((p) => !outs.some((q) => q !== p && p.startsWith(q + '/')))) {
       rmSync(join(real, p), { recursive: true, force: true });
       if (existsSync(join(stage, p))) cpSync(join(stage, p), join(real, p), { recursive: true, verbatimSymlinks: true });

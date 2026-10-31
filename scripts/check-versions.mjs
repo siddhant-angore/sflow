@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The release version lives in four fields (core plugin.json, both marketplace.json entries, flutter plugin.json). Exit 1 unless they agree.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export function versionProblems(root) {
   const problems = [], fields = {};
@@ -24,8 +25,8 @@ export function versionProblems(root) {
   return problems;
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) {
-  const root = join(dirname(new URL(import.meta.url).pathname), '..');
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const problems = versionProblems(root);
   if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
   console.log(`versions ok: ${JSON.parse(readFileSync(join(root, '.claude-plugin/plugin.json'), 'utf8')).version} (4 fields agree)`);
