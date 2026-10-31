@@ -9,10 +9,9 @@ on:
 permissions:
   contents: read
 
-# One run per PR/ref; a new push cancels the superseded PR run.
-# Pushes to main are never cancelled.
+# PR runs share a group per PR, so a new push cancels the superseded run; push and manual runs are keyed on the commit SHA, so every commit to main gets its own run and none is cancelled or skipped.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # NOT run here: `npm run eval:brake`. It makes a live, paid Claude call and
@@ -24,8 +23,13 @@ jobs:
     name: check
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_TELEMETRY: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: No tracked symlinks
         run: |
@@ -37,7 +41,7 @@ jobs:
           fi
           echo "No tracked symlinks."
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -46,31 +50,40 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.316
 
-      # check also runs routing and hooks; they get their own steps so a
-      # failure is easy to read.
+      # check.mjs runs vendor check, plugin validate (root and domains/flutter), test-hooks and check-routing.
       - name: npm run check
         run: npm run check
-
-      - name: npm run routing
-        run: npm run routing
-
-      - name: npm run test:hooks
-        run: npm run test:hooks
 
   vendor-drift:
     name: vendor drift
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
+      - name: Cache vendored upstream checkouts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/sflow-vendor
+          key: vendor-${{ hashFiles('vendor.manifest.json') }}
+
       # Re-vendor from the manifest, then require the tree to be unchanged.
       - name: Sync vendored sources
-        run: node scripts/vendor.mjs sync
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          node scripts/vendor.mjs sync || {
+            echo "::warning::vendor sync failed; retrying once with a clean cache"
+            rm -rf "$RUNNER_TEMP/sflow-vendor"
+            sleep 10
+            node scripts/vendor.mjs sync
+          }
 
       - name: Fail if the committed tree differs from the manifest
         run: |
