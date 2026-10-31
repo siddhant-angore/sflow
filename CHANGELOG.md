@@ -13,10 +13,25 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 ### Added
 
 - This changelog (SID-48).
+- CI (`.github/workflows/ci.yml`) on every PR and push to `main`: a tracked-symlink gate, `npm run check` (vendor hashes, plugin validate, hooks, routing), and a vendor drift job (`vendor.mjs sync` must leave the tree clean). Actions are SHA-pinned; no secrets; `eval:brake` stays manual. [#2](https://github.com/siddhant-angore/sflow/pull/2) (SID-42), merged in `a216f9b`.
+- `docs/adr/0001-pstack-source-of-truth.md`, the decision record for taking pstack from the original. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44).
+- `npm run test:eval-brake` (`scripts/test-eval-brake.mjs`): offline tests plus end-to-end tests that run `eval-brake` against a fake `claude` on `PATH`. Part of `npm run check`. [#6](https://github.com/siddhant-angore/sflow/pull/6) (SID-47).
+
+### Changed
+
+- pstack is vendored from Lauren Tan's original in `cursor/plugins` (Claude Code build in `harness/pstack/claude-code/`), replacing the `michael-denyer/pstack-claude` port. It is pinned to `9f844cd`, the commit before the Orchestrate rewrite `c742dd6` (SID-43). The six team-kit skills and the thermos skills and subagents now come from `cursor/plugins/cursor-team-kit` and `cursor/plugins/thermos` at the same commit. [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44), merged in `d5affba`.
+  - Licenses are per source (`licensePath`), copied into `LICENSES/cursor__plugins__*.LICENSE`, and the `NOTICE.md` header is generated from the manifest.
+  - Routing follows upstream: **108 → 48 model-invocable skills**. Upstream marks pstack's router, principle and playbook skills (and the thermos skills) `disable-model-invocation: true`, so the model reads them by path. Slash commands still work.
+  - Upstream pins: `cursor/plugins` added at [`9f844cdaac06`](https://github.com/cursor/plugins/commit/9f844cdaac06aeaa1b2d17fbcb57e078979c6f99) (three source keys: `pstack`, `cursor-team-kit`, `thermos`); `michael-denyer/pstack-claude` removed; the other five pins are unchanged. The lock now holds 919 files.
+
+### Removed
+
+- The port-only pieces with no upstream equivalent: the `babysit` skill (covered by the Babysit playbook in `poteto-mode`), `models.json` and `pi/`, and the port's hooks (Codex/Copilot/Muse adapters, awk/PowerShell helpers, `pre-tool-use.*`, the SessionStart mandate). [#3](https://github.com/siddhant-angore/sflow/pull/3) (SID-44).
 
 ### Fixed
 
 - `vendor.mjs` now materializes upstream symlinks. 29 Flutter wingspan files were dangling absolute symlinks into a macOS temp directory, so `npm run check` failed on a fresh clone. `npm run check` now rejects vendored symlinks. It makes no pin change. [#1](https://github.com/siddhant-angore/sflow/pull/1) (SID-41), merged in `7bda5c0`.
+- `npm run eval:brake` no longer crashes with a raw buffer dump when `claude -p` exits non-zero. It prints a readable reason and exits 0 (brake held), 1 (brake failed) or 2 (harness/CLI error). A transient CLI error is retried once (the 600 s kill is not); `--runs N` repeats the eval (capped at 5), and a bare `--runs` or `--model` is a usage error (exit 2); scratch repos are removed after a pass and kept after a failure. [#6](https://github.com/siddhant-angore/sflow/pull/6) (SID-47), merged in `576f147`.
 
 ## [0.3.0] - 2026-10-30
 
