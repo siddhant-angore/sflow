@@ -11,8 +11,7 @@ if (ev.tool_name !== 'Bash') process.exit(0);
 const cmd = String(ev.tool_input?.command ?? '');
 try {
   const cfg = config(ev.cwd);
-  if (!cfg.root) process.exit(0);
-  const branch = currentBranch(cfg.root);
+  const branch = cfg.root ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
   const env = envReason(cmd);
   if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
   const segs = segments(cmd);
@@ -20,6 +19,7 @@ try {
     const why = reason(seg, cfg, branch);
     if (why) { deny(`harness guard: ${why}\n  in: ${seg}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
+  if (!cfg.root) process.exit(0); // nothing to gate without a repository
 
   const pushes = segs.some((s) => /^git\s+push\b|^gh\s+pr\s+(create|ready)\b/.test(s));
   if (!pushes || !cfg.present) process.exit(0);

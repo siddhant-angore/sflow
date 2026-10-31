@@ -34,6 +34,12 @@ const mustDeny = [
   'git update-ref refs/replace/abc def', 'git update-ref -d refs/replace/abc', 'git replace abc def', 'git replace -f abc def', 'git replace -d abc', 'git replace --graft abc', 'git replace --edit abc',
   'echo "update refs/replace/abc def" | git update-ref --stdin', "printf 'update refs/remotes/origin/main abc\\n' | git update-ref --stdin",
   'git symbolic-ref HEAD refs/remotes/origin/main', 'git symbolic-ref -m x HEAD refs/remotes/origin/main', 'git symbolic-ref -m "x y" HEAD refs/remotes/origin/main', 'git symbolic-ref HEAD refs/tags/v1', 'git symbolic-ref HEAD refs/replace/abc',
+  // SID-65: repo-discovery config, pushes into this repo, fast-import, update-ref --stdin
+  'git config core.bare true', 'git config --local core.bare true', 'git config --global include.path /tmp/x', 'git config set core.repositoryformatversion 9', 'git config --file .git/config core.worktree /tmp', 'git config --unset core.bare',
+  'git config includeIf.gitdir:/x/.path /tmp/x', 'git -c core.bare=true status', 'git -c include.path=/tmp/x fetch', 'git -c core.bare status', "git -c 'core.bare' status", 'git --config-env=core.bare=X status',
+  'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.bare GIT_CONFIG_VALUE_0=true git status', "GIT_CONFIG_PARAMETERS=\"'core.bare'='true'\" git status",
+  'git push . HEAD:refs/remotes/origin/main', 'git push . evil:main', 'git push ./ x:y', 'git push origin HEAD:refs/remotes/origin/main', 'git push origin x:refs/replace/abc',
+  'git fast-import', 'git fast-import --force < dump', 'echo "update refs/heads/tmp HEAD" | git update-ref --stdin', 'git update-ref --stdin < f', 'git update-ref -z --stdin',
 ];
 for (const c of mustDeny) assert.ok(denied('pre-bash.mjs', bash(c)), `must deny: ${c}`);
 
@@ -44,13 +50,20 @@ const mustAllow = [
   'git push -u origin feat/x', 'git push', 'git push origin HEAD', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push origin sid-12-fix-main-nav', 'git push -u origin feat/main-menu',
   'git push -u origin sid-7-master-detail-view', 'git status', 'git branch -d x', 'git checkout -- a.txt', 'git restore a.txt', 'git checkout main', 'git stash', 'git stash pop', 'git commit -m "no -n here"',
   'git commit --amend --no-edit', 'git rebase main', 'gh pr create --fill', 'gh pr view 1', 'gh api repos/o/r/pulls/1', 'ls -fd', 'grep -r "git push -f" docs', 'echo "do not git push -f"', 'npm run publish-docs', 'git reset a.txt', 'git reset --soft HEAD~1', 'git clean -n',
-  'git replace -l', 'git replace --list', 'git symbolic-ref -q HEAD', 'git symbolic-ref HEAD refs/heads/feat/x', 'git symbolic-ref -m switch HEAD refs/heads/feat/x', 'echo "update refs/heads/tmp HEAD" | git update-ref --stdin',
+  'git replace -l', 'git replace --list', 'git symbolic-ref -q HEAD', 'git symbolic-ref HEAD refs/heads/feat/x', 'git symbolic-ref -m switch HEAD refs/heads/feat/x',
+  'git config --get core.bare', 'git config core.bare', 'git config --get-all include.path', 'git config -l', 'git config core.autocrlf false', 'git -c core.autocrlf=false status', 'git push origin feat/x:feat/y', 'git push origin HEAD:refs/heads/feat/x',
   ...allowRemote, // SID-65: remote-tracking rules must not touch ordinary fetch/pull/config/gh reads
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
-for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
+for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref|--stdin|^git push/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git config core.bare true'))), /git config --get <key>/, 'discovery config message names git config --get');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git -c core.bare=true status'))), /git config --get <key>/, 'discovery -c message');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push . x:y'))), /pushing to `\.` writes refs/, 'push-to-dot message');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin x:refs/replace/abc'))), /refs\/remotes\/ or refs\/replace\//, 'push destination message');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git fast-import'))), /git fast-import can create or reset any ref/, 'fast-import message');
+assert.match(reasonOf(run('pre-bash.mjs', bash('git update-ref --stdin < f'))), /git update-ref refs\/heads\/<name> <commit>/, '--stdin message');
 
 // On a protected branch, a bare push is denied; on a feature branch it is a gated push.
 sh(repo, 'git checkout -q main');
@@ -397,6 +410,31 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     const k7h = strictRepo('k7h'); // HEAD steering: pointing HEAD at origin/main then resetting would move it
     assert.match(verdict(k7h, 'git symbolic-ref HEAD refs/remotes/origin/main').why, /git switch/, 'k7 symref: denied');
     assert.ok(!verdict(k7h, 'git symbolic-ref HEAD refs/heads/feat/x').deny && !verdict(k7h, 'git symbolic-ref HEAD').deny, 'k7 symref: local branch and reads allowed');
+
+    // k8. git can't read the repository: the guard must still apply, with strict defaults (a permissive committed policy must not matter).
+    const unreadable = [
+      ['bare', (d) => 'git config core.bare true'],
+      ['fmt', (d) => 'git config core.repositoryformatversion 9'],
+      ['include', (d) => { const f = join(d, 'bad.inc'); writeFileSync(f, '[bad'); return `git config include.path ${f}`; }],
+    ];
+    for (const [tag, setup] of unreadable) {
+      const d = mk(`k8${tag}`);
+      policyOn(d, 'main', { allowMerge: true, protectedBranches: [] });
+      assert.ok(!verdict(d, 'gh pr merge 1 -R o/r').deny, `k8 ${tag}: sanity, the permissive policy allows merge while readable`);
+      const setupCmd = setup(d);
+      assert.ok(verdict(d, setupCmd).deny, `k8 ${tag}: the guard refuses the setup command`);
+      sh(d, setupCmd); // bypass the guard
+      const c8 = config(d);
+      assert.ok(c8.root === null && c8.unreadable === true, `k8 ${tag}: git can't read the repo`);
+      for (const cmd of ['git push -f origin HEAD:main', 'git push --force origin feat/x', 'gh pr merge 1 -R o/r', 'gh pr merge 1', 'git reset --hard HEAD~1'])
+        assert.ok(verdict(d, cmd).deny, `k8 ${tag}: must deny: ${cmd}`);
+      assert.match(verdict(d, 'gh pr merge 1').why, /could not read a repository/, `k8 ${tag}: message says git could not read the repository`);
+      for (const cmd of ['ls', 'gh pr view 1 -R o/r', 'npm test', 'git status']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: must allow: ${cmd}`);
+    }
+    const nonRepo = mkdtempSync(join(tmpdir(), 'harness-sid65-k8n-'));
+    made.push(nonRepo);
+    for (const cmd of ['gh pr merge 1 -R o/r', 'git push -f origin HEAD:main']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: must deny: ${cmd}`);
+    for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }

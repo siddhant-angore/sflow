@@ -15,6 +15,8 @@ export function pushReason(seg, prot, branch) {
   if (flags.some((f) => /^--mirror|^--delete|^-d$|^--tags$|^--all$/.test(f))) return 'mirror, delete, --all, and --tags pushes are not allowed';
   if (flags.some((f) => /^--no-verify$/.test(f))) return 'hooks are the gate; --no-verify is not allowed';
   if (refs.some((r) => r.startsWith('+') || /^:/.test(r))) return 'a + refspec or a :branch deletion is a force or a delete';
+  if (/^\.\/?$/.test(refs[0] ?? '')) return NO_PUSH_DOT;
+  if (refs.slice(1).some((t) => /^refs\/(remotes|replace)\//.test(t.replace(/^\+/, '').split(':').pop()))) return NO_PUSH_DST;
   const targets = refs.slice(1);
   if (targets.length === 0 && branch && prot.includes(branch)) return `you are on protected branch ${branch}; create a feature branch and push that`;
   if (targets.some((t) => protectedToken(t, prot))) return `direct push to a protected branch (${prot.join(', ')}); push a feature branch and open a PR`;
@@ -32,6 +34,13 @@ const NO_FETCH_OVERRIDE = 'a per-command remote.<name>.fetch override can rewrit
 const NO_REPO_EDIT = 'repository settings (including the default branch, which locates the harness policy) are a repo-admin action on GitHub. Read them with `gh repo view --json <fields>`; ask a human to change them.';
 const NO_REPLACE = "replace refs can change what the harness policy reads; they're not needed for normal work. List them with `git replace -l`; ask a human if you really need one.";
 const NO_HEAD_SYMREF = 'HEAD may only point at a local branch (refs/heads/...), because committing or resetting through HEAD would otherwise move that ref (for example origin/main, which locates the harness policy). Use `git switch <branch>` or `git checkout <branch>`.';
+const NO_PUSH_DOT = 'pushing to `.` writes refs in this repository, including refs/remotes/* that locate the harness policy. Move a local branch with `git update-ref refs/heads/<name> <commit>` or `git switch`; push to origin to publish.';
+const NO_PUSH_DST = 'push destinations under refs/remotes/ or refs/replace/ can change what the harness policy reads; push a branch instead: `git push origin <branch>`.';
+const NO_FAST_IMPORT = "git fast-import can create or reset any ref (including refs/remotes/*, which locate the harness policy) and isn't needed for normal work; commit normally, or ask a human to run an import.";
+const NO_STDIN = "git update-ref --stdin can write any ref and its input can't be checked; run one `git update-ref refs/heads/<name> <commit>` per ref instead.";
+const NO_DISCOVERY_CFG = 'core.bare, core.repositoryformatversion, core.worktree, include.path and includeIf.* change how git finds and reads this repository, which would stop the harness from reading its policy. Leave them as they are; read them with `git config --get <key>`; if the repository config really needs changing, ask a human.';
+const DISCOVERY_KEY = /^(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\..+)$/i;
+const DISCOVERY_ENV = /(^|[\s"'=])(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)(?=$|[\s"'=])/i;
 const FETCH_KEY = /remote\.[^\s='"]+\.fetch\b/i;
 const isRemoteRef = (x) => /^(refs\/)?remotes\//.test(x);
 const isReplaceRef = (x) => /^refs\/replace\//.test(x);
@@ -74,7 +83,8 @@ export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
     [/^git\s+branch\b.*(\s-D\b|\s-[a-zA-Z]*f[a-zA-Z]*\b|--force\b|--delete\s+--force)/, 'force-deleting a branch is irreversible; use -d'],
     [/^git\s+stash\s+(clear|drop)\b/, 'dropping stashes is irreversible'],
     [/^git\s+(commit|merge|rebase)\b.*(\s--no-verify\b|\s-[a-zA-Z]*n[a-zA-Z]*\b)/, 'hooks are the gate; --no-verify (-n) is not allowed'],
-    [/^git\s+update-ref\b/, (a) => (a.some(isReplaceRef) ? NO_REPLACE : a.some(isRemoteRef) ? NO_UPDATE_REF : null)],
+    [/^git\s+fast-import\b/, NO_FAST_IMPORT],
+    [/^git\s+update-ref\b/, (a) => (a.some((x) => x === '--stdin') ? NO_STDIN : a.some(isReplaceRef) ? NO_REPLACE : a.some(isRemoteRef) ? NO_UPDATE_REF : null)],
     [/^git\s+replace\b/, replaceReason],
     [/^git\s+(filter-branch|filter-repo)\b|^git\s+update-ref\s+-d\b|^git\s+reflog\s+expire\b|^git\s+gc\b.*--prune/, 'history rewriting is not allowed'],
     [/^git\s+push\b/, null],
@@ -82,12 +92,12 @@ export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
     [/^git\s+symbolic-ref\b/, () => symrefReason(raw)],
     [/^git\s+(fetch|pull)\b/, (a) => { const dsts = a.filter((x) => !x.startsWith('-')).map((x) => x.replace(/^\+/, '').split(':').slice(1).join(':')); return dsts.some(isReplaceRef) ? NO_REPLACE : dsts.some(isRemoteRef) ? NO_FETCH_DST : null; }],
     [/^git\s+config\b/, (a) => {
-      const pos = a.filter((x) => !x.startsWith('-'));
-      const k = pos.findIndex((x) => /^remote\..+\.fetch$/i.test(x));
-      if (k < 0) return null;
+      const pos = a.filter((x, i) => !x.startsWith('-') && !/^(--file|-f|--blob)$/.test(a[i - 1] ?? ''));
       const writes = a.some((x) => /^--(add|replace-all|unset|unset-all)$/.test(x)) || ['set', 'unset'].includes(pos[0]);
       const reads = a.some((x) => /^(--get|--get-all|--get-regexp|--get-urlmatch|-l|--list)$/.test(x)) || pos[0] === 'get';
-      return writes || (!reads && pos.length > k + 1) ? NO_FETCH_CFG : null;
+      const hit = (re) => pos.findIndex((x) => re.test(x));
+      const bad = (re, msg) => { const k = hit(re); return k >= 0 && (writes || (!reads && pos.length > k + 1)) ? msg : null; };
+      return bad(/^remote\..+\.fetch$/i, NO_FETCH_CFG) ?? bad(DISCOVERY_KEY, NO_DISCOVERY_CFG);
     }],
     [/^gh\s+api\b.*(\s-X\s*(PUT|POST|PATCH|DELETE)|\s--method\s*(PUT|POST|PATCH|DELETE)|\s--input\b|\s-F\b|\s-f\b)/, 'write calls to the GitHub API are not allowed from an agent; use gh pr create/edit/comment'],
     [/^gh\s+(release|repo\s+delete|repo\s+archive|secret|variable|workflow\s+(run|enable|disable))\b/, 'releases, repo lifecycle, secrets, and workflow triggers are human actions'],
@@ -104,15 +114,13 @@ export function reason(raw, { protectedBranches: prot, allowMerge }, branch) {
 }
 
 export function envReason(cmd) {
-  // Whole-command check: stdin ref updates arrive via a pipe or heredoc. Input from a file (`< file`) is not visible here (SID-78).
-  if (/\bupdate-ref\b/.test(cmd) && /--stdin\b/.test(cmd)) {
-    if (/refs\/replace\//.test(cmd)) return NO_REPLACE;
-    if (/refs\/remotes\//.test(cmd)) return NO_UPDATE_REF;
-  }
+  // update-ref --stdin is denied outright in reason(), whatever its input.
   if (/core\.hooksPath/.test(cmd)) return 'overriding core.hooksPath disables the project hooks';
   if (/(^|\s)-c\s*["']?remote\.[^\s=]+\.fetch\s*=|--config-env[=\s]+["']?remote\.[^\s=]+\.fetch\b|\bGIT_CONFIG_KEY_\d+=["']?remote\.[^\s=]+\.fetch\b/i.test(cmd)) return NO_FETCH_OVERRIDE;
+  if (/(^|\s)-c\s*["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)["']?(\s*=|\s|$)|--config-env[=\s]+["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s=]+)\s*=|\bGIT_CONFIG_KEY_\d+=["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.\S+?)["']?(\s|$)/i.test(cmd)) return NO_DISCOVERY_CFG;
   const params = /\bGIT_CONFIG_PARAMETERS=("[^"]*"|'[^']*'|\S*)/.exec(cmd);
   if (params && FETCH_KEY.test(params[1])) return NO_FETCH_OVERRIDE;
+  if (params && DISCOVERY_ENV.test(params[1])) return NO_DISCOVERY_CFG;
   if (/\b(HUSKY|LEFTHOOK|SKIP_HOOKS|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG)=/.test(cmd)) return 'disabling commit hooks by environment is not allowed';
   return null;
 }

@@ -44,7 +44,7 @@ export const baseCandidates = (root) => [...new Set([remoteDefault(root), 'main'
 // closed: strict defaults (merges denied, no gate, no Stop items) and present is false. Parse errors throw; pre-bash denies on throw.
 export function config(cwd = process.cwd()) {
   const root = repoRoot(cwd);
-  if (!root) return { ...DEFAULTS, root: null, present: false };
+  if (!root) return { ...DEFAULTS, root: null, present: false, candidates: [], unreadable: true };
   const candidates = baseCandidates(root);
   let text = null, source = null, base = null, baseSha = null;
   for (const b of candidates) {
@@ -67,7 +67,9 @@ const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ADOPT = (base) => ` The working-tree .harness.json is NOT trusted until it is on origin/${base}: a human commits it on a branch (start from ${join(pluginRoot, 'templates', 'harness.json')}), opens a PR, merges it into ${base}, then run git fetch origin.`;
 
 // One line saying which policy is in force, for deny messages.
-export const policyNote = (cfg) => cfg.present
+export const policyNote = (cfg) => cfg.unreadable
+  ? 'policy: git could not read a repository here (rev-parse failed), so strict defaults apply: protected main, master; merges denied. If this is a repository, check its config (core.bare, core.repositoryformatversion, core.worktree, include.path).'
+  : cfg.present
   ? `policy: .harness.json on origin/${cfg.base}`
   : `policy: none committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}); strict defaults, protected: ${cfg.protectedBranches.join(', ')}, merges denied.${cfg.ignoredLocal ? ADOPT(cfg.base) : ''}`;
 export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: no policy is committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}), so strict defaults apply (protected: ${cfg.protectedBranches.join(', ')}, merges denied, no gate).${ADOPT(cfg.base)}`;

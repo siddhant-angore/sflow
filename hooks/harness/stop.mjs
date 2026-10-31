@@ -12,7 +12,7 @@ const ev = readEvent();
 if (ev.stop_hook_active) process.exit(0);
 let cfg;
 try { cfg = config(ev.cwd); } catch { process.exit(0); }
-if (!cfg.root || !cfg.present) process.exit(0);
+if (!cfg.root || !cfg.present) process.exit(0); // no repo to inspect (the pre-bash guard fails closed there); Stop only lists done-items, so it must not trap non-repo sessions
 try {
   const head = git(cfg.root, 'rev-parse', 'HEAD');
   const dirty = git(cfg.root, 'status', '--porcelain', '--untracked-files=no');
