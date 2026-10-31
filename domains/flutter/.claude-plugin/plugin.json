@@ -1,6 +1,6 @@
 {
   "name": "sflow-flutter",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "sflow domain pack for Flutter and Dart: the Flutter team's skills, Very Good Ventures' skills, agents and hooks, the Dart MCP server, and per-playbook overlays that say which skill to read at which step.",
   "author": {
     "name": "Siddhant Angore"
