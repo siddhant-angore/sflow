@@ -10,6 +10,10 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Fixed
+
+- `npm run check` left scratch behind in the temp dir on every run: the `harness-test-*` and `harness-solo-*` repos with their `.origin.git` bare origins, three `harness-main-*` baseline dirs, `plain-*`, and the sibling `wt-*` linked worktree from `scripts/test-hooks.mjs`, about 9 entries and 2.2 MB per run. The tests now make these through `scripts/scratch.mjs`, which removes them on every exit path (normal end, a failed assertion, an uncaught error, `process.exit`, SIGINT/SIGTERM). A failing run prints the scratch paths first and then removes them, so failures no longer leak either; set `SFLOW_KEEP_TMP=1` to keep them for debugging (they are listed as kept). `scripts/check.mjs` runs every step with `TMPDIR` set to one per-run directory and fails the run, listing the entries, if any step leaves something in it (a kept dir counts too). A per-run parent is used rather than a before/after snapshot of the shared temp dir, so entries other runs or tools create there at the same time cannot trip it and no prefix list has to be kept in sync. (SID-55)
+
 ## [0.5.0] - 2026-10-31
 
 Harness security hardening. The policy fails closed and is read only from the base branch on origin (SID-65, #13); the Bash guard normalises git invocations, wrappers, redirections and quoting, and resolves `HEAD`/`@` in pushes (SID-79, SID-80, #16); and the policy files can no longer be written from the shell (SID-66, #15). Breaking for 0.4.0 users of the harness: with no `.harness.json` committed on the base branch on origin, strict defaults apply (`main`, `master` and the remote default branch protected, merges denied, no gate), and an uncommitted or branch-only policy is ignored (see the Migration note under Fixed).
