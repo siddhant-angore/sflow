@@ -58,7 +58,21 @@ jobs:
           NUMBER: ${{ steps.issue.outputs.number }}
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          gh issue close "$NUMBER" --repo "$GITHUB_REPOSITORY" --comment "All vendored sources are current as of $run_url; closing."
+          # Held sources are deferred, not current; name them so the deferral stays visible. A failed re-read says so rather than hiding them.
+          if node scripts/upstream.mjs --json > report.json && held=$(jq -r '.sources[] | select(.hold != null) | "- \(.source): \(.hold)"' report.json); then
+            :
+          else
+            held="- (could not read the held list; see the run log: $run_url)"
+          fi
+          {
+            echo "All vendored sources are current as of $run_url; closing."
+            if [ -n "$held" ]; then
+              echo
+              echo 'Held (deferred, not current):'
+              printf '%s\n' "$held"
+            fi
+          } | head -c 60000 > comment.md
+          gh issue close "$NUMBER" --repo "$GITHUB_REPOSITORY" --comment "$(cat comment.md)"
 
       - name: Open, update, or comment on the drift issue
         if: steps.upstream.outputs.code != '0'

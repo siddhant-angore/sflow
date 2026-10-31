@@ -176,6 +176,20 @@ test('held: a behind source with a hold reports held, exit 0, and the text shows
   assert.match(text, /0 current, 0 behind, 1 held, 0 error  \(exit 0\)/);
 });
 
+test('json contract: the workflow lists held sources from source + hold, including a held source that is current', () => {
+  const all = [{ source: 'b', from: 'skills/*', to: 'skills' }, { source: 'c', from: 'skills/*', to: 'skills' }, { source: 'n', from: 'skills/*', to: 'skills' }];
+  const m = manifestFor({ b: { ...src('https://github.com/o/b', A), hold: 'SID-43' }, c: { ...src('https://github.com/o/c', A), hold: 'pinned for legal' }, n: src('https://github.com/o/n', A) }, all);
+  const current = fakeRepo({ commits: [{ sha: A, changes: { 'skills/a/SKILL.md': 'A' } }] });
+  const { report } = run(m, { 'https://github.com/o/b': behindRepo(), 'https://github.com/o/c': current, 'https://github.com/o/n': current });
+  const held = report.sources.filter((s) => s.hold != null).map((s) => `- ${s.source}: ${s.hold}`);
+  assert.deepEqual(held, ['- b: SID-43', '- c: pinned for legal']);
+  assert.equal(report.exitCode, 0);
+  const filter = '.sources[] | select(.hold != null) | "- \\(.source): \\(.hold)"';
+  const jq = spawnSync('jq', ['-r', filter], { input: JSON.stringify(report), encoding: 'utf8' });
+  if (jq.error) console.log('  (jq not installed; skipped the jq filter check)');
+  else assert.deepEqual(jq.stdout.trim().split('\n'), held);
+});
+
 test('held plus another behind source is exit 10', () => {
   const m = manifestFor({ h: { ...src('https://github.com/o/h', A), hold: 'SID-43' }, s: src('https://github.com/o/s', A) },
     [{ source: 'h', from: 'skills/*', to: 'skills' }, { source: 's', from: 'skills/*', to: 'skills2' }]);
