@@ -34,7 +34,8 @@ const sourceLine = ([name, s]) => `- ${name} (${s.license}), ${s.repo}@${s.sha.s
 
 // A pack is a marketplace plugin installed from its own subdirectory (Claude Code copies only that dir), so it must carry its own licenses. Nothing is hard-coded: any such plugin with vendored entries under it counts.
 function packs() {
-  const plugins = JSON.parse(readFileSync(join(root, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins;
+  const mp = join(root, '.claude-plugin', 'marketplace.json');
+  const plugins = existsSync(mp) ? JSON.parse(readFileSync(mp, 'utf8')).plugins ?? [] : [];
   return plugins.filter((p) => typeof p.source === 'string' && p.source !== './').map((p) => {
     const dir = p.source.replace(/^\.\//, '').replace(/\/$/, '');
     const under = manifest.entries.filter((e) => e.to === dir || e.to.startsWith(dir + '/'));
