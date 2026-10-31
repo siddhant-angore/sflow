@@ -1,10 +1,11 @@
 // PreToolUse(Bash): guard first (irreversible git and release actions), then the push gate from .harness.json.
 // Any internal error denies: the hook fails closed.
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, NO_REPLACE_ENV, PLACEHOLDER, policyNote, readEvent, record, segments } from './lib.mjs';
-import { envReason, reason, retargets } from './guard-rules.mjs';
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { config, currentBranch, deny, git, gitDir, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, segments } from './lib.mjs';
+import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
 if (ev.tool_name !== 'Bash') process.exit(0);
@@ -15,6 +16,36 @@ try {
   const branch = cfg.root && !retargets(cmd) ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
   const env = envReason(cmd);
   if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
+  // SID-66: no shell write to a policy file. Runs on the whole command (segments() splits inside quotes), whether or not a policy is committed.
+  const w = analyzeWrites(cmd);
+  const line = cmd.split('\n')[0].slice(0, 200);
+  if (w.hit) { deny(`harness guard: ${policyDeny(w.hit)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  // Defence in depth: a write through an existing symlink whose real path is a policy file.
+  for (const t of w.through) {
+    if (t.includes('$')) continue;
+    let real = null;
+    try { real = realpathSync(resolve(ev.cwd ?? cfg.root ?? process.cwd(), t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
+    if (real && isPolicyPath(real)) { deny(`harness guard: ${t} is a symlink to ${policyDeny(real)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  }
+  // A policy-named source copied into a directory lands as <dir>/<name>. Copying FROM a policy file is a read: deny only when that landing is the repo-root .harness.json or a .claude/settings*.json. Dir = trailing slash, ., .., -t, or an existing directory; resolved against the event cwd (and any `cd` earlier in the command).
+  const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
+  const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+  // No root (git can't read the repo, or there is none): the cwd stands in for the root, so copies onto ./.harness.json are refused and copies out (cp .harness.json /tmp/) stay allowed.
+  // No work tree (cwd inside .git, or core.bare): cfg.root is the git dir, so the work tree is its parent when it is named .git, else the cwd.
+  const rootDir = cfg.noWorkTree ? (basename(cfg.root) === '.git' ? dirname(cfg.root) : resolve(ev.cwd ?? process.cwd())) : cfg.root ?? resolve(ev.cwd ?? process.cwd());
+  const rootPolicy = [rootDir, real(rootDir)].map((r) => resolve(r, '.harness.json').toLowerCase());
+  const landsOnPolicy = (p) => rootPolicy.includes(p.toLowerCase()) || (isPolicyPath(p) && !/\.harness\.json$/i.test(p));
+  for (const { dest, names, dir, cds } of w.into) {
+    if (dest.includes('$') || cds.some((c) => c.includes('$'))) continue;
+    const start = resolve(ev.cwd ?? cfg.root ?? process.cwd());
+    for (const from of cds.length ? [start, resolve(start, ...cds.map(tilde))] : [start]) {
+      const abs = resolve(from, tilde(dest));
+      let isDir = dir;
+      if (!isDir) { try { isDir = statSync(abs).isDirectory(); } catch {} }
+      const n = isDir ? names.find((x) => landsOnPolicy(join(abs, x)) || landsOnPolicy(join(real(abs), x))) : null;
+      if (n) { const joined = join(dest, n); deny(`harness guard: ${policyDeny(joined)}\n  ("${dest}" is an existing directory, so this writes ${joined})\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+    }
+  }
   const segs = segments(cmd);
   for (const seg of segs) {
     const why = reason(seg, cfg, branch);

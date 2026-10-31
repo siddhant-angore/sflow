@@ -80,6 +80,34 @@ const policyLine = (cfg) => cfg.unreadable
   : `policy: none committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}); strict defaults, protected: ${cfg.protectedBranches.join(', ')}, merges denied.${cfg.ignoredLocal ? ADOPT(cfg.base) : ''}`;
 export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: no policy is committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}), so strict defaults apply (protected: ${cfg.protectedBranches.join(', ')}, merges denied, no gate).${ADOPT(cfg.base)}`;
 
+// The policy files no agent may write: the harness policy and Claude Code's own permissions. Matched by "path ends with", case-insensitively (macOS).
+export const POLICY_FILES = ['.harness.json', '.claude/settings.json', '.claude/settings.local.json'];
+const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/(\.\/)+/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
+export const isPolicyPath = (p) => { const n = norm(p); return POLICY_FILES.some((f) => n === f || n.endsWith('/' + f)); };
+// A glob token (* ? [ ]) that could expand to a policy path, e.g. .harness*, .claude/*, .claude/settings*.json. A * or ? at the start of a segment does not match a leading dot, as in the shell.
+const globRe = (g) => {
+  let re = '', start = true;
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i], dot = start ? '(?!\\.)' : '';
+    if (c === '*') re += dot + '[^/]*';
+    else if (c === '?') re += dot + '[^/]';
+    else if (c === '[' && g.indexOf(']', i + 2) > 0) { const j = g.indexOf(']', i + 2); re += '[' + g.slice(i + 1, j).replace(/^!/, '^').replace(/\\/g, '\\\\') + ']'; i = j; }
+    else re += c.replace(/[.+^${}()|\\\]\[]/g, '\\$&');
+    start = c === '/';
+  }
+  return new RegExp('^' + re + '$');
+};
+export const policyGlobHit = (p) => {
+  const n = norm(p);
+  if (!/[*?[]/.test(n)) return false;
+  const segs = n.split('/');
+  return segs.some((_, i) => { try { const re = globRe(segs.slice(i).join('/')); return POLICY_FILES.some((f) => re.test(f)); } catch { return false; } });
+};
+const policyText = (p) => /\.claude\/[^/]*$|settings[^/]*$/i.test(String(p))
+  ? ' holds Claude Code permissions; agents do not write it from the shell or the file tools. Leave it unchanged and ask the human to make the change (say which setting and why). Reading it is fine.'
+  : ` is the harness policy; agents do not write it from the shell or the file tools. Leave it unchanged. To propose a policy, put the JSON in your PR description (start from ${join(pluginRoot, 'templates', 'harness.json')}); a human commits it on a branch, merges it into the base branch on origin, then runs git fetch origin. Reading it (cat, jq, git show) is fine.`;
+export const policyDeny = (p) => p + policyText(p);
+
 export const gitDir = (root) => git(root, 'rev-parse', '--absolute-git-dir');
 export const currentBranch = (root) => { try { return git(root, 'symbolic-ref', '--short', 'HEAD'); } catch { return null; } };
 
@@ -105,6 +133,7 @@ function unwrap(name, rest) {
   }
   return name === 'timeout' ? take(rest)[1] : rest;
 }
+export { WRAPPERS, take, unwrap };
 
 // Drop git's global options (everything starting with - before the subcommand, plus the argument of those that take one).
 function gitSub(rest) {
@@ -296,7 +325,7 @@ const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|info|modules\/.+))?\/*$/, GIT
 const GIT_WRAP = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'time', 'timeout', 'stdbuf', 'ionice', 'xargs']), GIT_KW = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const NO_FILE = /^\/dev\/(?:null|stdout|stderr|tty)$/;
 // Output files named by sort (-o FILE, -oFILE, clusters like -uo FILE, --output and its unique abbreviations) and uniq (second operand). Both write the file, so they count as file writes.
-function sortOut(args) {
+export function sortOut(args) {
   const out = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -313,7 +342,7 @@ function sortOut(args) {
   }
   return out;
 }
-function uniqOut(args) {
+export function uniqOut(args) {
   const ops = []; let rest = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
