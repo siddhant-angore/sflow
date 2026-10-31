@@ -63,7 +63,7 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - Stop: unmet definition-of-done items block the turn once per repo state; after three non-converging attempts the hook demands an auditable failure report and then lets the turn end. Hooks fail closed.
 - Run record: `<git dir>/harness/runs.jsonl` holds every gate result and Stop decision; the Retro playbook turns repeats into structure.
 
-`node scripts/eval-brake.mjs` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success.
+`npm run eval:brake [-- --runs N --model haiku]` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success. It needs an authenticated `claude` CLI and costs about $0.01 per run on haiku. Exit 0 means the brake held, 1 means the brake failed, 2 means a harness/CLI error (rerun); a transient CLI error (rate limit, overload, connection error, refused or reset socket, a network timeout the CLI reports) is retried once automatically, but the 600 s kill is permanent and never retried. `--runs` is capped at 5 (a message says so); a missing or non-positive-integer `--runs` value is a usage error (exit 2). Scratch repos in the temp dir are removed after a passing run and kept, with their paths printed, after a failure (`SFLOW_EVAL_KEEP_SCRATCH=1` keeps them always; `SFLOW_EVAL_RETRY_DELAY_MS` shortens the retry wait). The offline tests are `npm run test:eval-brake`.
 
 ## Maintain
 
@@ -71,5 +71,6 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - `npm run check` re-hashes every vendored and built file, validates the plugin, and prints the description-collision report.
 - To change what sflow adds to a playbook, edit `workflows/<playbook>.md` and run `npm run sync`. Never edit a file under `skills/`, `agents/`, `references/`, `hooks/` (`workflows/hooks/` builds all of it), or `docs/harness/` by hand.
 - To upgrade a source, change its `sha` in `vendor.manifest.json` and run `npm run sync`, then `npm run check`. The three `cursor/plugins/*` sources share one repo and sha but have separate keys, because that repo has no top-level license: each key's `licensePath` points at the plugin's own `LICENSE`. Bump all three together. Do not move past `9f844cd` before SID-43 ports the Orchestrate rewrite.
+- CI (`.github/workflows/ci.yml`) runs on every PR and on push to `main`: it fails on any tracked symlink, then runs `npm run check` (vendor hashes, plugin validate, hooks, routing), plus a separate vendor drift job (`node scripts/vendor.mjs sync` must leave the tree clean). It uses no secrets. `npm run eval:brake` makes a paid live Claude call, so it is manual and never runs in CI.
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`.
