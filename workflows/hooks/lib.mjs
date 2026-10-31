@@ -18,7 +18,9 @@ export function repoRoot(cwd = process.cwd()) {
   try { return git(cwd, 'rev-parse', '--show-toplevel'); } catch { return null; }
 }
 
-export const remoteDefault = (root) => { try { return git(root, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').replace(/^origin\//, '') || null; } catch { return null; } };
+// Full ref names throughout: `origin/<b>` would resolve refs/tags/origin/<b> or refs/heads/origin/<b> first, and an agent can create both.
+const REMOTE = 'refs/remotes/origin/';
+export const remoteDefault = (root) => { try { const r = git(root, 'symbolic-ref', `${REMOTE}HEAD`); return r.startsWith(REMOTE) ? r.slice(REMOTE.length) || null : null; } catch { return null; } };
 export const baseCandidates = (root) => [...new Set([remoteDefault(root), 'main', 'master'].filter(Boolean))];
 
 // The policy is the .harness.json committed on origin's base branch: origin/HEAD's branch, then main, then master.
@@ -30,7 +32,7 @@ export function config(cwd = process.cwd()) {
   const candidates = baseCandidates(root);
   let text = null, source = null, base = null;
   for (const b of candidates) {
-    try { text = git(root, 'show', `origin/${b}:.harness.json`); source = `origin/${b}`; base = b; break; } catch {}
+    try { text = git(root, 'show', `${REMOTE}${b}:.harness.json`); source = `origin/${b}`; base = b; break; } catch {}
   }
   if (text === null) {
     const head = remoteDefault(root);

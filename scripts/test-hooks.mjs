@@ -281,6 +281,54 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     assert.doesNotMatch(ctxOf(g), /\.harness\.json is ignored/, 'j: committed policy, nothing ignored');
     assert.doesNotMatch(ctxOf(tmpdir()), /\.harness\.json is ignored/, 'j: non-repo cwd unchanged');
     assert.equal(JSON.parse(execFileSync('node', [join(hooks, 'session-start.mjs')], { input: 'not json', cwd: tmpdir() }).toString()).hookSpecificOutput.hookEventName, 'SessionStart', 'j: garbage input still valid');
+
+    // k. ref shadowing: `origin/main` resolves refs/tags/origin/main and refs/heads/origin/main before refs/remotes/origin/main,
+    // and an agent may create both. The policy lookup, remoteDefault, the gate base and the Stop count use full refs/remotes/ names.
+    const permissive = { allowMerge: true, protectedBranches: [] };
+    const evilCommit = (d, branch) => sh(d, `git checkout -q -b ${branch} && printf '%s' '${JSON.stringify(permissive)}' > .harness.json && git add .harness.json && git commit -qm evil && git rev-parse HEAD && git checkout -q feat/x`); // branch kept; returns the sha
+    const strict = { protectedBranches: ['main'], allowMerge: false };
+    const strictRepo = (name) => { const d = mk(name); policyOn(d, 'main', strict); return d; };
+    const holdsStrict = (d, tag) => {
+      const ck = config(d);
+      assert.deepEqual([ck.present, ck.source, ck.allowMerge, ck.protectedBranches.includes('main')], [true, 'origin/main', false, true], `${tag}: real origin/main policy wins`);
+      assert.ok(verdict(d, 'gh pr merge 1').deny, `${tag}: merge denied`);
+      assert.ok(verdict(d, 'git push origin HEAD:main').deny, `${tag}: push to main denied`);
+      assert.match(verdict(d, 'gh pr merge 1').why, /policy: \.harness\.json on origin\/main/, `${tag}: policyNote names origin/main`);
+    };
+    const k1 = strictRepo('k1');
+    sh(k1, `git tag origin/main ${evilCommit(k1, 'evil')}`);
+    holdsStrict(k1, 'k1 (tag)');
+    const k2 = strictRepo('k2');
+    sh(k2, `git branch origin/main ${evilCommit(k2, 'evil')}`);
+    holdsStrict(k2, 'k2 (branch)');
+
+    const k3 = mk('k3'); // no policy on origin: a shadow must not conjure one
+    const e3 = evilCommit(k3, 'evil');
+    for (const [kind, cmd] of [['tag', `git tag origin/main ${e3}`], ['branch', `git branch origin/main ${e3}`]]) {
+      sh(k3, cmd);
+      const c3 = config(k3);
+      assert.deepEqual([c3.present, c3.allowMerge], [false, false], `k3 (${kind}): shadow policy not read`);
+      assert.ok(verdict(k3, 'gh pr merge 1').deny, `k3 (${kind}): merge denied`);
+      sh(k3, kind === 'tag' ? 'git tag -d origin/main' : 'git branch -q -D origin/main');
+    }
+
+    const { remoteDefault, baseCandidates } = await import(join(hooks, 'lib.mjs'));
+    const k4 = strictRepo('k4'); // origin/HEAD pointing at a non-remote ref is ignored, as if unset
+    evilCommit(k4, 'evil');
+    sh(k4, 'git symbolic-ref refs/remotes/origin/HEAD refs/heads/evil');
+    assert.equal(remoteDefault(k4), null, 'k4: non-remote symref ignored');
+    assert.deepEqual(baseCandidates(k4), ['main', 'master'], 'k4: falls back to main/master');
+    holdsStrict(k4, 'k4');
+    sh(k4, 'git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main');
+    assert.equal(remoteDefault(k4), 'main', 'k4: a real remote symref still resolves');
+
+    const k5 = mk('k5'); // gate {base} is the merge-base with the real origin/main, not a shadowing tag at HEAD
+    policyOn(k5, 'main', { gate: ['printf %s {base} > base.txt'] });
+    sh(k5, 'git commit -q --allow-empty -m work && git tag origin/main HEAD');
+    const realBase = sh(k5, 'git merge-base HEAD refs/remotes/origin/main'); // != HEAD, which a tag-resolved merge-base would give
+    assert.ok(!verdict(k5, 'git push origin feat/x').deny, 'k5: gate passes');
+    assert.equal(readFileSync(join(k5, 'base.txt'), 'utf8'), realBase, 'k5: {base} comes from refs/remotes/origin/main, not the tag');
+    // k5 (stop.mjs ahead count) not covered here: it needs a Stop-hook fixture; the change is the same one-token ref name.
   } finally {
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }

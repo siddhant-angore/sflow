@@ -17,7 +17,7 @@ try {
   const head = git(cfg.root, 'rev-parse', 'HEAD');
   const dirty = git(cfg.root, 'status', '--porcelain', '--untracked-files=no');
   let ahead = 0;
-  try { ahead = Number(git(cfg.root, 'rev-list', '--count', `origin/${cfg.base}..HEAD`)); } catch {}
+  try { ahead = Number(git(cfg.root, 'rev-list', '--count', `refs/remotes/origin/${cfg.base}..HEAD`)); } catch {}
   if (ahead === 0) process.exit(0);
   const unmet = [];
   if (dirty) unmet.push('tracked changes are uncommitted; commit them in small, ordered units or say why they stay uncommitted');
