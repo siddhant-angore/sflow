@@ -8,7 +8,7 @@ The Flutter and Dart domain pack for sflow. Install beside `sflow`:
 
 Requires Dart 3.9+ (`dart mcp-server`), the Very Good CLI 1.4+ (`dart pub global activate very_good_cli`), and `jq` for the hooks.
 
-What it adds, all vendored by commit (authors and licenses in the root `NOTICE.md` and `LICENSES/`):
+What it adds, all vendored by commit (authors and licenses in this pack's `NOTICE.md` and `LICENSES/`; sflow's own files are under `LICENSE`):
 
 - **Skills.** The Flutter Authors' 25 (`flutter/agent-plugins`, BSD-3-Clause), Very Good Ventures' 15 (`vgv-ai-flutter-plugin`, MIT) and 11 (`vgv-wingspan`, MIT), plus the `flutter` entry skill with the house standard.
 - **MCP.** The Dart MCP server with the `cli` and `flutter_app_lifecycle` categories enabled (the official plugin leaves `run_tests`, `dart_fix`, `dart_format`, and `launch_app` off), and the Very Good CLI MCP (`create`, `test`, `packages_get`, `packages_check_licenses`).
