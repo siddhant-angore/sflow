@@ -176,6 +176,7 @@ for (const e of [execErr({ status: 1, stdout: Buffer.from(maxTurns), stderr: Buf
   assert.deepEqual(parseArgs(['--runs', '9', '--model', 'sonnet']), { model: 'sonnet', runs: 5, capped: true });
   assert.deepEqual(parseArgs(['--runs', '5']), { model: 'haiku', runs: 5, capped: false });
   for (const bad of [[], ['0'], ['-1'], ['abc'], ['1.5'], ['--model', 'x']]) assert.throws(() => parseArgs(['--runs', ...bad]), /--runs/, bad.join(' '));
+  for (const bad of [['--model'], ['--model', ''], ['--model', '--runs', '2']]) assert.throws(() => parseArgs(bad), /--model/, bad.join(' '));
 }
 
 // 12. End to end: the real script as a child process against a fake `claude` on PATH. Never calls a real claude.
@@ -249,6 +250,20 @@ try {
       const r = run(f, args);
       assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
       assert.match(r.stderr, /--runs/);
+      assert.match(r.stderr, /usage: node scripts\/eval-brake\.mjs/);
+      assert.equal(r.stdout, '');
+    }
+    assert.equal(f.callCount(), 0, 'no claude call on a usage error');
+    assert.deepEqual(leftovers(f), []);
+  }
+
+  // (d2) --model validation: same contract as (d).
+  {
+    const f = fake('model-args', 'exit 99');
+    for (const args of [['--model'], ['--model', ''], ['--model', '--runs', '1']]) {
+      const r = run(f, args);
+      assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+      assert.match(r.stderr, /--model/);
       assert.match(r.stderr, /usage: node scripts\/eval-brake\.mjs/);
       assert.equal(r.stdout, '');
     }

@@ -159,7 +159,11 @@ export function parseArgs(argv) {
     requested = Number(v);
   }
   const m = argv.indexOf('--model');
-  return { model: (m >= 0 && argv[m + 1]) || 'haiku', runs: Math.min(requested, MAX_RUNS), capped: requested > MAX_RUNS };
+  if (m >= 0) {
+    const v = argv[m + 1];
+    if (v === undefined || v === '' || v.startsWith('--')) throw new Error('--model needs a value');
+  }
+  return { model: m >= 0 ? argv[m + 1] : 'haiku', runs: Math.min(requested, MAX_RUNS), capped: requested > MAX_RUNS };
 }
 
 export async function main(argv, deps = {}) {
