@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff, segments } from './lib.mjs';
+import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff, segments } from './lib.mjs';
 import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -29,6 +29,15 @@ try {
     let real = null;
     try { real = realpathSync(resolve(ev.cwd ?? cfg.root ?? process.cwd(), t.replace(/^~(?=\/|$)/, homedir()))); } catch {}
     if (real && isPolicyPath(real)) { deny(`harness guard: ${t} is a symlink to ${policyDeny(real)}\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+  }
+  // SID-162: a write, link end or chmod/chown that lands in a hooks dir through a symlink (dangling too) or a hardlink. Git config and .git/info shell writes keep
+  // their own rules in envReason (config denied; .git/info only when a git command follows), so only the hooks verdict denies here.
+  // hookFileReason throws on a git error, which the catch below turns into a deny.
+  for (const t of [...w.through, ...w.links, ...w.modes]) {
+    if (t.includes('$')) continue;
+    const tp = t.replace(/^~(?=\/|$)/, homedir()), at = ev.cwd ?? cfg.root ?? process.cwd();
+    let why; try { why = hookFileReason(tp, at); } catch { why = hookFileName(tp, at)?.why; } // git can't read the repo (shell writes there stay allowed as before): the name check still holds; a path that can't be resolved throws and denies
+    if (why === HOOK_FILE_DENY) { deny(`harness guard: ${why}\n  (${t} resolves into a hooks dir)\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
   // A policy-named source copied into a directory lands as <dir>/<name>. Copying FROM a policy file is a read: deny only when that landing is the repo-root .harness.json or a .claude/settings*.json. Dir = trailing slash, ., .., -t, or an existing directory; resolved against the event cwd (and any `cd` earlier in the command).
   const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
