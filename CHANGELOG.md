@@ -38,11 +38,11 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - The fix is a second `target:` overlay, `workflows/flutter-reviewer-hook-quoting.md`, and NOTICE lists the change.
   - `scripts/test-plugin-root-space.mjs` now also runs every `hooks:` command in the frontmatter of both plugins' agents (`agents/*.md`) and skills (`skills/*/SKILL.md`). A self-check confirms it catches the old unquoted form.
   - This is the only frontmatter hook in either plugin. (SID-49)
-- Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 917 to 916 files. (SID-49)
+- Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 923 to 922 files. (SID-49)
 
 **Upstream pins**
 
-`addyosmani/agent-skills` is bumped to upstream 0.6.15 and `mattpocock/skills` to `4ae2317ddb22`; the other six pins are unchanged. The lock goes from 916 files at `v0.5.0` to 923.
+`addyosmani/agent-skills` is bumped to upstream 0.6.15 and `mattpocock/skills` to `4ae2317ddb22`; the other six pins are unchanged. The lock goes from 916 files at `v0.5.0` to 922.
 
 | Source | Author | License | Pin |
 |---|---|---|---|
