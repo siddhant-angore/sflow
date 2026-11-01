@@ -3,7 +3,7 @@
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config, ignoredNote, readEvent } from './lib.mjs';
+import { brokenNote, config, ignoredNote, readEvent } from './lib.mjs';
 
 const ev = readEvent();
 const hasDotGit = (dir) => { for (let d = resolve(dir); ; d = dirname(d)) { if (existsSync(join(d, '.git'))) return true; if (dirname(d) === d) return false; } };
@@ -27,6 +27,7 @@ try {
   try { // own try: the notes are optional
     const cwd = ev.cwd ?? process.cwd();
     const cfg = config(cwd);
+    if (cfg.broken) lines.push('', `${brokenNote(cfg)}. Every shell command is denied meanwhile (fail-closed); ask a human to fix it (PR, merge) and run git fetch origin in this checkout.`);
     if (cfg.ignoredLocal) lines.push('', ignoredNote(cfg));
     if (cfg.unreadable && hasDotGit(cwd)) lines.push('', 'git can not read this repository, so the guard is running with strict defaults (merges denied, main and master protected). Check its config: core.bare, core.repositoryformatversion, core.worktree, include.path.');
   } catch {}
