@@ -23,6 +23,12 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - The README's "Model budget" section explains the tiers and how to escalate one task.
   - `install --force` backs up a sheet that differs to `pstack-models.md.bak-<UTC timestamp>` (not `.md`, so Claude Code does not load it as a second sheet) and prints the path. A symlink at the sheet path is refused.
   - No guard, permission or settings change.
+- Plugin refresh (SID-144). `npm run refresh-install -- refresh|check [--config <dir>]... [--expect <sha>] [--remote <url>]` reinstalls the sflow plugins from merged main after every merge, and checks that every config's `installed_plugins.json` shows main's head commit.
+  - `refresh` refuses a marketplace that could install a branch (a `ref`, or a non-GitHub source). It runs `claude plugin marketplace update sflow` and stops unless the clone is at main. It reinstalls each installed `*@sflow` plugin (`uninstall --keep-data`, then `install`, since `update` is a no-op at the same version), then runs `check`.
+  - `check` exits 1 on any config whose sflow plugins aren't installed from main, or whose cache dir is missing.
+  - README "Maintain" documents it, links it from the release step, and explains how to verify the installed version by hand.
+  - `npm run test:refresh-install` runs offline in `npm run check`. All 20 mutations of the script are killed.
+  - It writes no files itself. No guard, permission or settings change.
 - Usage-limit handling (SID-149). `skills/sflow/usage-handoff.md` (authored in `workflows/sflow/`) covers it:
   - Before large work (a swarm, a multi-file feature, a golden regen), check the remaining Claude Code and Grok Bot usage.
   - Below about 15%, stop at a safe point per Pause safely, put the handoff note on the issue (template included: branch, full head, done and verified, next steps, how to resume), and report the reset time in IST.
