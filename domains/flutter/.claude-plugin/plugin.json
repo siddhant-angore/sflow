@@ -30,5 +30,6 @@
     "./agents/test-quality-review-agent.md",
     "./agents/user-flow-analysis-agent.md",
     "./agents/vgv-review-agent.md"
-  ]
+  ],
+  "icon": "./assets/sflow-mark.png"
 }

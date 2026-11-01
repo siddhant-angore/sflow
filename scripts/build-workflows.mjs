@@ -53,6 +53,7 @@ for (const name of readdirSync(join(root, 'workflows')).filter((f) => f.endsWith
     else if (verb === 'Before') out = out.slice(0, lineStart) + `${indent}- **sflow (before):** ${change}\n` + out.slice(lineStart);
     else out = out.slice(0, lineEnd + 1) + sub + out.slice(lineEnd + 1);
   }
+  if (file.endsWith('.json')) { try { JSON.parse(out); } catch (e) { problems.push(`${path}: ${target} is not valid JSON after the overlay: ${e.message}`); continue; } }
   writeFileSync(file, out);
 }
 
