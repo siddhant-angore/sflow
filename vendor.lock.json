@@ -28,7 +28,7 @@
     },
     "mattpocock/skills": {
       "repo": "https://github.com/mattpocock/skills",
-      "sha": "a496f5513d4a4cf889bc48e189e579f4b0bdf6aa",
+      "sha": "4ae2317ddb22b046e26455e4f9c9b3aaaf62212d",
       "license": "MIT"
     },
     "addyosmani/agent-skills": {
@@ -62,7 +62,7 @@
     "skills/blast-radius/SKILL.md": "2e10745b97f5862323dcda3b29ca60d56b5c3c98e37020085d26b48efbe0a436",
     "skills/bro/SKILL.md": "aa329d0ceeeecb6822a7174ad76bb07a7826a3c52ceb6a588dec4138815084bb",
     "skills/browser-testing-with-devtools/SKILL.md": "e28dd45416e6df93f0db6fffeb3aa2477a0e48a22f8e05fd5bb1892484115bb6",
-    "skills/chief-of-staff/SKILL.md": "d13f3a542a4664f27bf14977811ee9dcd83fae03655b20720b3441850a2008a4",
+    "skills/chief-of-staff/SKILL.md": "f4c1d6533edece6b275155911cb627154a6b13e2bc19934f77330f3afdd07987",
     "skills/chief-of-staff/agents/openai.yaml": "c0f68ed9da6977adc97a791be3bb0830d301b2d27f9c635d92d6f325bffefb83",
     "skills/ci-cd-and-automation/SKILL.md": "5e0e55c059670a7838dc9d58dc20a3a645c0d43c974416490112af7de522df95",
     "skills/claude-handoff/SKILL.md": "79357a18425d66d4c24048bedf83dceb79d3bba356f38014950f764a7fab4026",
@@ -264,6 +264,12 @@
     "skills/show-me-your-work/SKILL.md": "4936325425064cbbbd1e82a7813cef5593ed8a273671d43ac5b1360de93f880a",
     "skills/show-me-your-work/references/decision-log-template.tsv": "6779378006a2f5225e8c06deb84f1d913fb532041ebbb6e50d94600bfe3f4b76",
     "skills/show-me-your-work/scripts/log.sh": "a65a4bc5fb7cdeadbdb7b7ff1ca4682f4d9c42420942b2977cd17b46c4ac338e",
+    "skills/software-factory/EXAMPLE-TASKS.md": "34bfb01ced8fbbff8185d347df423533d157c29e8d58bf044f8450602f162875",
+    "skills/software-factory/GIT-HOSTS.md": "f6b453cd0b1601c329dcfbffcb4added077683a4b777c819530ff0a940b1147f",
+    "skills/software-factory/OBSERVABILITY-PLATFORMS.md": "c3bd68e1bd105ccdda407a7aa909807131a20117bbf510d1ad0cfefffa25cb4c",
+    "skills/software-factory/RUNNERS.md": "85aacfb9acac67948c1659562d60b52c2a13936faddd24de26c9094b35ff70e7",
+    "skills/software-factory/SKILL.md": "645ab761b6cca61a480072b1b510eb05fe0fe5cde2ce0495b6fc234311692253",
+    "skills/software-factory/TICKET-TRACKERS.md": "4b68a198d6c1a6d47f9ad7eb1f02cc3e60778a2b1610f8b2ac23f72230d575b2",
     "skills/source-driven-development/SKILL.md": "df38a852658679a67c7a9e4840160570c95094a13a63307e834045ddbf8aa287",
     "skills/spec-driven-development/SKILL.md": "b9d05b4259c14550bbffbaafd8201492129926d37ede716db352c6e4f91b404d",
     "skills/statechart/SKILL.md": "010b7b4532406739b1c3a426d1a45f02bb618a42561fc96b3976e064a7f8384d",

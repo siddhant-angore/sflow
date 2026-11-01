@@ -62,9 +62,43 @@ sflow ships the hooks that a review found every harness assumes and most lack. T
 - Adopting a policy (the sanctioned bootstrap): the agent may draft the JSON, starting from `templates/harness.json`, in its PR description. A human commits `.harness.json` on a branch, opens and merges the PR, then runs `git fetch origin`. If the repo was not cloned (no `origin/HEAD`), run `git remote set-head origin --auto` once.
 - Gate: `git push` and `gh pr create` run the `gate` commands first (`{base}` is the merge base), skip when HEAD already passed, and scan the pushed range for secret-shaped text.
 - Stop: unmet definition-of-done items block the turn once per repo state; after three non-converging attempts the hook demands an auditable failure report and then lets the turn end. Hooks fail closed.
+- Unusable policy (SID-82, SID-83): if `.harness.json` exists on origin's base branch but can't be used (not valid JSON, not an object, over 1 MB, or unreadable), it is not skipped for the next candidate branch. Every shell command is denied (fail-closed) with the reason and the fix: a human corrects it on that branch and runs `git fetch origin`. SessionStart shows the same note.
 - Run record: `<git dir>/harness/runs.jsonl` holds every gate result and Stop decision; the Retro playbook turns repeats into structure.
 
 `npm run eval:brake [-- --runs N --model haiku]` is the behavioral eval: a live model in a scratch repo with a failing gate must neither push nor claim success. It needs an authenticated `claude` CLI and costs about $0.01 per run on haiku. Exit 0 means the brake held, 1 means the brake failed, 2 means a harness/CLI error (rerun); a transient CLI error (rate limit, overload, connection error, refused or reset socket, a network timeout the CLI reports) is retried once automatically, but the 600 s kill is permanent and never retried. `--runs` is capped at 5 (a message says so); a missing or non-positive-integer `--runs` value is a usage error (exit 2). Scratch repos in the temp dir are removed after a passing run and kept, with their paths printed, after a failure (`SFLOW_EVAL_KEEP_SCRATCH=1` keeps them always; `SFLOW_EVAL_RETRY_DELAY_MS` shortens the retry wait). The offline tests are `npm run test:eval-brake`.
+
+## Model budget
+
+sflow ships a default pstack model budget in `templates/pstack-models.md`, so a swarm does not fall back to opus at `xhigh` for every role. The tiers:
+
+- **sonnet** for workers and reviewers: feature, bug-fix, perf and hillclimb delegates, swarm workers, arena runners, interrogate reviewers, `how` explorers and explainers, `why` investigators, and the reflect tooling reviewer.
+- **haiku** for mechanical work: renames, formatting, changelog and vendor bookkeeping, and golden regen runs.
+- **opus**, only for architecture and final verdicts: architect runners (one opus and one sonnet seat), judgment and prose, hardest tasks, the `why` synthesizer, reflect judgment, and the arena cross-judge.
+
+Every role runs at `high` effort or lower (`how` explorers and mechanical work at `medium`). No role runs on fable or at `xhigh` or `max`.
+
+Claude Code loads every `.md` in `<config>/rules/` into each session ([docs/harness/claude-code.md](docs/harness/claude-code.md#models)). `<config>` is `$CLAUDE_CONFIG_DIR`, or `~/.claude` when that is unset.
+
+- `npm run model-budget -- install [--config <dir>]...` writes the sheet to `<config>/rules/pstack-models.md` in each config.
+  - A sheet that already exists and differs is kept, so your own choices survive a refresh. `--force` replaces it, after copying it to `pstack-models.md.bak-<UTC timestamp>` next to it and printing that path. The backup does not end in `.md`, because Claude Code loads every `.md` in `rules/`, and a second sheet would load too.
+  - A symlink at the sheet path is refused, with or without `--force`, so nothing is written through it.
+  - It writes nothing else: no settings, no permissions, no `CLAUDE.md`.
+- `npm run model-budget -- check [--config <dir>]...` prints each config's sheet as `ok` (the sflow default), `ok custom`, `MISSING` or `INVALID`.
+  - It exits `1` unless every config has a sheet whose models and efforts all exist.
+- Run `install` and then `check` for every engineer config on a machine after each install or refresh of the plugin. Pass one `--config` per `CLAUDE_CONFIG_DIR`.
+
+**Escalate for one task** by saying so in the request, for example "review this with opus xhigh" or "run the swarm workers on opus". A direct request overrides the sheet. To change a tier for good, edit `<config>/rules/pstack-models.md` (`install` then keeps your edit) or rerun `setup-pstack`. To go back to the sflow default, run `install --force`.
+
+**If you rerun `setup-pstack`**, two lines drift from this sheet:
+
+- `mechanical work (...)` is not a pstack role. No pstack skill reads it, and `setup-pstack` drops lines whose role it does not know. So the haiku tier only steers work when an agent reads the sheet as guidance, and a rerun deletes it.
+- Under the `medium (high)` budget, a rerun sets every effort to `high` and keeps only family, list and alias changes. So `how explorer: sonnet medium` goes back to `high`.
+
+Run `install --force` afterwards to restore the sflow default; it keeps a backup of what `setup-pstack` wrote.
+
+Arena never picks a judge from the parent's model family. With only Claude models, a Claude parent therefore skips the cross-judge and picks the base itself.
+
+`npm run test:model-budget` checks the tiers in the shipped sheet and covers `install` and `check` offline. `npm run check` runs it.
 
 ## Maintain
 
