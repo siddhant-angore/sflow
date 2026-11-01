@@ -10,6 +10,14 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Added
+
+- Model budget (SID-143). `templates/pstack-models.md` is a default pstack model sheet: sonnet for workers and reviewers, haiku for mechanical work, and opus only for architecture and final verdicts. It caps effort at `high` and uses no fable. Until now no sheet shipped, so every swarm role fell back to opus at `xhigh`.
+  - `npm run model-budget -- install|check [--config <dir>]...` writes the sheet to `<config>/rules/pstack-models.md`, which Claude Code loads every session. `install` keeps a sheet that differs unless `--force`. `check` exits 1 when a config's sheet is missing or names an unknown model or effort.
+  - `npm run test:model-budget` covers the tiers and both commands offline, and `npm run check` runs it.
+  - The README's "Model budget" section explains the tiers and how to escalate one task.
+  - No guard, permission or settings change.
+
 ### Fixed
 
 - Harness: text piped into a shell is now scanned as commands (SID-107, security). On 0.5.0 `echo 'git reset --hard' | sh` ran, because quoted text was treated as data whenever a segment was not itself a command. When a line has a segment that reads its script from stdin or a process substitution (`| sh`, `| bash -s`, `tee >(sh)`, `> >(sh)`, `sh <(...)`, `source <(...)`, `| source /dev/stdin`, `xargs sh -c` with `{}`/the `-I` string/positional args, or a `sh -c`/`eval` payload built from `$( )` or backticks), every quoted string (with `\n`/`\t` escapes decoded) and the arguments of the other segments go through the guard rules. `curl ... | sh`, `echo ls | sh`, `printf 'echo hi\n' | sh`, `cat script.sh | bash`, `echo hi | tee >(wc -l)`, `eval "$(ssh-agent -s)"` and `find ... | xargs -I{} git add {}` stay allowed.
