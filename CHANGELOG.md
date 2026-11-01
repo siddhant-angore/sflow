@@ -16,6 +16,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - `npm run model-budget -- install|check [--config <dir>]...` writes the sheet to `<config>/rules/pstack-models.md`, which Claude Code loads every session. `install` keeps a sheet that differs unless `--force`. `check` exits 1 when a config's sheet is missing or names an unknown model or effort.
   - `npm run test:model-budget` covers the tiers and both commands offline, and `npm run check` runs it.
   - The README's "Model budget" section explains the tiers and how to escalate one task.
+  - `install --force` backs up a sheet that differs to `pstack-models.md.bak-<UTC timestamp>` (not `.md`, so Claude Code does not load it as a second sheet) and prints the path. A symlink at the sheet path is refused.
   - No guard, permission or settings change.
 
 ### Changed

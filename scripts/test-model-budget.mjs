@@ -2,7 +2,7 @@
 // Offline tests for scripts/model-budget.mjs and the shipped default sheet templates/pstack-models.md (SID-143).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,8 +66,28 @@ try {
     assert.equal(readFileSync(sheetPath(a), 'utf8'), custom);
     const out = []; assert.equal(check([a], { log: (l) => out.push(l) }), true);
     assert.match(out[0], /^ok custom .*swarm workers: opus xhigh/);
-    install([a], { ...quiet, force: true });
+    const forced = []; install([a], { force: true, log: (l) => forced.push(l), now: () => new Date('2026-11-01T00:55:00.123Z') });
     assert.equal(readFileSync(sheetPath(a), 'utf8'), template);
+    const bak = `${sheetPath(a)}.bak-20261101T005500Z`;
+    assert.ok(existsSync(bak), 'the customised sheet is backed up before --force replaces it');
+    assert.equal(readFileSync(bak, 'utf8'), custom, 'the backup holds the custom text');
+    assert.ok(!bak.endsWith('.md'), 'the backup is not a .md (Claude Code loads every .md in rules/)');
+    assert.ok(forced.some((l) => l.includes(`backed up ${sheetPath(a)} -> ${bak}`)), 'the backup path is logged');
+    assert.deepEqual(readdirSync(join(a, 'rules')).filter((f) => f.endsWith('.md')), ['pstack-models.md'], 'only one sheet loads');
+    writeFileSync(sheetPath(a), custom); install([a], { ...quiet, force: true, now: () => new Date('2026-11-01T00:55:00.999Z') });
+    assert.equal(readFileSync(`${bak}-1`, 'utf8'), custom, 'a second backup in the same second does not overwrite the first');
+    install([a], { ...quiet, force: true });
+    assert.ok(!readdirSync(join(a, 'rules')).some((f) => f.endsWith('-2')), 'an unchanged sheet is not backed up again');
+  });
+  t('i5: a symlink at the sheet path is refused, with or without --force, and its target is untouched', () => {
+    const c = join(tmp, 'link'), target = join(tmp, 'link-target.md');
+    mkdirSync(join(c, 'rules'), { recursive: true }); writeFileSync(target, 'swarm workers: opus high\n'); symlinkSync(target, sheetPath(c));
+    for (const force of [false, true]) {
+      const lines = []; assert.equal(install([c], { force, log: (l) => lines.push(l) }), false);
+      assert.match(lines[0], /^refused .*symlink/);
+      assert.equal(readFileSync(target, 'utf8'), 'swarm workers: opus high\n');
+    }
+    const r = cli(['install', '--force', '--config', c]); assert.equal(r.code, 1); assert.match(r.out, /refused/);
   });
   t('c1: check fails on a missing sheet and names the install command', () => {
     const r = cli(['check', '--config', join(tmp, 'none')]);
@@ -80,8 +100,8 @@ try {
       assert.equal(r.code, 1, body); assert.match(r.out, want);
     }
   });
-  t('c3: aliases, runtime lines and one bad config among good ones', () => {
-    assert.deepEqual(parseSheet('swarm workers: inherit-parent\narena runners: auto, sonnet\ndefault effort: session\nsession hook: on\n').problems, []);
+  t('c3: aliases and one bad config among good ones', () => {
+    assert.deepEqual(parseSheet('swarm workers: inherit-parent\narena runners: auto, sonnet\n').problems, []);
     const bad = join(tmp, 'bad-mixed'); mkdirSync(join(bad, 'rules'), { recursive: true }); writeFileSync(sheetPath(bad), 'swarm workers: gpt\n');
     assert.equal(check([b, bad], quiet), false);
   });

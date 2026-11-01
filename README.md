@@ -79,13 +79,21 @@ Every role runs at `high` effort or lower (`how` explorers and mechanical work a
 Claude Code loads every `.md` in `<config>/rules/` into each session ([docs/harness/claude-code.md](docs/harness/claude-code.md#models)). `<config>` is `$CLAUDE_CONFIG_DIR`, or `~/.claude` when that is unset.
 
 - `npm run model-budget -- install [--config <dir>]...` writes the sheet to `<config>/rules/pstack-models.md` in each config.
-  - A sheet that already exists and differs is kept, so your own choices survive a refresh. `--force` replaces it.
+  - A sheet that already exists and differs is kept, so your own choices survive a refresh. `--force` replaces it, after copying it to `pstack-models.md.bak-<UTC timestamp>` next to it and printing that path. The backup does not end in `.md`, because Claude Code loads every `.md` in `rules/`, and a second sheet would load too.
+  - A symlink at the sheet path is refused, with or without `--force`, so nothing is written through it.
   - It writes nothing else: no settings, no permissions, no `CLAUDE.md`.
 - `npm run model-budget -- check [--config <dir>]...` prints each config's sheet as `ok` (the sflow default), `ok custom`, `MISSING` or `INVALID`.
   - It exits `1` unless every config has a sheet whose models and efforts all exist.
 - Run `install` and then `check` for every engineer config on a machine after each install or refresh of the plugin. Pass one `--config` per `CLAUDE_CONFIG_DIR`.
 
 **Escalate for one task** by saying so in the request, for example "review this with opus xhigh" or "run the swarm workers on opus". A direct request overrides the sheet. To change a tier for good, edit `<config>/rules/pstack-models.md` (`install` then keeps your edit) or rerun `setup-pstack`. To go back to the sflow default, run `install --force`.
+
+**If you rerun `setup-pstack`**, two lines drift from this sheet:
+
+- `mechanical work (...)` is not a pstack role. No pstack skill reads it, and `setup-pstack` drops lines whose role it does not know. So the haiku tier only steers work when an agent reads the sheet as guidance, and a rerun deletes it.
+- Under the `medium (high)` budget, a rerun sets every effort to `high` and keeps only family, list and alias changes. So `how explorer: sonnet medium` goes back to `high`.
+
+Run `install --force` afterwards to restore the sflow default; it keeps a backup of what `setup-pstack` wrote.
 
 Arena never picks a judge from the parent's model family. With only Claude models, a Claude parent therefore skips the cross-judge and picks the base itself.
 
