@@ -46,7 +46,8 @@
 |---|---|---|---|
 | retro, writing-for-agents | Pocock | Retro, Authoring or modifying a skill | environment changes; skill writing |
 | ask-matt (`PHASE-BOUNDARIES.md`), claude-handoff | Pocock | Pause safely | the continue/clear/handoff/subagent/compact ladder |
-| chief-of-staff | Pocock | Orchestrate | dated-wiki program memory |
+| chief-of-staff | Pocock | Orchestrate | dated-wiki program memory (shared wiki first); runs retro and to-spec/to-tickets/implement-spec as procedures |
+| software-factory | Pocock | Spec | glossary for designing a software factory (tasks, runners, trackers, git hosts, observability); slash-invoked only |
 | setup-matt-pocock-skills, setup-pre-commit, setup-ts-deep-modules, wizard, git-guardrails-claude-code | Pocock | Setup, Retro | tracker and domain docs as the shape; hooks; human-only steps |
 | writing-fragments, writing-beats, writing-shape, loop-me, teach-workspace, wait-what | Pocock | Writing, Investigation | non-code prose |
 
