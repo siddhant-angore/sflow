@@ -37,10 +37,16 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - On 0.5.0, a policy over 1 MB was skipped silently: `git show` hit the 1 MB buffer. The next candidate (for example a permissive `origin/master`) became the policy, or none did and the gate was skipped.
   - Now `git cat-file -s` decides. A missing file falls through as before. A file over 1 MB, unreadable, not valid JSON, or not an object makes that branch's policy *broken*: strict defaults apply.
   - `pre-bash` still denies every command, exactly as a parse error did, but now names the reason and says a human fixes it on the base branch and runs `git fetch origin`. Nothing that was denied becomes allowed. SessionStart shows the note.
+- sflow-flutter hook commands quote `"${CLAUDE_PLUGIN_ROOT}"` so they run when the plugin path contains a space (the five `bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<x>.sh` commands split at the space). Applied as an sflow overlay (`workflows/flutter-hooks-quoting.md`, a `target:` overlay, now checked for valid JSON) to the file vendored from VeryGoodOpenSource/vgv-ai-flutter-plugin (MIT, credit Very Good Ventures); `NOTICE.md` and `domains/flutter/NOTICE.md` list the file as carrying an sflow change. `scripts/test-plugin-root-space.mjs` runs every hook command of both plugins from a root path with a space, and fails on the old unquoted form. (SID-49)
+- The sflow-flutter `flutter-reviewer` agent's frontmatter hook now quotes `"${CLAUDE_PLUGIN_ROOT}"` (`bash "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/allow-readonly-git.sh"`). When the plugin path had a space, the unquoted command could not find its script, so the read-only restriction on the agent's Bash never ran.
+  - The fix is a second `target:` overlay, `workflows/flutter-reviewer-hook-quoting.md`, and NOTICE lists the change.
+  - `scripts/test-plugin-root-space.mjs` now also runs every `hooks:` command in the frontmatter of both plugins' agents (`agents/*.md`) and skills (`skills/*/SKILL.md`). A self-check confirms it catches the old unquoted form.
+  - This is the only frontmatter hook in either plugin. (SID-49)
+- Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 923 to 922 files. (SID-49)
 
 **Upstream pins**
 
-`addyosmani/agent-skills` is bumped to upstream 0.6.15 and `mattpocock/skills` to `4ae2317ddb22`; the other six pins are unchanged. The lock goes from 916 files at `v0.5.0` to 923.
+`addyosmani/agent-skills` is bumped to upstream 0.6.15 and `mattpocock/skills` to `4ae2317ddb22`; the other six pins are unchanged. The lock goes from 916 files at `v0.5.0` to 922.
 
 | Source | Author | License | Pin |
 |---|---|---|---|

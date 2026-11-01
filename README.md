@@ -118,3 +118,5 @@ Arena never picks a judge from the parent's model family. With only Claude model
 - On release, add the entries to `CHANGELOG.md` (including upstream pin changes), bump the version in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both plugin entries), and `domains/flutter/.claude-plugin/plugin.json` together. Before tagging, install `sflow-flutter` into a throwaway `CLAUDE_CONFIG_DIR` from a local marketplace and confirm the cache copy has `LICENSE`, `NOTICE.md` and `LICENSES/`. Then create an annotated tag on the bump commit (`git tag -a vX.Y.Z -m "sflow vX.Y.Z"`) and push it.
 
 Attribution for the vendored work is in `NOTICE.md` and `LICENSES/`. Credit goes to Lauren Tan (pstack), Cursor (`cursor-team-kit`, author Eric Zakariasson, and `thermos`), Matt Pocock, Addy Osmani, Very Good Ventures, and The Flutter Authors.
+
+The sflow mark (`assets/sflow-mark.*`, `domains/flutter/assets/sflow-mark.*`) is sflow's own brand asset (Brand Designer / Siddhant Angore), not third-party.
