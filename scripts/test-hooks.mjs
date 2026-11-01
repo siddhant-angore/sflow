@@ -420,7 +420,7 @@ const FAIL = /harness hook error \(failing closed\)/;
 const noGit = realpathSync(makeScratch('harness-hookfile-nogit-'));
 assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { PATH: noGit }).why, FAIL, 'SID-162 review: missing git binary denies');
 assert.match(envTool(join(tmpdir(), 'plain.txt'), tmpdir(), { PATH: noGit }).why, FAIL, 'SID-162 review: missing git binary denies outside a repo too');
-assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }).why, FAIL, 'SID-162 review: a safe.directory refusal denies');
+assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { GIT_TEST_ASSUME_DIFFERENT_OWNER: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }).why, FAIL, 'SID-162 review: a safe.directory refusal denies'); // empty global, no system config: a runner's safe.directory=* can't lift the refusal
 // A git (older or patched) whose safe.directory refusal also says "not a git repository" must still fail closed, not read as "no repository".
 const fakeGit = realpathSync(makeScratch('harness-hookfile-fakegit-'));
 writeFileSync(join(fakeGit, 'git'), "#!/bin/sh\necho \"fatal: not a git repository (or any parent): unsafe repository; add it to safe.directory\" >&2\nexit 128\n"); chmodSync(join(fakeGit, 'git'), 0o755);
