@@ -564,6 +564,41 @@ const positional = (body, args) => body.replace(POS, (m, q, u) => {
   const v = args[+k] ?? '';
   return q ? sq(v) : v;
 });
+// SID-191 re-review (opus 2): which text of a -c payload can hold a positional parameter. Single-quoted text is normally still code to the shell that reads it
+// (`trap '${1#}' EXIT`, `PS4='$(${1#})'`, `x@P`, `mapfile -C`, `alias`), so the payload is judged on its raw text, as at b2b5fd7, EXCEPT for the single-quoted words
+// (and `\$` inside double quotes) of a plain awk/gawk/sed/cut/grep/jq command: their program text is data, and a shell they start has no positional parameters.
+// The scanner reads only plain quoting; anything else (a backslash outside "..", $( ), a backtick, $'..', < > ( ) { }, a comment, an unclosed quote) returns the raw text.
+const DATA_PROGRAMS = new Set(['awk', 'gawk', 'sed', 'cut', 'grep', 'jq']);
+// Every command of the payload must be a data program or one of these plain commands, or the payload stays raw: `alias awk=eval`, `shopt`, `hash`, `enable`, `set` ... can turn a data program's head into code.
+const PLAIN_PAYLOAD_HEADS = new Set(['echo', 'printf', 'cat', 'ls', 'head', 'tail', 'sort', 'uniq', 'wc', 'tr', 'true', 'false', 'cd', 'pwd', 'git', 'gh']);
+export function positionalView(p) {
+  const cmds = []; let raw = '', view = '', words = [], w = null;
+  const endWord = () => { if (w) { words.push(w); w = null; } };
+  const endCmd = () => { endWord(); if (words.length) cmds.push({ raw, view, data: words[0].plain && DATA_PROGRAMS.has(words[0].text), plain: words[0].plain && PLAIN_PAYLOAD_HEADS.has(words[0].text) }); raw = ''; view = ''; words = []; };
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === "'") {
+      const e = p.indexOf("'", i + 1); if (e < 0) return p;
+      w ??= { text: '', plain: true }; w.plain = false; w.text += p.slice(i + 1, e); raw += p.slice(i, e + 1); view += ' '; i = e;
+    } else if (c === '"') {
+      w ??= { text: '', plain: true }; w.plain = false; raw += c; view += c;
+      for (i++; i < p.length && p[i] !== '"'; i++) {
+        const d = p[i];
+        if (d === '`' || (d === '$' && p[i + 1] === '(')) return p;
+        if (d === '\\') { if (p[i + 1] !== '$') return p; raw += '\\$'; i++; continue; } // `\$` in "..": a literal dollar, dropped from the view
+        raw += d; view += d; w.text += d;
+      }
+      if (i >= p.length) return p;
+      raw += '"'; view += '"';
+    } else if (c === '\\' || c === '`' || c === '<' || c === '>' || c === '(' || c === ')' || c === '{' || c === '}' || (c === '$' && (p[i + 1] === "'" || p[i + 1] === '(')) || (c === '#' && !w)) return p;
+    else if (c === '\n' || c === ';' || c === '&' || c === '|') endCmd();
+    else if (/\s/.test(c)) { endWord(); raw += c; view += c; }
+    else { w ??= { text: '', plain: true }; w.text += c; raw += c; view += c; }
+  }
+  endCmd();
+  if (!cmds.every((x) => x.data || x.plain)) return p;
+  return cmds.map((x) => (x.data ? x.view : x.raw)).join('\n');
+}
 const SH_RUN = /^(?:sh|ash|bash|zsh|dash|ksh|mksh|fish)$/;
 function functionDefs(cmd) {
   const defs = new Map();
@@ -588,7 +623,7 @@ function runsText(seg, defs) {
       for (let k = 1; k < w.length; k++) {
         const o = w[k];
         if (!/^[-+]/.test(o)) break;
-        if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(o)) { let j = k + 1; while (j < w.length && /^[-+]/.test(w[j]) && w[j] !== '--') j += /^[-+][oO]$/.test(w[j]) ? 2 : 1; if (w[j] === '--') j++; if (w[j] !== undefined) { if (POSITIONAL.test(w[j])) out.positional = w[j]; out.push(positional(w[j], w.slice(j + 1))); } break; }
+        if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(o)) { let j = k + 1; while (j < w.length && /^[-+]/.test(w[j]) && w[j] !== '--') j += /^[-+][oO]$/.test(w[j]) ? 2 : 1; if (w[j] === '--') j++; if (w[j] !== undefined) { if (POSITIONAL.test(positionalView(w[j]))) out.positional = w[j]; out.push(positional(w[j], w.slice(j + 1))); } break; }
         if (/^[-+][oO]$/.test(o)) k++;
       }
     } else if (defs.has(w[0] ?? '')) out.push(positional(defs.get(w[0]), w));
@@ -720,7 +755,7 @@ const hasBrace = (w) => {
   return false;
 };
 const hasGlob = (w) => w.some((x) => !x.q && /[*?[]/.test(x.c));
-const SPELL = 'spell the paths or words out (or quote them), e.g. git add src/a.ts src/b.ts';
+const SPELL = "spell the paths or words out, e.g. git add src/a.ts src/b.ts, or quote the argument if the glob is meant literally: gh api 'repos/o/r/pulls?state=open', --jq '.[]', uv add 'pkg[extra]'";
 export function literalReason(text) {
   for (let w of litCommands(text)) {
     let i = 0;
@@ -747,14 +782,49 @@ export function literalReason(text) {
   return null;
 }
 const READERS = /^(shopt|read|mapfile|readarray|alias|eval)$/;
+// `set -o NAME` for options that leave word reading alone; every other -o/+o name (noglob, braceexpand, posix, ...) and `set --` stay denied.
+const SAFE_SET_OPTS = new Set(['pipefail', 'errexit', 'nounset', 'verbose', 'noclobber']);
+const setReason = (args) => { if (!args.some((x) => x === '--' || /^[-+]o$/.test(x))) return false; for (let k = 0; k < args.length; k += 2) if (!/^[-+]o$/.test(args[k]) || !SAFE_SET_OPTS.has(args[k + 1])) return true; return false; }; // with any -o/+o or `--`, every argument must be a `-o NAME`/`+o NAME` pair with a safe name (a stray -k, -f, +B, `-` or bare word is denied, as at b2b5fd7)
+// IFS=x counts when it is an assignment word, judged on the parsed words. The raw-text check (b2b5fd7: IFS= after whitespace or a separator, or after export/declare/...) stays the rule,
+// and is lifted only when the whole text is provably data: plain quoting (no backslash, comment, $( ), backtick, $'..', redirection, parenthesis or brace outside quotes), every command
+// one of a few that run nothing from their arguments (echo, printf, a git/gh message command, ls, cat, ...), and no word of litCommands that begins with an unquoted IFS=.
+// An unknown command, `sh`, `eval`, `trap`, an interpreter, `tee`, `xargs` ... is not on the list, so text a script could read back keeps the raw rule.
+const IFS_ASSIGN = /(?:^|[\s;&|(`]|\b(?:export|declare|local|readonly|typeset)\s+)IFS\+?=/;
+const PLAIN_HEADS = new Set(['echo', 'printf', 'true', 'false', ':', 'cd', 'pwd', 'ls', 'cat', 'wc', 'head', 'tail', 'sort', 'uniq', 'cut', 'tr', 'sleep', 'mkdir', 'touch']);
+const MSG_OPTS = /^(-m|--message|-t|--title|-b|--body)$/;
+function plainQuoting(t) {
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (c === "'") { const e = t.indexOf("'", i + 1); if (e < 0) return false; i = e; }
+    else if (c === '"') { for (i++; i < t.length && t[i] !== '"'; i++) if (t[i] === '\\' || t[i] === '`' || (t[i] === '$' && '([{'.includes(t[i + 1]))) return false; if (i >= t.length) return false; }
+    else if ('\\#<>(){}`'.includes(c) || (c === '$' && (t[i + 1] === "'" || t[i + 1] === '(' || t[i + 1] === '['))) return false;
+  }
+  return true;
+}
+const unquotedPrefix = (w, n) => w.slice(0, n).every((x) => !x.q);
+function ifsMentionIsData(text) {
+  if (!plainQuoting(text)) return false;
+  for (const w of litCommands(text)) {
+    const h = lp(w[0]);
+    if (!unquotedPrefix(w[0], w[0].length)) return false;
+    const hasQuoted = (x) => x.some((y) => y.q);
+    if (PLAIN_HEADS.has(h)) { /* arguments are data */ }
+    else if (h === 'git') { if (w.some((x, k) => k > 1 && hasQuoted(x) && !(MSG_OPTS.test(lp(w[k - 1] ?? [])) && ['commit', 'tag', 'notes', 'stash'].includes(lp(w[1]))))) return false; }
+    else if (h === 'gh' && /^(pr|issue)$/.test(lp(w[1] ?? [])) && /^(create|comment|edit)$/.test(lp(w[2] ?? []))) { if (w.some((x, k) => k > 2 && hasQuoted(x) && !MSG_OPTS.test(lp(w[k - 1] ?? [])))) return false; }
+    else return false;
+    for (const x of w) { const m = /^IFS\+?=/.exec(lp(x)); if (m && unquotedPrefix(x, m[0].length)) return false; } // a real assignment word, at any position
+  }
+  return true;
+}
+const setsIfs = (text) => IFS_ASSIGN.test(text) && !ifsMentionIsData(text);
 export function rereadReason(text) {
   if (!GUARD_WORD.test(text) && !GUARD_WORD.test(canon(text).text)) return null;
-  if (/(?:^|[\s;&|(`]|\b(?:export|declare|local|readonly|typeset)\s+)IFS\+?=/.test(text)) return 'this line sets IFS and names a guarded command; word splitting could build a denied command, so run them separately';
+  if (setsIfs(text)) return 'this line sets IFS and names a guarded command; word splitting could build a denied command, so run them separately';
   for (const w of litCommands(text)) {
     const ws = w.map(lp);
     let i = 0; while (i < ws.length && (/^[A-Za-z_]\w*=/.test(ws[i]) || SKIP_HEAD.has(ws[i]) || OPT_ARG[ws[i]] !== undefined)) i++;
     const h = ws[i] ?? '';
-    if (READERS.test(h) || (h === 'set' && ws.slice(i + 1).some((x) => x === '--' || /^[-+]o$/.test(x))) || (h === 'printf' && ws.slice(i + 1).some((x) => /^-v/.test(x))) || ((h === 'declare' || h === 'typeset') && ws.some((x) => /^-[a-zA-Z]*[n]/.test(x))))
+    if (READERS.test(h) || (h === 'set' && setReason(ws.slice(i + 1))) || (h === 'printf' && ws.slice(i + 1).some((x) => /^-v/.test(x))) || ((h === 'declare' || h === 'typeset') && ws.some((x) => /^-[a-zA-Z]*[n]/.test(x))))
       return `${h} on a line that names a guarded command can change how later words are read; run the guarded command on its own line, written out`;
   }
   return null;

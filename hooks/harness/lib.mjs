@@ -603,20 +603,36 @@ export function segments(cmd) {
   return [...new Set([...qa, ...blind])];
 }
 
-// SID-191 review item 8: a deny must reach Claude Code whole. An async stdout write of more than a pipe buffer (64 KiB) was cut off by the
-// process.exit(0) after it, leaving invalid JSON and exit 0 (an allow). So each line of the reason is capped (the echoed command is the long
-// part) and the output is written synchronously, retrying a full non-blocking pipe.
+// SID-191 review item 8 and re-review B6: a deny must reach Claude Code whole, or not pretend to. An async stdout write of more than a pipe buffer
+// (64 KiB) was cut off by the process.exit(0) after it (invalid JSON, exit 0 = no decision). So the TOTAL reason is capped (each line, and all
+// lines together: DENY_TOTAL_MAX), which keeps the whole JSON far inside one pipe buffer, and the write is synchronous, retrying a full
+// non-blocking pipe. If the write still fails (EAGAIN gone on too long, EPIPE, anything), deny() does NOT write a second deny on top of a
+// partial one: it exits 2 with a short reason on stderr, which Claude Code treats as a block.
 export const DENY_LINE_MAX = 1500;
+export const DENY_TOTAL_MAX = 4000;
 export const clip = (t, max = DENY_LINE_MAX) => (t.length > max ? `${t.slice(0, max)}… [${t.length - max} more chars]` : t);
-export function emit(text, fd = 1) {
+export const clipReason = (reason) => String(reason).split('\n').map((l) => clip(l)).join('\n');
+// Keeps the start (what was denied) and the end (a gate failure's last lines are the error, the policy note is the last line) when the total is over max.
+export const clipMid = (t, max) => { if (t.length <= max) return t; const head = max >> 2, tail = max - head; return `${t.slice(0, head)}\n… [${t.length - max} chars cut] …\n${t.slice(-tail)}`; };
+const sleep1ms = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+// write is injectable so tests can make it throw EAGAIN a few times.
+export function emit(text, fd = 1, write = writeSync, wait = sleep1ms) {
   const buf = Buffer.from(text);
   for (let off = 0, tries = 0; off < buf.length;) {
-    try { off += writeSync(fd, buf, off); tries = 0; } catch (e) { if (e.code !== 'EAGAIN' || ++tries > 10000) throw e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1); }
+    try { off += write(fd, buf, off); tries = 0; } catch (e) { if (e.code !== 'EAGAIN' || ++tries > 10000) throw e; wait(); }
   }
 }
-export function deny(reason, hookEventName = 'PreToolUse') {
-  const short = String(reason).split('\n').map((l) => clip(l)).join('\n');
-  emit(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: short } }) + '\n');
+export const BLOCKED = 'harness guard: blocked (the deny message could not be written to stdout); run `git status` and ask the user';
+export function deny(reason, hookEventName = 'PreToolUse', write = emit) {
+  // the total is cut at DENY_TOTAL_MAX chars; control characters and non-ASCII grow when escaped, so shrink further until the whole JSON is small
+  const build = (max) => JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: clipMid(clipReason(reason), max) } }) + '\n';
+  let json = build(DENY_TOTAL_MAX);
+  for (let max = DENY_TOTAL_MAX; Buffer.byteLength(json) > 3 * DENY_TOTAL_MAX && max > 100; max >>= 1) json = build(max);
+  try { write(json); } catch (e) {
+    // a partial JSON may already be on stdout: never add a second one. Exit 2 blocks, with the reason on stderr.
+    try { writeSync(2, `${BLOCKED} (${e.code ?? e.message})\n`); } catch {}
+    process.exit(2);
+  }
 }
 
 export function record(root, entry) {

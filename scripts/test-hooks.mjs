@@ -1,6 +1,7 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -25,6 +26,202 @@ writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
 const corpus = new Set(); // every command sent through bash(), reused by the regression check
 const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash', tool_input: { command }, cwd });
+
+// ===== SID-191 re-review 5726947374 (b2b5fd7): R32 =====
+// SFLOW_R32_ONLY=1 stops after this block (the fast loop used for mutation testing; npm run check never sets it).
+const r32Rules = newRules, r32Cfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const r32Denies = (c, b = 'feat/x') => Boolean(r32Rules.lineReason(c) || r32Rules.segmentReason(c, r32Cfg, b));
+const r32Why = (c, b = 'feat/x') => r32Rules.lineReason(c) ?? r32Rules.segmentReason(c, r32Cfg, b)?.why;
+const r32Counts = { deny: 0, allow: 0, collateral: 0 };
+const r32MustDeny = (list, what) => { for (const c of list) for (const b of ['feat/x', 'main']) assert.ok(r32Denies(c, b), `R32 ${what} must deny on ${b}: ${JSON.stringify(c)}`); r32Counts.deny += list.length; };
+const r32MustAllow = (list, what) => { for (const c of list) assert.ok(!r32Denies(c), `R32 ${what} must allow: ${JSON.stringify(c)} (${r32Why(c)})`); r32Counts.allow += list.length; };
+// B6: the deny must arrive whole or not at all.
+{
+  const libFile = join(hooks, 'lib.mjs'), lib = await import(pathToFileURL(libFile).href);
+  const dir = makeScratch('harness-r32-nb-'), nb = join(dir, 'nb.cjs'), evf = join(dir, 'ev.json');
+  writeFileSync(nb, 'process.stdout;\n'); // touching process.stdout makes the stdout pipe O_NONBLOCK, as a parent that set it would
+  const bigCmd = `gh pr merge 1 --body "${Array.from({ length: 3000 }, (_, k) => `line ${k} ${'x'.repeat(1400)}`).join('\n')}"`;
+  writeFileSync(evf, JSON.stringify({ tool_name: 'Bash', tool_input: { command: bigCmd }, cwd: repo }));
+  assert.ok(bigCmd.length > 4_000_000, 'R32-6: the command is about 4 MB');
+  const t0 = Date.now();
+  const r = spawnSync('sh', ['-c', `(node -r "${nb}" "${join(hooks, 'pre-bash.mjs')}" < "${evf}"; echo "exit=$?" >&2) | (sleep 1.5; cat)`], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  const code = Number(/exit=(\d+)/.exec(r.stderr)?.[1]);
+  if (code === 0) {
+    const j = JSON.parse(r.stdout); // never exit 0 with invalid JSON
+    assert.equal(j.hookSpecificOutput.permissionDecision, 'deny', 'R32-6: a 4 MB command denies');
+    assert.ok(r.stdout.length < 16384, `R32-6: the deny is small (${r.stdout.length} bytes), whatever the command size`);
+  } else assert.equal([code, r.stdout].join('|'), '2|', 'R32-6: a failed write exits 2 with nothing on stdout');
+  assert.ok(Date.now() - t0 < 15000, `R32-6: the test stays fast (${Date.now() - t0} ms)`);
+  // total cap, on the reason itself and on the escaped JSON (control characters grow 6x)
+  for (const reason of ['y'.repeat(3000), 'gh pr merge 1\n'.repeat(3000), `a\u0001`.repeat(20000), `${'\u0001'.repeat(1000)}\n`.repeat(10), 'é'.repeat(50000), 'x'.repeat(5_000_000)]) {
+    let got = ''; lib.deny(reason, 'PreToolUse', (t) => { got += t; });
+    assert.ok(got.length <= 3 * lib.DENY_TOTAL_MAX + 1, `R32-6: deny() output is capped (${got.length} bytes for a ${reason.length}-char reason)`);
+    assert.equal(JSON.parse(got).hookSpecificOutput.permissionDecision, 'deny');
+    if (reason === 'y'.repeat(3000)) assert.ok(got.length < lib.DENY_LINE_MAX + 200, `R32-6: one long line is cut at DENY_LINE_MAX (${got.length})`);
+    if (/^gh pr merge/.test(reason)) { const n = JSON.parse(got).hookSpecificOutput.permissionDecisionReason.length; assert.ok(n >= 3000 && n <= lib.DENY_TOTAL_MAX + 40, `R32-6: the reason is cut at about ${lib.DENY_TOTAL_MAX} chars in total, not per line (${n})`); }
+  }
+  // emit() retries EAGAIN: a writer that throws it a few times still delivers everything, in order, in short writes
+  let calls = 0, sink = '';
+  const flaky = (fd, buf, off) => { if (calls++ % 4 < 3) throw Object.assign(new Error('full'), { code: 'EAGAIN' }); const n = Math.min(5, buf.length - off); sink += buf.subarray(off, off + n).toString(); return n; };
+  lib.emit('hello world, flaky pipe\n', 1, flaky, () => {});
+  assert.equal(sink, 'hello world, flaky pipe\n', 'R32-6: emit() retries EAGAIN and finishes the write');
+  // ... but gives up (throws) after 10000 in a row, and on any other error
+  // the retry budget is per stalled write, not per call: 10005 stalls spread over a long write still finish
+  let stall = 0, got2 = 0; lib.emit('x'.repeat(10005), 1, (fd, buf, off) => { if (stall++ % 2 === 0) throw Object.assign(new Error('full'), { code: 'EAGAIN' }); got2++; return 1; }, () => {});
+  assert.equal(got2, 10005, 'R32-6: the EAGAIN counter resets after each successful write');
+  // bounded so a retry-forever emit() fails here instead of hanging: the loop is synchronous, SIGTERM can't stop it
+  let always = 0; assert.throws(() => lib.emit('x', 1, () => { if (++always > 20000) throw Object.assign(new Error('stop'), { code: 'ESTOP' }); throw Object.assign(new Error('full'), { code: 'EAGAIN' }); }, () => {}), { code: 'EAGAIN' });
+  assert.equal(always, 10001, 'R32-6: emit() retries a full pipe 10000 times, then throws');
+  let epipe = 0; assert.throws(() => lib.emit('x', 1, () => { epipe++; throw Object.assign(new Error('gone'), { code: 'EPIPE' }); }, () => {}), { code: 'EPIPE' });
+  assert.equal(epipe, 1, 'R32-6: emit() does not retry other errors');
+  // deny() after a partial write: no second deny, exit 2, reason on stderr
+  const partial = spawnSync(process.execPath, ['--input-type=module', '-e', `import { deny } from ${JSON.stringify(pathToFileURL(libFile).href)}; import { writeSync } from 'node:fs'; deny('first', 'PreToolUse', (t) => { writeSync(1, t.slice(0, 7)); throw Object.assign(new Error('full'), { code: 'EAGAIN' }); }); process.stdout.write('REACHED-AFTER-DENY');`], { encoding: 'utf8' });
+  assert.equal(partial.status, 2, 'R32-6: a failed deny write exits 2');
+  assert.equal(partial.stdout, '{"hookS', 'R32-6: nothing but the partial write is on stdout (no second deny, no allow)');
+  assert.match(partial.stderr, /blocked/, 'R32-6: the reason is on stderr');
+  console.log(`SID-191 R32-6: 4 MB command denied over a nonblocking pipe in ${Date.now() - t0} ms; deny() capped; emit() retry and failure paths tested`);
+}
+const r32Ours = ['set -o noglob; git status', 'IFS=, git status', `sh -c 'echo "$1"' _ x`]; // R32 cases the corpus sweep below must not count as collateral
+// Over-denial 1: harmless `set -o` options. noglob, braceexpand, posix and `set --` change how words are read and stay denied.
+r32MustAllow(['set -o pipefail; gh pr view 1 | cat', 'set -o pipefail && git push origin feat/x', 'set -euo pipefail; git status', 'set -o errexit -o nounset; git status', 'set +o noclobber; git status', 'set -o verbose; git log'], 'set -o whitelist');
+r32MustDeny(['set -o noglob; git status', 'set -o braceexpand; git status', 'set +o noglob; gh pr view 1', 'set -o posix; git status', 'set -o pipefail -o noglob; git status', 'set -- a b; git status', 'set -o; git status', 'set -o keyword; git status', 'set -o allexport -o noglob; npm test', 'set -o xtrace; npm test', 'set -o errtrace; git status', 'set -o functrace; git status', 'set -o allexport; git status'], 'set -o other options');
+// Over-denial 2: IFS is judged on assignment words. A mention in a message or an echo argument is data; a real assignment, or text a shell/redirect could read back, is not.
+r32MustAllow(['git commit -m "set IFS=, in parser"', 'echo "set IFS=, here"; git status', "git commit -m 'IFS=, is documented'", 'git tag -m "reset IFS= first" v1', 'git commit -m "fix (parser) IFS=x"', 'git tag -m "IFS=, note" v1', 'git commit -m "IFS=, note" && git status'], 'IFS mention');
+r32MustDeny(['IFS=, git status', 'IFS=, ; git status', 'IFS+=x; git status', 'export IFS=,; git status', 'declare -x IFS=, ; git status', 'local IFS=,; git status', 'FOO=1 IFS=, git status', "echo 'a IFS=, b' | sh; git status", 'git commit -m "$(IFS=, ; echo x)"', 'echo "x IFS=, y" > f.sh; git status', 'bash -c "IFS=,; git status"', 'eval "IFS=, git status"', 'echo "x IFS=, y" | tee f.sh; git status'], 'IFS assignment');
+// Over-denial 3: `$1` inside the single quotes of a -c payload (an awk program) or escaped is not a positional parameter. Real uses stay denied.
+r32MustAllow([`bash -c "awk '{print \\$1}' f; git status"`, `sh -c 'git log --oneline | awk "{print \\$1}"'`, `bash -c "awk '{print \\$1, \\$2}' f | sort; git log"`, `sh -c "cut -d' ' -f1 f | awk '{ s += \\$1 } END { print s }'; git status"`], 'awk $1 in a payload');
+r32MustDeny([`sh -c 'echo "$1"' _ x`, `bash -c 'echo $@; git status'`, `bash -c 'shift; git status'`, `bash -c "echo \\$1; git status"`, `bash -c "awk '{print \\$1}' f; echo \\$2; git status"`, `sh -c 'awk "{print $1}"; git status'`, `bash -c 'eval "$1"' _ 'gh pr merge 1'`, `bash -c "eval '\\$1'" _ 'gh pr merge 1'`, `sh -c '"$@"' _ gh pr merge 1`], 'real positional use');
+r32MustDeny([String.raw`bash -c "echo \"it's \$1\" 'x'; git status"`], 'apostrophe inside double quotes does not hide $1');
+// Through the hook as well (these join the corpus, so the regression check below runs them against every baseline)
+for (const c of ['set -o pipefail; gh pr view 1 | cat', 'git commit -m "set IFS=, in parser"', `bash -c "awk '{print \\$1}' f; git status"`]) assert.ok(!denied('pre-bash.mjs', bash(c)), `R32 over-denial fixed, must allow through the hook: ${c}`);
+for (const c of ['set -o noglob; git status', 'IFS=, git status', `sh -c 'echo "$1"' _ x`]) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 must still deny through the hook: ${c}`);
+// each rule on its own (the line-level layers can hide one of them)
+assert.equal(r32Rules.rereadReason('set -o pipefail; git status'), null);
+assert.ok(r32Rules.rereadReason('set -o noglob; git status'));
+assert.equal(r32Rules.rereadReason('git commit -m "set IFS=, in parser"'), null);
+assert.ok(r32Rules.rereadReason('IFS=, git status'));
+assert.ok(r32Rules.rereadReason("echo 'a IFS=, b' | sh; git status"));
+assert.ok(r32Rules.rereadReason('git commit -m "$(IFS=, ; echo x)"'), 'R32: a $( ) inside double quotes is script, not data');
+assert.equal(r32Rules.segmentReason(`bash -c "awk '{print \\$1}' f; git status"`, r32Cfg, 'feat/x'), null);
+assert.match(r32Rules.segmentReason(`bash -c 'echo $1'`, r32Cfg, 'feat/x')?.why ?? '', /positional parameters/);
+// Message: an unquoted glob or brace in a guarded command is still denied (accepted collateral), and the message now says to quote.
+const r32Glob = ['gh api repos/o/r/pulls?state=open', 'gh api repos/o/r/pulls --jq .[]', 'uv add pkg[extra]', 'git add *.mjs'];
+r32MustDeny(r32Glob, 'unquoted glob');
+r32Counts.collateral += r32Glob.length;
+for (const c of r32Glob) { const why = r32Why(c); assert.match(why, /spell the paths or words out/, c); assert.match(why, /quote the argument/, c); assert.match(why, /gh api 'repos\/o\/r\/pulls\?state=open', --jq '\.\[\]', uv add 'pkg\[extra\]'/, c); }
+r32MustAllow(["gh api 'repos/o/r/pulls?state=open'", "gh api repos/o/r/pulls --jq '.[]'", "uv add 'pkg[extra]'", "gh api 'repos/o/r/pulls?state=open' --jq '.[].number'"], 'quoted glob');
+// Opus final review: single-quoted text that the script reads back as code, and $'..' with an escaped quote, must not hide a positional parameter or an IFS assignment.
+// All of these were denied at b2b5fd7 and stay denied.
+r32MustDeny([
+  String.raw`bash -c ". /dev/stdin <<< '${'$'}{1#}'" _ 'gh pr merge 1'`, String.raw`bash -c "source <(echo '\${1#}')" _ 'gh pr merge 1'`, String.raw`bash -c "echo '\${1#}' | source /dev/stdin" _ 'gh pr merge 1'`,
+  String.raw`bash -c "trap '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "trap '\$1' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "PROMPT_COMMAND='\${1#}'; trap '' EXIT" _ 'gh pr merge 1'`,
+  String.raw`bash -c "x=\$'\\''; \${@}; y=''" _ gh pr merge 1`,
+  String.raw`x=$'\'' ; IFS=, ; c=gh,pr,merge,1 ; $c ; y=''`,
+  "trap ' IFS=,; c=gh,pr,merge,1; $c' EXIT", "perl -e 'system q{ IFS=,; c=gh,pr,merge,1; $c}'", `python3 -c 'os.system(" IFS=,; c=gh,pr,merge,1; $c")'`, `awk 'BEGIN{system(" IFS=,; c=gh,pr,merge,1; $c")}'`,
+  `node -e 'execSync(" IFS=,; c=gh,pr,merge,1; $c")'`, "env -S ' IFS=, c=gh,pr,merge,1 git status'",
+], 'opus review: re-read single-quoted text and $\'..\'');
+// each guard on its own
+assert.ok(r32Rules.rereadReason("trap ' IFS=,; git status' EXIT"), 'R32: trap re-reads quoted text, so an IFS inside it counts');
+assert.ok(r32Rules.rereadReason(String.raw`x=$'\'' ; IFS=, ; git status ; y=''`), "R32: $'..' falls back to the raw text");
+assert.match(r32Rules.segmentReason(String.raw`bash -c "trap '\${1#}' EXIT" _ x`, r32Cfg, 'feat/x')?.why ?? '', /positional parameters/, 'R32: a payload that can re-read single-quoted text is judged on the raw text');
+// the deny keeps the end of a long reason (a gate failure's last lines, the policy note), not only the start
+{
+  const lib = await import(pathToFileURL(join(hooks, 'lib.mjs')).href);
+  let got = ''; lib.deny(`${'first line\n'.repeat(900)}LAST-LINE-ERROR`, 'PreToolUse', (t) => { got += t; });
+  const why = JSON.parse(got).hookSpecificOutput.permissionDecisionReason;
+  assert.ok(why.startsWith('first line') && why.endsWith('LAST-LINE-ERROR') && why.length <= lib.DENY_TOTAL_MAX + 60, `R32-6: the cut keeps both ends (${why.length})`);
+}
+// Second opus review (/tmp/r32/opus2-result.md): findings 1-4, each denied at b2b5fd7 and allowed by the first fix. Plain payload text is never blanked unless it is the program of awk/gawk/sed/cut/grep/jq.
+const r32Op2 = [
+  // 1: a quoted or escaped reader name hides the re-read of single-quoted ${1#}
+  String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "t''rap '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "\trap '\${1#}' EXIT" _ 'gh pr merge 1'`,
+  String.raw`bash -c "\"trap\" '\$@' EXIT" _ gh pr merge 1`, String.raw`bash -c "\"source\" /dev/stdin <<< '\${1#}'" _ 'gh pr merge 1'`,
+  String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'git push origin main'`, String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'echo x > .harness.json'`,
+  // 2: other places bash re-reads single-quoted text
+  String.raw`bash -c "PS4='\$(\${1#})'; set -x; :" _ 'gh pr merge 1'`, String.raw`bash -c "PS0='\$(\${1#})'; :" _ 'gh pr merge 1'`, String.raw`bash -c "a='b[\$(\${1#})]'; echo \$((a))" _ 'gh pr merge 1'`,
+  String.raw`bash -c "unset 'a[\$(\${1#})]'" _ 'gh pr merge 1'`, String.raw`bash -c "x='\$(\${1#})'; echo \"\${x@P}\"" _ 'gh pr merge 1'`,
+  "bash -c \"shopt -s expand_aliases; alias x='\\${1#}'\nx\" _ 'gh pr merge 1'", String.raw`bash -c "mapfile -C '\${1#}' -c1 a <<<x" _ 'gh pr merge 1'`,
+  // 3: options that run code (xtrace via PS4, errtrace/functrace via trap, allexport exports the next assignment)
+  "PS4='$(gh pr merge 1)'; set -o xtrace; true", "set -o errtrace; trap 'gh pr merge 1' ERR; false", "set -o functrace; trap 'gh pr merge 1' DEBUG; f(){ :; }; f", 'set -o allexport; GIT_SSH_COMMAND=/tmp/evil; git push origin feat/x',
+  'set -o allexport; BASH_ENV=/tmp/evil; git status', 'set -o allexport; GIT_EXTERNAL_DIFF=/tmp/evil; git diff', 'set -o allexport; GIT_PAGER=/tmp/evil; git log', 'set -o allexport; GIT_DIR=/tmp/other; git status',
+  // 4: an apostrophe in a comment, or nested quotes in "$( )", hid a real IFS assignment
+  "# it's\nIFS=,; c=1,--web; gh pr view $c # '", "git status # don't\nIFS=,; c=1,--web; gh pr view $c # '", 'echo "$(echo "a"; IFS=,; c=1,--web; gh pr view $c)"',
+];
+r32MustDeny(r32Op2, 'opus 2 findings 1-4');
+for (const c of r32Op2.filter((_, k) => k % 3 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 opus 2 must deny through the hook: ${JSON.stringify(c)}`);
+r32Ours.push(...r32Op2);
+// Third opus review: an alias that turns a data-program head into eval, IFS assigned in arithmetic inside quotes, and extra set flags/words after a safe `-o NAME`. All denied at b2b5fd7.
+const r32Op3 = [
+  String.raw`sh -c "alias awk=eval
+awk '\${1#}'" _ 'gh pr merge 1'`, String.raw`bash -c "shopt -s expand_aliases
+alias awk=eval
+awk '\${1#}'" _ 'gh pr merge 1'`, String.raw`sh -c "alias grep=eval
+grep 'shift; \$1'" _ x 'gh pr merge 1'`, String.raw`sh -c "alias sed=eval
+sed '\${@:2}'" _ x gh pr merge 1`, String.raw`sh -c 'alias jq=eval
+jq "\${1#}"' _ 'gh pr merge 1'`, String.raw`sh -c "alias awk=eval; awk '\${1#}'" _ 'gh pr merge 1'`,
+  'echo "$[ IFS=44 ]"; gh pr create --title x', 'echo $[ " IFS=7" ]; git status', 'x=a; echo "${x[ IFS=5]}"; git status', "test -v 'a[ IFS=4 ]'; git status",
+  'set -o pipefail -f; git status', 'set -o pipefail -k; git status', 'set -o pipefail -f pipefail; git status', 'set -o pipefail main; git push origin $1', 'set -o pipefail - gh pr merge 1; git status', 'set -o pipefail +B; git status', 'set -o errexit -B -o nounset; git status',
+  'set -o pipefail -H; git status', 'set -o pipefail -C -u; git status', 'set -o verbose x y; gh pr view "$2"', 'set -o pipefail -k; git push origin feat/x GIT_SSH_COMMAND=/tmp/evil', 'set -o pipefail -o pipefail -f; gh pr view 1',
+];
+r32MustDeny(r32Op3, 'opus 3');
+for (const c of r32Op3.filter((_, k) => k % 4 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 opus 3 must deny through the hook: ${JSON.stringify(c)}`);
+r32Ours.push(...r32Op3);
+// each rule on its own
+for (const c of ['set -o pipefail -k; git status', 'set -o pipefail x; git status', 'set -o pipefail - a; git status', 'set -o pipefail -o noglob; git status']) assert.ok(r32Rules.rereadReason(c), `R32 set: every argument must be a safe -o pair: ${c}`);
+assert.equal(r32Rules.rereadReason('set -o errexit -o nounset; git status'), null);
+assert.match(r32Rules.positionalView(`alias awk=eval; awk '\${1#}'`), /\$\{1/, 'R32: an alias in the payload keeps the raw text');
+assert.match(r32Rules.positionalView(`shopt -s expand_aliases; awk '$1'`), /\$1/);
+assert.match(r32Rules.positionalView(`npm test; awk '$1'`), /\$1/, 'R32: a payload with a command that is neither a data program nor plain stays raw');
+assert.doesNotMatch(r32Rules.positionalView(`git status; awk '$1' f | sort`), /\$1/);
+for (const c of ['echo "$[ IFS=44 ]"; git status', 'echo $[ " IFS=7" ]; git status', 'echo "${x[ IFS=5]}"; git status', "test -v 'a[ IFS=4 ]'; git status"]) assert.ok(r32Rules.rereadReason(c), `R32 IFS: arithmetic expansion keeps the raw rule: ${c}`);
+// the narrow allows stay, each rule on its own
+r32MustAllow([`bash -c "awk '{print \\$1}' f | sort; sed 's/a/\\$1/' f; git status"`, `bash -c "grep -E 'x\\$' f | cut -d' ' -f1; jq '.[]' f"`], 'data-program single quotes');
+assert.equal(r32Rules.rereadReason('git status # it\'s'), null);
+assert.ok(r32Rules.rereadReason('echo "$(echo "a"; IFS=,; git status)"'), 'R32 opus 2 F4: nested quotes in "$( )" keep the raw rule');
+assert.ok(r32Rules.rereadReason("git status # don't\nIFS=,; git status # '"), 'R32 opus 2 F4: an apostrophe in a comment keeps the raw rule');
+assert.ok(r32Rules.rereadReason('echo "x IFS=, y" | eval; git status'), 'R32: an unknown or reading command keeps the raw rule');
+assert.ok(r32Rules.rereadReason('FOO="a IFS=, x" git status'), 'R32: a quoted assignment value is not on the data list');
+assert.ok(r32Rules.rereadReason('echo IFS=, ; git status'), 'R32: an unquoted IFS= argument keeps the raw rule');
+assert.ok(r32Rules.rereadReason('git -c core.pager="a IFS=, x" log'), 'R32: git -c is not a message command');
+assert.ok(r32Rules.rereadReason('git log --format="a IFS=, x"'), 'R32: a quoted word that is not a message value keeps the raw rule');
+assert.equal(r32Rules.rereadReason('gh pr create --title "set IFS=, here" --body "IFS=, too"'), null);
+// ifsMentionIsData, one gate at a time (each of these returns the raw rule's answer, which is a deny; the layers above would hide a missing gate)
+for (const c of [
+  String.raw`x=$'\'' ; IFS=, ; git status ; y='x'`, // litCommands misreads $'\'' as the end of the string
+  'echo "x; IFS=, ; git status', // unclosed double quote
+  'echo "$(IFS=, ; git status)"', // $( ) inside double quotes
+  'echo $(IFS=, ; git status)',
+  '"echo" "a IFS=, b"; git status', // a quoted command name is not on the list
+  'echo IFS+=x; git status', // += is an assignment too
+  'echo IFS=x; git status',
+  'gh pr create --label "a IFS=, b"', // a quoted word that is not a title/body
+  'git log --grep "a IFS=, b"', // not a message option
+  'git -c core.pager="a IFS=, b" log',
+  'git commit -m x --exec="a IFS=, b"',
+  String.raw`echo $'\'\'' ; IFS=, ; git status ; echo 'x'`, // litCommands ends $'..' at the first quote, so it would read the IFS as quoted
+  'echo "`IFS=, ; git status`"', // a backtick in double quotes
+  'unknowncmd "a IFS=, b"; git status', 'git status # a IFS=, b', 'git commit -m #x IFS=, y', // a comment keeps the raw rule (b2b5fd7 denied it; allowing it would be a DENY->allow)
+  'echo "a IFS=, b" | sh; git status', 'echo "a IFS=, b" > f; git status', 'trap "a IFS=, b" EXIT; git status', 'perl -e "a IFS=, b"; git status',
+]) assert.ok(r32Rules.rereadReason(c), `R32 IFS gate must keep the raw rule: ${JSON.stringify(c)}`);
+for (const c of ['git commit -m "a IFS=, b"', 'git tag -m "a IFS=, b" v1', 'echo "a IFS=, b"; git status', "printf '%s\\n' 'a IFS=, b'; git status", 'gh pr create --title "a IFS=, b" --body "c IFS=, d"', 'git notes add -m "a IFS=, b"; git status', 'ls "a IFS=, b"; git status'])
+  assert.equal(r32Rules.rereadReason(c), null, `R32 IFS mention in plain data stays allowed: ${c}`);
+// The IFS reason itself, for heads a later rule also denies (eval, read, ...): only the reason shows that the data gate kept the raw rule for them.
+for (const h of ['eval', 'read', 'mapfile', 'alias', 'shopt', 'source', 'sh', 'bash', 'trap', 'xargs', 'tee', 'python3']) assert.match(r32Rules.rereadReason(`${h} "a IFS=, b"; git status`) ?? '', /sets IFS/, `R32 IFS gate: ${h} is not a plain command, so its quoted text keeps the raw IFS rule`);
+// positionalView, one construct at a time: a payload is the raw text unless every command is plain and the quoted words belong to an awk/gawk/sed/cut/grep/jq program
+const pv = r32Rules.positionalView;
+// A command that runs or re-reads text is neither plain nor a data program: as a head its own quoted words stay, and one such command anywhere keeps the raw text of the whole payload.
+for (const h of ['sh', 'bash', 'dash', 'zsh', 'eval', 'source', '.', 'trap', 'exec', 'command', 'builtin', 'alias', 'env', 'xargs', 'python3', 'perl', 'node']) {
+  assert.match(pv(`${h} '$1'`), /\$1/, `R32 payload view must keep the raw $1 of a ${h} word`);
+  assert.match(pv(`${h} x; awk '$1' f`), /\$1/, `R32 payload view: ${h} next to a data program keeps the whole payload raw`);
+}
+for (const c of [
+  `"awk" '{print $1}'`, `awk '{print $1}' a\\ b`, `awk '{print $1}' f > out`, `awk '{print $1}' < f`, `(awk '{print $1}' f)`, `awk '{print $1}' $(echo f)`, `awk "$(x)" '{print $1}'`, 'awk `x` \'{print $1}\'',
+  `awk "a\\nb" '{print $1}'`, `echo 'x $1`, 'awk "a\\$1', `awk '{print $1}' f # c`, `awk '{print $1}' {a,b}`, `awk '{print $1}' (f)`, `awk '{print $1}' $'x'`, `echo '$1'`, `trap '$1' EXIT`, `x=1 awk '{print $1}'`, `env awk '{print $1}'`, `xargs awk '{print $1}'`, `echo $1; awk '{print $1}'`, `awk '{print $1}' "$1"`,
+]) assert.match(pv(c), /\$[1@]/, `R32 payload view must keep the raw $1: ${JSON.stringify(c)}`);
+for (const c of [`awk '{print $1}' f`, `gawk '{print $1, $2}' f | sort`, `sed 's/a/$1/' f`, `cut -d' ' -f1 f | awk '{ s += $1 } END { print s }'`, `grep -E 'x$' f`, `jq '.[$1]' f`, `git log --oneline | awk "{print \\$1}"`])
+  assert.doesNotMatch(pv(c), /\$[1@]/, `R32 payload view drops a data program's $1: ${c}`);
+// R32-END (cases of the other items are added above this line)
+if (process.env.SFLOW_R32_ONLY === '1') { console.log(`R32 only: ${JSON.stringify(r32Counts)}`); process.exit(0); }
 
 const mustDeny = [
   'git push --force origin feat/x', 'git push -f', 'git push -fu origin feat/x', 'git push -uf origin feat/x', 'git push --force-with-lease origin main',
@@ -174,7 +371,7 @@ const sid191Rev2 = ["git -c core.hooks{P..P}ath=/tmp/h commit -m x", "git -c cor
 for (const c of sid191Rev2) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 re-review must deny on ${b}: ${JSON.stringify(c)}`);
 for (const c of sid191Rev2.filter((_, k) => k % 5 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 re-review must deny through the hook: ${JSON.stringify(c)}`);
 // Accepted over-denials: a glob or brace in a guarded command, positional parameters in a -c script. The message says to spell it out.
-const sid191LiteralCollateral = ['git add *', 'git add *.mjs', 'git add src/*.mjs docs/*.md', 'cargo test -- *', 'git add src/{a,b}.ts', 'npm test -- *', "sh -c 'echo \"$1\"' _ hi", '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'git push origin feat/*', 'git log | while read l; do echo "$l"; done'];
+const sid191LiteralCollateral = ['git add *', 'git add *.mjs', 'git add src/*.mjs docs/*.md', 'cargo test -- *', 'git add src/{a,b}.ts', 'npm test -- *', "sh -c 'echo \"$1\"' _ hi", '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'git push origin feat/*', 'git log | while read l; do echo "$l"; done', '"$HOME/bin/tool" status', 'git checkout -b feat/$NAME'];
 for (const c of sid191LiteralCollateral) assert.ok(guardDenies(c), `SID-191 literal-only collateral (documented): ${c}`);
 for (const c of sid191LiteralCollateral.slice(0, 6)) assert.match(newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why ?? '', /spell the paths or words out/, `SID-191: the glob/brace deny says to spell it out: ${c}`);
 const sid191LiteralAllow = ['git log -g HEAD@{1}', "git log --format='{%H}'", 'git log --format={%H}', 'echo {a,b} *', 'ls src/*.ts | wc -l', 'for f in *.md; do git add "$f"; done', '[ -f x ] && git status', '[[ -n "$X" ]] && git status', 'git status # *x* {a,b}', 'eval "$(ssh-agent -s)"',
@@ -1287,9 +1484,12 @@ for (const base of baselines) {
 // SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
 {
   const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
-  const ours = new Set([...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral]);
-  const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))))].sort();
-  console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied${fresh.length ? ':\n  ' + fresh.map((c) => JSON.stringify(c)).join('\n  ') : ''}`);
+  const ours = new Set([...r32Ours, ...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral]);
+  const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))).map((c) => c.split(repo).join('<REPO>')).map((c) => (c.length > 500 ? `sha256:${createHash('sha256').update(c).digest('hex')}:${c.length}` : c)))].sort(); // the scratch repo path differs per run; entries over 500 chars are pinned by hash and length
+  // Exact list (scripts/sid191-collateral.json): a command that becomes newly denied, or stops being, fails here and the file is edited in review.
+  const pinned = JSON.parse(readFileSync(join(here, 'sid191-collateral.json'), 'utf8'));
+  assert.deepEqual(fresh, [...pinned].sort(), `SID-191 pinned collateral vs 91c6b08 changed (${fresh.length} now, ${pinned.length} pinned); review the diff and update scripts/sid191-collateral.json`);
+  console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied, all pinned in scripts/sid191-collateral.json`);
 }
 for (const [c, why] of ALLOWLIST) {
   assert.ok(everything.includes(c), `stale ALLOWLIST entry (not in the corpus): ${c} (${why})`);
