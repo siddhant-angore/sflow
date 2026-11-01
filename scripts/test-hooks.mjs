@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
@@ -295,8 +295,7 @@ sh(hookRepo, 'git worktree add -q -b wt wt');
 symlinkSync(join(hookRepo, '.git', 'hooks'), join(hookRepo, 'lnk'));
 const sep = realpathSync(makeScratch('harness-hookfile-sep-'));
 sh(sep, 'git init -q --separate-git-dir ../$(basename $PWD).gitdir w');
-trackScratch(`${sep}/../${sep.split('/').pop()}.gitdir`);
-const sepGit = join(dirname(sep), `${sep.split('/').pop()}.gitdir`);
+const sepGit = trackScratch(join(dirname(sep), `${basename(sep)}.gitdir`)); // resolved, not via sep/.., so cleanup still finds it after sep is gone
 const hookDeny = [[join(hookRepo, '.git/hooks/pre-commit'), hookRepo], ['.git/hooks/pre-push', hookRepo], [join(hookRepo, '.git/sflow-hooks/pre-push'), hookRepo],
   [join(hookRepo, '.git/worktrees/wt/hooks/pre-push'), hookRepo], [join(hookRepo, '.git/modules/sub/hooks/post-checkout'), hookRepo], [join(hookRepo, 'src/../.git/hooks/pre-commit'), hookRepo],
   [join(hookRepo, '.git') + '//hooks/pre-commit', hookRepo], ['src/../.git/./hooks/x', hookRepo], [join(hookRepo, 'lnk/pre-commit'), hookRepo], [join(hookRepo, '.git/hooks'), hookRepo],
