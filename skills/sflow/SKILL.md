@@ -35,6 +35,10 @@ Skills from all three sources are in `skills/`; `<sflow>/docs/skill-map.md` says
 
 The guard is always on, in every git repository: with no policy committed, `main`, `master` and the remote default branch are protected and merges are denied. The policy comes only from `.harness.json` on the base branch on origin; a working-tree or branch-only copy is ignored until a human merges it and runs `git fetch origin`, and the gate and the Stop hook run only once a policy is committed. Force pushes, pushes to a protected branch, discards, history rewrites, merges, releases, and GitHub write calls are refused; `.harness.json` and `.claude/settings*.json` are read-only to you, through the file tools and the shell (to propose a policy, put the JSON in the PR description for a human); `git push` and `gh pr create` run the `gate` commands first and scan the pushed range for secrets; the Stop hook lists unmet definition-of-done items once per repo state and, after three non-converging attempts, demands an auditable failure report instead of a fourth. Fix causes, never hooks. Every gate result and Stop decision is appended to `<git dir>/harness/runs.jsonl`; the Retro playbook reads it.
 
+## Usage limits
+
+Before large work (a swarm, a multi-file feature, a golden regen), check the remaining Claude Code and Grok Bot usage. Below about 15%, stop at a safe point, put the handoff note on the issue, and report the reset time in IST. The check, threshold and template are in `usage-handoff.md` beside this file.
+
 ## Where a failure lives
 
 | symptom | layer | file |
