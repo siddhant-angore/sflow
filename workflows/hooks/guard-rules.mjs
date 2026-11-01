@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { canon, clip, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, segments, sortOut, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
+import { canon, clip, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, quotesAreData, rawSegments, segments, sortOut, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
 const headRef = (r) => r === 'HEAD' || r === '@';
 // The protected branch a refspec pushes to (+ stripped, no colon means dst = src, HEAD and @ resolve to the current branch), or null. viaHead: the name came from the checkout, not from the text.
@@ -82,6 +82,44 @@ const NO_PUSH_DST = 'push destinations under refs/remotes/ or refs/replace/ can 
 const NO_FAST_IMPORT = "git fast-import can create or reset any ref (including refs/remotes/*, which locate the harness policy) and isn't needed for normal work; commit normally, or ask a human to run an import.";
 const NO_STDIN = "git update-ref --stdin can write any ref and its input can't be checked; run one `git update-ref refs/heads/<name> <commit>` per ref instead.";
 const NO_DISCOVERY_CFG = 'core.bare, core.repositoryformatversion, core.worktree, include.path and includeIf.* change how git finds and reads this repository, which would stop the harness from reading its policy. Leave them as they are; read them with `git config --get <key>`; if the repository config really needs changing, ask a human.';
+// SID-243: these name a program git runs on a diff, the push scan's driver read included. Git's rule: the subsection is everything between the first and last dot, so a driver's name may hold dots or spaces, or be empty.
+const NO_DIFF_DRIVER = 'diff.external and diff.<driver>.textconv/.command run a program on every diff, the push secret scan included, so setting or removing one is a human action. Read them with `git config --get diff.external`; `git diff --no-ext-diff` skips them.';
+export const NO_INFO_ATTRIBUTES = '.git/info/attributes can point any path at a diff driver or mark it -diff, in no commit a reviewer sees, so agents do not write it. Attributes for the project go in a committed .gitattributes; reading this file with cat or grep is fine.';
+const DRIVER_KEY = /^diff\.(?:external|[\s\S]*\.(?:textconv|command))$/i;
+const DRIVER_SECTION = /^diff(?:\.[\s\S]*)?$/i;
+const DRIVER_PARAM = /(?:^|[\s"'=])diff\.(?:external|[^='"]*\.(?:textconv|command))(?=$|[\s"'=])/i;
+// The same keys read off a whole line, for commands the guard doesn't parse (`docker exec c sh -c '...'`, `parallel`, `perl -e`). Quotes block it only when nothing on the line can run them.
+const DRIVER_TEXT = /(?:^|[\s"'`;&|(])(?:-c\s*|--config-env[=\s]\s*|GIT_CONFIG_KEY_\d+=)["']?diff\.(?:external|[^=\n]*?\.(?:textconv|command))["']?(?=[\s=;&|)"'`]|$)/i;
+// git config's long options. Git takes any unique prefix (`--unset-a`, `--fil`), and an option's value is not an option (`--comment --get k v` writes).
+const CONFIG_VALUE_OPTS = ['file', 'blob', 'type', 'default', 'comment', 'value', 'url'];
+const CONFIG_OPTS = [...CONFIG_VALUE_OPTS, 'global', 'system', 'local', 'worktree', 'get', 'get-all', 'get-regexp', 'get-urlmatch', 'get-color', 'get-colorbool', 'replace-all', 'add', 'unset', 'unset-all', 'rename-section', 'remove-section', 'list', 'edit', 'bool', 'int', 'bool-or-int', 'bool-or-str', 'path', 'expiry-date', 'no-type', 'null', 'name-only', 'show-origin', 'show-scope', 'includes', 'fixed-value', 'all', 'regexp'];
+const CONFIG_WRITES = new Set(['add', 'replace-all', 'unset', 'unset-all']), CONFIG_READS = new Set(['get', 'get-all', 'get-regexp', 'get-urlmatch', 'get-color', 'get-colorbool', 'list']);
+function configArgs(w) {
+  const opts = new Set(), pos = [];
+  for (let i = 0; i < w.length; i++) {
+    const t = w[i];
+    if (t === '--') { pos.push(...w.slice(i + 1)); break; }
+    if (t.startsWith('--')) {
+      const name = t.slice(2).split('=')[0], prefixed = CONFIG_OPTS.filter((o) => o.startsWith(name));
+      const opt = CONFIG_OPTS.includes(name) ? name : prefixed.length === 1 ? prefixed[0] : null;
+      if (CONFIG_VALUE_OPTS.includes(opt)) { if (!t.includes('=')) i++; } else if (opt) opts.add(opt);
+    } else if (/^-./.test(t)) {
+      for (let k = 1; k < t.length; k++) {
+        if (t[k] === 'f') { if (k + 1 === t.length) i++; break; }
+      }
+    } else pos.push(t);
+  }
+  return { opts, pos };
+}
+const driverConfigReason = (raw) => {
+  const { opts, pos } = configArgs(words(raw).slice(2).map((x) => x.replace(/`$/, ''))); // split() leaves a closing backtick on the last word
+  if ((opts.has('rename-section') || opts.has('remove-section') || ['rename-section', 'remove-section'].includes(pos[0])) && pos.some((x) => DRIVER_SECTION.test(x))) return NO_DIFF_DRIVER;
+  const k = pos.findIndex((x) => DRIVER_KEY.test(x));
+  if (k < 0) return null;
+  if ([...opts].some((o) => CONFIG_WRITES.has(o)) || ['set', 'unset'].includes(pos[0])) return NO_DIFF_DRIVER;
+  const reads = [...opts].some((o) => CONFIG_READS.has(o));
+  return !reads && pos.length > k + 1 ? NO_DIFF_DRIVER : null;
+};
 const DISCOVERY_KEY = /^(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\..+)$/i;
 const DISCOVERY_ENV = /(^|[\s"'=])(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)(?=$|[\s"'=])/i;
 const FETCH_KEY = /remote\.[^\s='"]+\.fetch\b/i;
@@ -148,7 +186,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge, unreadable },
       const reads = a.some((x) => /^(--get|--get-all|--get-regexp|--get-urlmatch|-l|--list)$/.test(x)) || pos[0] === 'get';
       const hit = (re) => pos.findIndex((x) => re.test(x));
       const bad = (re, msg) => { const k = hit(re); return k >= 0 && (writes || (!reads && pos.length > k + 1)) ? msg : null; };
-      return bad(/^remote\..+\.fetch$/i, NO_FETCH_CFG) ?? bad(DISCOVERY_KEY, NO_DISCOVERY_CFG) ?? bad(/^core\.hookspath$/i, NO_HOOKS_CFG) ?? bad(/^sflow\./i, NO_HOOKS_CFG);
+      return bad(/^remote\..+\.fetch$/i, NO_FETCH_CFG) ?? bad(DISCOVERY_KEY, NO_DISCOVERY_CFG) ?? bad(/^core\.hookspath$/i, NO_HOOKS_CFG) ?? bad(/^sflow\./i, NO_HOOKS_CFG) ?? driverConfigReason(raw);
     }],
     [/^gh\s+api\b.*(\s-X\s*(PUT|POST|PATCH|DELETE)|\s--method\s*(PUT|POST|PATCH|DELETE)|\s--input\b|\s-F\b|\s-f\b)/, 'write calls to the GitHub API are not allowed from an agent; use gh pr create/edit/comment'],
     [/^gh\s+(release|repo\s+delete|repo\s+archive|secret|variable|workflow\s+(run|enable|disable))\b/, 'releases, repo lifecycle, secrets, and workflow triggers are human actions'],
@@ -169,9 +207,11 @@ export function envReason(cmd) {
   if (/core\.hookspath/i.test(cmd)) return 'overriding core.hooksPath disables the project hooks'; // i: git config keys are case-insensitive (core.hookspath, CORE.HOOKSPATH work in -c, --config-env, GIT_CONFIG_KEY_n and GIT_CONFIG_PARAMETERS)
   if (/(^|\s)-c\s*["']?remote\.[^\s=]+\.fetch\s*=|--config-env[=\s]+["']?remote\.[^\s=]+\.fetch\b|\bGIT_CONFIG_KEY_\d+=["']?remote\.[^\s=]+\.fetch\b/i.test(cmd)) return NO_FETCH_OVERRIDE;
   if (/(^|\s)-c\s*["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)["']?(\s*=|\s|$)|--config-env[=\s]+["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s=]+)\s*=|\bGIT_CONFIG_KEY_\d+=["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.\S+?)["']?(\s|$)/i.test(cmd)) return NO_DISCOVERY_CFG;
+  if (DRIVER_TEXT.test(cmd) && !quotesAreData(cmd)) return NO_DIFF_DRIVER;
   const params = /\bGIT_CONFIG_PARAMETERS=("[^"]*"|'[^']*'|\S*)/.exec(cmd);
   if (params && FETCH_KEY.test(params[1])) return NO_FETCH_OVERRIDE;
   if (params && DISCOVERY_ENV.test(params[1])) return NO_DISCOVERY_CFG;
+  if (params && DRIVER_PARAM.test(params[1]) && !quotesAreData(cmd)) return NO_DIFF_DRIVER;
   if (/\b(HUSKY|LEFTHOOK|SKIP_HOOKS|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG)=/.test(cmd)) return 'disabling commit hooks by environment is not allowed';
   const writes = gitWrites(cmd).map((w) => w.kind);
   if (writes.includes('config')) return 'writing a git config file directly can make git run commands (core.pager, core.sshCommand, aliases, filters); use `git config <key> <value>` instead';
@@ -542,13 +582,47 @@ export function hiddenConfigReason(cmd) {
   return null;
 }
 
+// SID-243: a per-command override of a driver key (git -c, --config-env, GIT_CONFIG_KEY_n, GIT_CONFIG_PARAMETERS). normalize() drops git's global options and VAR=x prefixes, so this reads every piece as written, each with its own quoting resolved: the line's, a $( ), a heredoc or text fed to a shell.
+const GIT_GLOBAL_VALUE = /^(-C|--git-dir|--work-tree|--namespace|--super-prefix|--attr-source|--exec-path)$/;
+const driverOverride = (v) => DRIVER_KEY.test(v) || (v.includes('=') && (DRIVER_KEY.test(v.slice(0, v.indexOf('='))) || DRIVER_KEY.test(v.slice(0, v.lastIndexOf('='))))); // -c cuts at the first =, --config-env at the last
+function driverOverrideReason(cmd) {
+  for (const t of new Set([cmd, ...rawSegments(cmd)])) for (const { w } of simpleCommands(canon(t).text)) {
+    for (const x of w) {
+      const key = /^GIT_CONFIG_KEY_\d+=([\s\S]*)$/.exec(x)?.[1];
+      if ((key !== undefined && DRIVER_KEY.test(key)) || (x.startsWith('GIT_CONFIG_PARAMETERS=') && DRIVER_PARAM.test(x))) return NO_DIFF_DRIVER;
+    }
+    const c = peel(w.slice(w.findIndex((x) => !SKIP_HEAD.has(x))));
+    if (base(c[0] ?? '') !== 'git') continue;
+    for (let j = 1; j < c.length && c[j].startsWith('-'); j++) {
+      const x = c[j];
+      const val = x === '-c' || x === '--config-env' ? c[++j] ?? '' : x.startsWith('--config-env=') ? x.slice(13) : null;
+      if (val !== null && driverOverride(val)) return NO_DIFF_DRIVER;
+      if (GIT_GLOBAL_VALUE.test(x)) j++;
+    }
+  }
+  return null;
+}
+// SID-243: a command that names the file and isn't known to only read it. sed (w), awk (>), interpreters, editors, curl -o and unknown commands could write it; the write scan already reads the redirects, tee, cp, dd, sort -o and git --output of these.
+const ATTR_READERS = new Set(['cat', 'grep', 'rg', 'head', 'tail', 'wc', 'ls', 'stat', 'file', 'test', '[', '[[', 'diff', 'cmp', 'less', 'more', 'echo', 'printf', 'cut', 'tr', 'sort', 'uniq', 'cp', 'dd', 'md5sum', 'sha1sum', 'sha256sum', 'git', 'gh', 'cd', 'pwd', 'true', 'false', ':', 'sh', 'bash', 'zsh', 'dash', 'ksh', 'eval']); // a shell's script is a piece of its own
+const ATTR_MENTION = /\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?info\/attributes(?![\w.-])/i;
+function attrMentionReason(cmd) {
+  for (const t of new Set([cmd, ...rawSegments(cmd)])) {
+    if (gitWrites(t).some((x) => x.kind === 'attributes')) return NO_INFO_ATTRIBUTES;
+    for (const { w } of simpleCommands(canon(t).text)) {
+      const c = peel(w.slice(w.findIndex((x) => !SKIP_HEAD.has(x))));
+      if (!ATTR_READERS.has(base(c[0] ?? '')) && w.some((x) => ATTR_MENTION.test(posix.normalize(x)))) return NO_INFO_ATTRIBUTES;
+    }
+  }
+  return null;
+}
+
 // SID-191: the whole-line checks, on the command as written and with its quoting resolved. A quote, $( ) or backtick that never closes
 // can't be read, so it fails closed.
 export const NO_OPEN = "a quote, $( ) or backtick in this command is never closed, so the guard can't tell what runs; close it";
 export function lineReason(cmd) {
   const C = canon(cmd);
   if (C.open) return NO_OPEN;
-  return [...new Set([cmd, C.text])].map(envReason).find(Boolean) ?? hiddenConfigReason(cmd);
+  return [...new Set([cmd, C.text])].map(envReason).find(Boolean) ?? hiddenConfigReason(cmd) ?? driverOverrideReason(cmd) ?? attrMentionReason(cmd);
 }
 // SID-191 review B1/B5: text another shell runs, with its quoting resolved the way that shell receives it. `bash -c 'P' a b` runs P with $0=a
 // $1=b; `eval A B` runs "A B"; a function defined on the line whose body uses its arguments (`p(){ "$@"; }`) runs its body with the call's

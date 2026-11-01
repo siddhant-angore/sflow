@@ -4,8 +4,8 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { canon, config, currentBranch, deny, GATE_RECORD_DIR, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record } from './lib.mjs';
-import { analyzeWrites, guardSegments, lineReason, retargets, segmentReason } from './guard-rules.mjs';
+import { canon, config, currentBranch, deny, GATE_RECORD_DIR, gateEnv, git, GIT_FILE_DENY, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record } from './lib.mjs';
+import { analyzeWrites, guardSegments, lineReason, NO_INFO_ATTRIBUTES, retargets, segmentReason } from './guard-rules.mjs';
 
 const ev = readEvent();
 if (ev.tool_name !== 'Bash') process.exit(0);
@@ -41,6 +41,8 @@ try {
     const tp = t.replace(/^~(?=\/|$)/, homedir()), at = ev.cwd ?? cfg.root ?? process.cwd();
     let why; try { why = hookFileReason(tp, at); } catch { why = hookFileName(tp, at)?.why; } // git can't read the repo (shell writes there stay allowed as before): the name check still holds; a path that can't be resolved throws and denies
     if (why === HOOK_FILE_DENY) { deny(`harness guard: ${why}\n  (${t} resolves into a hooks dir)\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
+    // SID-243: a write that lands on info/attributes through a link, whatever the git dir is called.
+    if (why === GIT_FILE_DENY && (hookFileName(tp, at)?.seen ?? []).some((p) => basename(p).toLowerCase() === 'attributes')) { deny(`harness guard: ${NO_INFO_ATTRIBUTES}\n  (${t} resolves to it)\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
   }
   // A policy-named source copied into a directory lands as <dir>/<name>. Copying FROM a policy file is a read: deny only when that landing is the repo-root .harness.json or a .claude/settings*.json. Dir = trailing slash, ., .., -t, or an existing directory; resolved against the event cwd (and any `cd` earlier in the command).
   const tilde = (x) => x.replace(/^~(?=\/|$)/, homedir());
@@ -86,7 +88,7 @@ try {
     const command = raw.replaceAll('{base}', base);
     const started = Date.now();
     try {
-      execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], env: NO_REPLACE_ENV, timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
+      execSync(command, { cwd: cfg.root, stdio: ['ignore', 'pipe', 'pipe'], env: gateEnv(cfg.root), timeout: Math.max(1000, deadline - Date.now()), maxBuffer: 256 << 20 });
       log(`pass ${Date.now() - started} ${command}`);
     } catch (e) {
       log(`fail ${Date.now() - started} ${command}`);

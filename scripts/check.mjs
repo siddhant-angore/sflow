@@ -22,6 +22,7 @@ try {
   run('claude', ['plugin', 'validate', '.']);
   run('claude', ['plugin', 'validate', 'domains/flutter']);
   run('node', ['scripts/test-hooks.mjs']);
+  run('node', ['scripts/test-diff-guard.mjs']);
   run('node', ['scripts/test-eval-brake.mjs']);
   run('node', ['scripts/test-upstream.mjs']);
   run('node', ['scripts/test-vendor.mjs']);

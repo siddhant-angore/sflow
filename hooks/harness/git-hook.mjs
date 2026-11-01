@@ -9,7 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config, GATE_RECORD_DIR, gitDir, NO_REPLACE_ENV, scanRead, secretsInDiff, STAGED_DRIVER_FLAGS } from './lib.mjs';
+import { config, GATE_RECORD_DIR, GIT_GLOBALS, gitDir, NO_REPLACE_ENV, scanRead, secretsInDiff, STAGED_DRIVER_FLAGS } from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ZERO = /^0+$/;
@@ -19,7 +19,7 @@ const SCRUB = /^GIT_(DIR|WORK_TREE|INDEX_FILE|PREFIX|OBJECT_DIRECTORY|ALTERNATE_
 export const cleanEnv = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([k]) => !SCRUB.test(k)));
 
 const fail = (msg) => { process.stderr.write(`sflow ${process.argv[2] ?? 'git'} hook: ${msg}\n`); process.exit(1); };
-const gitOut = (cwd, ...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: cleanEnv(NO_REPLACE_ENV), stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, '');
+const gitOut = (cwd, ...args) => execFileSync('git', [...GIT_GLOBALS, ...args], { cwd, env: cleanEnv(NO_REPLACE_ENV), stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, '');
 const tryGit = (cwd, ...args) => { try { return gitOut(cwd, ...args); } catch { return null; } };
 
 export const PREV_FILE = 'previous-hooks-path';
