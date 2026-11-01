@@ -70,6 +70,8 @@ const SID247_QUOTED_ATTACKS = [
   'git >f --namespace"" merge commit -n -m x', 'git 2>&1 -"C" . merge -n main', '"env" git -"C" . merge -n main', 'g"i"t -"C" . merge -n main', '\\git --namespace"" x commit -n -m x', 'timeout 5 git --namespace"" x commit -n -m x', 'sudo -u x git --namespace"" x commit -n -m x', 'xargs git --namespace"" x commit -n -m x', 'chrt -f 5 git -"C" . merge -n main',
   `b"ash" -c 'git -"C" . merge -n main'`, `eval 'git -"C" . merge -n main'`, `echo 'git -"C" . merge -n main' | sh`, 'bash <<E\ngit -"C" . merge -n main\nE', 'echo $(git -"C" . merge -n main)', `bash -c "bash -c 'git -\\"C\\" . merge -n main'"`, 'true && { git -"C" . merge -n main; }',
 ];
+// Found with real git 2.47.3 while fixing that review: plain --shallow-file takes a value too, and gitSub's list doesn't have it, so the same line hides a real hook skip with no quote at all. The merge and rebase lines were denied on e7d30ea and allowed on 704e88f; the x line was already allowed on e7d30ea. Closed as a tightening.
+SID247_QUOTED_ATTACKS.push('git --shallow-file merge commit -n -m x', 'git --shallow-file merge commit -m x -n', 'git --shallow-file rebase commit -n -m x', 'git --shallow-file x commit -n -m x', 'env git --shallow-file merge commit -n -m x', `bash -c 'git --shallow-file merge commit -n -m x'`, '/usr/bin/git --shallow-file merge commit -nm x', 'git merge -n main && git --shallow-file merge commit -n -m x', 'git -C . --shallow-file merge commit -n -m x', 'git --shallow-file f merge -n main');
 // Newly denied by the same rule, with no merge or commit to hide: pinned collateral. Each could be written plainly, and the deny says how.
 const SID247_QUOTED_COLLATERAL = ['git --git-dir="my dir" status', 'git --namespace="x" status', 'git --git-dir=$D status', 'git -"C" . status', 'git "--no-pager" status', 'echo git "-C"'];
 const SID247_MUST_ALLOW = [
@@ -166,7 +168,7 @@ const SID247_GEN_DENY = sid247Gen([
   [(f) => `git merge -n ${f} main`, ['-x']],
 ]);
 // CTO review 5730668319: each quoted or escaped global option x merge, rebase x a hidden commit x the wrappers, and in front of the generated allow set.
-const SID247_QUOTED_OPTS = ['--namespace""', '-"C"', '-\\C', '--git-dir""', '--work-tree""', '-"-namespace"', '--namespac\\e'];
+const SID247_QUOTED_OPTS = ['--namespace""', '-"C"', '-\\C', '--git-dir""', '--work-tree""', '-"-namespace"', '--namespac\\e', '--shallow-file'];
 const SID247_QUOTED_WRAPS = [(x) => x, (x) => `bash -c ${sid247Nest(x)}`, (x) => `sh -c ${sid247Nest(x)}`, (x) => `env ${x}`, (x) => `command ${x}`, (x) => x.replace(/^git /, '/usr/bin/git '), (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `git merge -n main && ${x}`];
 const SID247_GEN_QUOTED = [
   ...SID247_QUOTED_OPTS.flatMap((o) => ['merge', 'rebase'].flatMap((s) => ['commit -n -m x', 'commit -m x -n', 'commit -nm x'].flatMap((b) => SID247_QUOTED_WRAPS.map((w) => w(`git ${o} ${s} ${b}`))))),
