@@ -69,6 +69,9 @@ const NO_SET_HEAD = "harness policy is read from origin/HEAD's branch, so it is 
 const NO_SYMREF = 'refs/remotes/* locate the harness policy, so they are not written locally. Read them with `git symbolic-ref --short refs/remotes/origin/HEAD`; sync them with `git fetch origin` or `git remote set-head origin --auto`.';
 const NO_UPDATE_REF = 'refs/remotes/* locate the harness policy, so they are not written locally. Update them with `git fetch origin`; to move a local branch use `git update-ref refs/heads/<name> <commit>`.';
 const NO_FETCH_DST = 'refs/remotes/* locate the harness policy, so fetch may not write them through an explicit refspec. Use `git fetch origin <branch>` (it updates origin/<branch> itself) or fetch into a local branch: `git fetch origin <branch>:<local-branch>`.';
+// SID-147: the git hooks outside Claude live behind core.hooksPath; dropping the core section, or editing config in an editor, turns them off. sflow.* keys are theirs too.
+const NO_HOOKS_CFG = "removing or renaming the core section, changing core.hooksPath or writing sflow.* keys turns off the git hooks that run outside Claude (SID-147); read settings with `git config --get <key>`; changing them is a human action.";
+const NO_EDIT_CFG = '`git config --edit` can change any key, core.hooksPath included; set an ordinary key with `git config <key> <value>`.';
 const NO_FETCH_CFG = 'remote.<name>.fetch decides what refs/remotes/* hold, which locates the harness policy. Fetch a branch with `git fetch origin <branch>`; read the setting with `git config --get-all remote.origin.fetch`; changing it is a human action.';
 const NO_FETCH_OVERRIDE = 'a per-command remote.<name>.fetch override can rewrite refs/remotes/*, which locate the harness policy. Use `git fetch origin <branch>` instead; other -c settings are fine.';
 const NO_REPO_EDIT = 'repository settings (including the default branch, which locates the harness policy) are a repo-admin action on GitHub. Read them with `gh repo view --json <fields>`; ask a human to change them.';
@@ -138,11 +141,14 @@ export function reason(raw, { protectedBranches: prot, allowMerge, unreadable },
     [/^git\s+(fetch|pull)\b/, (a) => { const dsts = a.filter((x) => !x.startsWith('-')).map((x) => x.replace(/^\+/, '').split(':').slice(1).join(':')); return dsts.some(isReplaceRef) ? NO_REPLACE : dsts.some(isRemoteRef) ? NO_FETCH_DST : null; }],
     [/^git\s+config\b/, (a) => {
       const pos = a.filter((x, i) => !x.startsWith('-') && !/^(--file|-f|--blob)$/.test(a[i - 1] ?? ''));
-      const writes = a.some((x) => /^--(add|replace-all|unset|unset-all)$/.test(x)) || ['set', 'unset'].includes(pos[0]);
+      if (a.some((x) => /^(-e|--edit)$/.test(x)) || pos[0] === 'edit') return NO_EDIT_CFG;
+      const sections = a.some((x) => /^--(remove|rename)-section$/.test(x)) || ['remove-section', 'rename-section'].includes(pos[0]);
+      if (sections && pos.some((x) => /^(core|sflow)$/i.test(x))) return NO_HOOKS_CFG;
+      const writes = sections || a.some((x) => /^--(add|replace-all|unset|unset-all)$/.test(x)) || ['set', 'unset'].includes(pos[0]);
       const reads = a.some((x) => /^(--get|--get-all|--get-regexp|--get-urlmatch|-l|--list)$/.test(x)) || pos[0] === 'get';
       const hit = (re) => pos.findIndex((x) => re.test(x));
       const bad = (re, msg) => { const k = hit(re); return k >= 0 && (writes || (!reads && pos.length > k + 1)) ? msg : null; };
-      return bad(/^remote\..+\.fetch$/i, NO_FETCH_CFG) ?? bad(DISCOVERY_KEY, NO_DISCOVERY_CFG);
+      return bad(/^remote\..+\.fetch$/i, NO_FETCH_CFG) ?? bad(DISCOVERY_KEY, NO_DISCOVERY_CFG) ?? bad(/^core\.hookspath$/i, NO_HOOKS_CFG) ?? bad(/^sflow\./i, NO_HOOKS_CFG);
     }],
     [/^gh\s+api\b.*(\s-X\s*(PUT|POST|PATCH|DELETE)|\s--method\s*(PUT|POST|PATCH|DELETE)|\s--input\b|\s-F\b|\s-f\b)/, 'write calls to the GitHub API are not allowed from an agent; use gh pr create/edit/comment'],
     [/^gh\s+(release|repo\s+delete|repo\s+archive|secret|variable|workflow\s+(run|enable|disable))\b/, 'releases, repo lifecycle, secrets, and workflow triggers are human actions'],
@@ -160,7 +166,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge, unreadable },
 
 export function envReason(cmd) {
   // update-ref --stdin is denied outright in reason(), whatever its input.
-  if (/core\.hooksPath/.test(cmd)) return 'overriding core.hooksPath disables the project hooks';
+  if (/core\.hookspath/i.test(cmd)) return 'overriding core.hooksPath disables the project hooks'; // i: git config keys are case-insensitive (core.hookspath, CORE.HOOKSPATH work in -c, --config-env, GIT_CONFIG_KEY_n and GIT_CONFIG_PARAMETERS)
   if (/(^|\s)-c\s*["']?remote\.[^\s=]+\.fetch\s*=|--config-env[=\s]+["']?remote\.[^\s=]+\.fetch\b|\bGIT_CONFIG_KEY_\d+=["']?remote\.[^\s=]+\.fetch\b/i.test(cmd)) return NO_FETCH_OVERRIDE;
   if (/(^|\s)-c\s*["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)["']?(\s*=|\s|$)|--config-env[=\s]+["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s=]+)\s*=|\bGIT_CONFIG_KEY_\d+=["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.\S+?)["']?(\s|$)/i.test(cmd)) return NO_DISCOVERY_CFG;
   const params = /\bGIT_CONFIG_PARAMETERS=("[^"]*"|'[^']*'|\S*)/.exec(cmd);

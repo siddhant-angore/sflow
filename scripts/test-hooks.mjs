@@ -99,9 +99,10 @@ const sid191Allow = [
 // The price of failing closed (collateral, measured against main 91c6b08, which allows every one): an expansion in a git argument that a probe
 // shows could be a denied value, and a message that is exactly a flag. Write the value out literally instead.
 const sid191Collateral = ['git checkout $BRANCH', 'git checkout "$BRANCH"', 'git switch "$BRANCH"', 'git restore "$F"', 'git restore --staged "$F"', 'git reset $SHA', 'git reset --soft "$SHA"', 'git merge $B', 'git branch -d $B',
-  'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's"];
+  'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's",
+  'git config user.name "$NAME"'] // since #24 a `-e` anywhere in git config opens the editor, and a quoted "$NAME" could be -e;
 for (const c of sid191Collateral) assert.ok(guardDenies(c), `SID-191 collateral (documented, fails closed): ${c}`);
-const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git config user.name "$NAME"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'cd "$D" && ls'];
+const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'cd "$D" && ls'];
 for (const c of sid191Kept) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 for (const c of sid191Allow) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 // Generated quote-split suite: every word of each guarded command, split in the middle (or wholly wrapped) by each quoting style, stays denied.
@@ -269,6 +270,30 @@ for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'ech
 for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
+// SID-147 review (5725928282): config changes that turn off the git hooks outside Claude, or point their chaining somewhere an agent chose, are denied.
+const HOOKS_CFG = /turns off the git hooks that run outside Claude|`git config --edit` can change any key|overriding core\.hooksPath disables the project hooks/; // a core.hooksPath key in any case hits envReason first
+for (const c of ['git config --remove-section core', 'git config --rename-section core x', 'git config --rename-section x core', 'git config remove-section core', 'git config rename-section core x',
+  'git config --local --remove-section CORE', 'git config -f .git/config --remove-section core', 'git -C . config --remove-section core', 'git -c user.name=x config --remove-section "core"',
+  'git config --unset-all core.hookspath', 'git config core.HOOKSPATH /tmp/x', 'git config unset core.HooksPath', 'git config -e', 'git config --edit', 'git config --global --edit', 'git config edit',
+  'git config sflow.previousHooksPath /tmp/evil', 'git config --add sflow.x y', 'git config set sflow.previousHooksPath /tmp/evil', 'git config --unset sflow.previousHooksPath', 'git config --remove-section sflow',
+  'git config --local --rename-section sflow x', 'true && git config SFLOW.previousHooksPath /tmp/evil'])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_CFG, `SID-147 must deny: ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git config --get sflow.previousHooksPath', 'git config --remove-section alias', 'git config --rename-section alias.x alias.y', 'git config user.name x', 'git config --list'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-147 review (CTO, Nov 1): core.hooksPath overrides in any letter case. git matches config keys case-insensitively, so each of these ran a planted
+// hook end to end before the `i` flag. Env var NAMES are case-sensitive (git ignores git_config_key_0), so lowercase names are not a bypass; they are
+// denied anyway because the text still names the key. Reading core.hooksPath (`git config --get core.hookspath`) is denied too, as before for the
+// camel-case spelling: over-broad, tracked on SID-161.
+const HOOKS_OVR = /^harness guard: overriding core\.hooksPath disables the project hooks/;
+for (const k of ['core.hooksPath', 'core.hookspath', 'CORE.HOOKSPATH', 'core.HooksPath', 'Core.hookSpath'])
+  for (const c of [`git -c ${k}=/tmp/evil commit -m x`, `git -c "${k}=/tmp/evil" commit -m x`, `git -c '${k}'=/tmp/evil push origin feat`, `HP=/tmp/evil git --config-env=${k}=HP commit -m x`,
+    `HP=/tmp/evil git --config-env ${k}=HP commit -m x`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`,
+    `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`, `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil; git commit -m x`,
+    `GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git commit -m x`, `env GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git push origin feat`, `export GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" && git commit -m x`,
+    `git_config_count=1 git_config_key_0=${k} git_config_value_0=/tmp/evil git commit -m x`, `git_config_parameters="'${k}'='/tmp/evil'" git commit -m x`])
+    assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_OVR, `SID-147 must deny (any case): ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git -c core.editor=vim commit -m x', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git commit -m x', 'git -c core.autocrlf=false status', 'git config --get core.editor'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 // SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
 const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;
 const unhookDeny = ['rm -rf .git/hooks', 'rm -f .git/hooks/pre-push', 'mv .git/hooks /tmp/x', 'rm -rf .git/sflow-hooks', 'rm .git/sflow-hooks/pre-push', 'rm -rf .husky', 'rm -rf .husky/', 'rm .husky/pre-commit',
