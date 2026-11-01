@@ -15,6 +15,8 @@
     "test:model-budget": "node scripts/test-model-budget.mjs",
     "refresh-install": "node scripts/refresh-install.mjs",
     "test:refresh-install": "node scripts/test-refresh-install.mjs",
+    "hooks": "node scripts/hooks.mjs",
+    "test:git-hooks": "node scripts/test-git-hooks.mjs",
     "upstream": "node scripts/upstream.mjs"
   }
 }

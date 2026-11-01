@@ -357,7 +357,7 @@ const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_
 
 // Shell writes into a git directory: [{ path, kind }], kind config | hooks | info | modules. Git runs what such files hold (core.pager, aliases, hooks), so text quoted in a command that writes them is not data.
 // Works on a de-quoted copy: quoted characters are hidden (private-use code points) so a quoted `;`, `>` or space never splits or redirects. Reads (cat, grep, cp from, sed without -i) are not writes.
-const KIND_RES = [['hooks', /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/)?hooks(?:\/|$)/], ['modules', /(?:^|\/)[^\/\s]*\.git\/modules\/.+\/config$/], ['config', /(?:^|\/)[^\/\s]*\.git\/(?:config(?:\.worktree)?|worktrees\/[^\/]+\/config\.worktree)$/], ['info', /(?:^|\/)[^\/\s]*\.git\/info\//], ['config', /(?:^|\/)\.gitconfig$|(?:^|\/)\.config\/git\/config$|^\$\{?XDG_CONFIG_HOME\}?\/git\/config$|^\/etc\/gitconfig$/]]; // the last is global/system config: ~/.gitconfig, ~/.config/git/config, $XDG_CONFIG_HOME/git/config, /etc/gitconfig
+const KIND_RES = [['hooks', /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:sflow-)?hooks(?:\/|$)/], ['modules', /(?:^|\/)[^\/\s]*\.git\/modules\/.+\/config$/], ['config', /(?:^|\/)[^\/\s]*\.git\/(?:config(?:\.worktree)?|worktrees\/[^\/]+\/config\.worktree)$/], ['info', /(?:^|\/)[^\/\s]*\.git\/info\//], ['config', /(?:^|\/)\.gitconfig$|(?:^|\/)\.config\/git\/config$|^\$\{?XDG_CONFIG_HOME\}?\/git\/config$|^\/etc\/gitconfig$/]]; // the last is global/system config: ~/.gitconfig, ~/.config/git/config, $XDG_CONFIG_HOME/git/config, /etc/gitconfig
 const hide = (c) => (c.charCodeAt(0) < 256 ? String.fromCharCode(0xE000 + c.charCodeAt(0)) : c), show = (s) => s.replace(/[\uE000-\uE0FF]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xE000));
 function dequote(s) { // q: s single, d double, a $'..'
   let out = '', q = null;
@@ -374,9 +374,23 @@ function dequote(s) { // q: s single, d double, a $'..'
   return out;
 }
 const GIT_SEP = /&&|\|\||;|\n|`|[()]|(?<!>)\||(?<![<>&\d])&(?![>&])/, GIT_REDIR = /(?<![-=])\d*(?:&>>?|>>|>\||<>|>&|>)\s*([^\s<>|&;()]+)/g;
-const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|info|modules\/.+))?\/*$/, GIT_CMDS = new Set(['sort', 'uniq', 'git', 'tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
+const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|sflow-hooks|info|modules\/.+))?\/*$|(?:^|\/)\.husky\/*$/, GIT_CMDS = new Set(['sort', 'uniq', 'git', 'tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
 const GIT_WRAP = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'time', 'timeout', 'stdbuf', 'ionice', 'xargs']), GIT_KW = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const NO_FILE = /^\/dev\/(?:null|stdout|stderr|tty)$/;
+// SID-155: removing, moving or un-executing a git hook turns off the guards that run outside Claude (SID-147). The hooks dirs: .git/hooks (also a
+// submodule's or a linked worktree's), .git/sflow-hooks (SID-147's core.hooksPath stubs) and .husky. A glob that could match one fails closed.
+const RM_CMDS = new Set(['rm', 'unlink', 'rmdir', 'shred', 'find', 'chmod']);
+const HOOK_DIR = /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:sflow-)?hooks(?:\/|$)|(?:^|\/)\.husky(?:\/|$)/;
+const globPart = (pat, name) => { // one path component; a leading dot is matched only by a literal dot, as in the shell
+  if (!/[*?[]/.test(pat)) return pat === name;
+  if (name.startsWith('.') && !pat.startsWith('.')) return false;
+  try { return new RegExp(`^${pat.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.').replace(/\[!/g, '[^')}$`).test(name); } catch { return true; } // an unparseable class fails closed
+};
+const hookGlob = (p) => {
+  if (!/[*?[]/.test(p)) return false;
+  const c = p.split('/');
+  return c.some((x, i) => globPart(x, '.husky') || (globPart(x, '.git') && i + 1 < c.length && ['hooks', 'sflow-hooks'].some((h) => globPart(c[i + 1], h))));
+};
 // Output files named by sort (-o FILE, -oFILE, clusters like -uo FILE, --output and its unique abbreviations) and uniq (second operand). Both write the file, so they count as file writes.
 export function sortOut(args) {
   const out = [];
@@ -407,7 +421,7 @@ export function uniqOut(args) {
 }
 // One pass over one string: { writes: git-dir/config writes as [{ path, kind }], files: every file it writes }. Commands inside $( ) in a quoted string are hidden here; scanAll adds them.
 function scan(cmd) {
-  const text = cmd.replace(/\\\n/g, '').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
+  const text = cmd.replace(/\\\n/g, '').replace(/\$\(\s*git\s+rev-parse\s+--git-path\s+hooks\s*\)|`\s*git\s+rev-parse\s+--git-path\s+hooks\s*`/g, '.git/hooks').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--git-common-dir\s*\)|`\s*git\s+rev-parse\s+--git-common-dir\s*`|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
   const dq = dequote(text), base = (x) => x.replace(/^.*\//, '');
   const dirs = [...show(dq).matchAll(/(?:^|[\s;&|(`])(?:GIT_DIR=|--git-dir[=\s]\s*)([^\s;&|)`]+)/g)].map((m) => m[1].replace(/\/+$/, '')).filter(Boolean); // GIT_DIR=X, --git-dir X: X/config is a git config
   const writes = [], files = []; let cwd = null;
@@ -417,12 +431,27 @@ function scan(cmd) {
     for (const p of cwd && !/^[\/~$]/.test(t) ? [t, `${cwd}/${t.replace(/^\.\//, '')}`] : [t]) { const kind = KIND_RES.find(([, re]) => re.test(p))?.[0]; if (kind) return void writes.push({ path: p, kind }); }
   };
   const put = (t) => { if (!NO_FILE.test(show(t))) files.push(show(t)); hit(t); };
+  const unhook = (t) => { // SID-155: t is removed, moved away or has its mode changed
+    t = show(t).replace(/\/{2,}/g, '/').replace(/\/(?:\.\/)+/g, '/').replace(/\/+$/, '');
+    const d = dirs.find((x) => t === x || t.startsWith(`${x}/`)); if (d) t = `.git${t.slice(d.length)}`;
+    for (const p of cwd && !/^[\/~$]/.test(t) ? [t, `${cwd}/${t.replace(/^\.\//, '')}`] : [t]) if (HOOK_DIR.test(p) || hookGlob(p)) return void writes.push({ path: p, kind: 'unhook' });
+  };
   for (const seg of dq.split(GIT_SEP)) {
     for (const m of seg.matchAll(GIT_REDIR)) if (!(/&/.test(m[0].slice(0, m[0].length - m[1].length)) && /^(?:\d+-?|-)$/.test(m[1]))) put(m[1]); // `2>&1` duplicates a descriptor, it writes no file
     const w = seg.replace(GIT_REDIR, ' ').split(/\s+/).filter(Boolean).map(show);
     while (w.length && (/^\w+=/.test(w[0]) || GIT_KW.has(w[0]))) w.shift();
     if (!w.length) continue;
     if (base(w[0]) === 'cd' || base(w[0]) === 'pushd') { const d = w.slice(1).find((x) => !x.startsWith('-')); cwd = d && GIT_CD.test(d) ? d.replace(/\/+$/, '') : null; continue; }
+    const rmAt = RM_CMDS.has(base(w[0])) ? 0 : GIT_WRAP.has(base(w[0])) ? w.findIndex((x, j) => j > 0 && RM_CMDS.has(base(x))) : -1;
+    if (rmAt >= 0) {
+      const rname = base(w[rmAt]), rargs = w.slice(rmAt + 1);
+      if (rname === 'find') { // find P... -delete / -exec ...: the start paths go
+        const starts = []; for (const a of rargs) { if (/^[-(!]/.test(a)) break; starts.push(a); }
+        if (rargs.some((a) => /^-(?:delete|exec|execdir|ok|okdir)$/.test(a))) (starts.length ? starts : ['.']).forEach(unhook);
+      } else if (rname === 'chmod') { const m = rargs.findIndex((a) => !/^-(?:[Rcfv]+|-[a-z-]+(?:=.*)?)$/.test(a)); rargs.slice(m + 1).forEach(unhook); } // the first non-option word is the mode (-x included)
+      else rargs.filter((a) => !a.startsWith('-')).forEach(unhook);
+      // No `continue`: a wrapper line (`env tee .git/hooks/x rm`) still gets the GIT_CMDS write scan below. rm/unlink/... are not GIT_CMDS, so nothing double-counts.
+    }
     const at = GIT_CMDS.has(base(w[0])) ? 0 : GIT_WRAP.has(base(w[0])) ? w.findIndex((x, j) => j > 0 && GIT_CMDS.has(base(x))) : -1;
     if (at < 0) continue;
     const name = base(w[at]), args = w.slice(at + 1), operands = args.filter((a) => !a.startsWith('-'));
@@ -436,6 +465,7 @@ function scan(cmd) {
       const j = args.findIndex((a) => /^-[a-zA-Z]*t$/.test(a) || a === '--target-directory'), eq = args.find((a) => a.startsWith('--target-directory='));
       const dest = eq ? eq.slice(19) : j >= 0 ? args[j + 1] : operands.at(-1);
       if (dest) put(dest);
+      if (name === 'mv') (eq || j >= 0 ? operands.filter((o) => o !== dest) : operands.slice(0, -1)).forEach(unhook); // SID-155: mv takes its sources away
     }
   }
   return { writes, files };
@@ -489,3 +519,18 @@ export function record(root, entry) {
   } catch {}
 }
 
+// Secret patterns for the push gate (pre-bash.mjs) and the git pre-commit hook (git-hook.mjs, SID-147): one list, so the two cannot drift.
+export const SECRET_PATTERNS = [
+  ['private key', /-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY/],
+  ['AWS key', /\bAKIA[0-9A-Z]{16}\b/],
+  ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36,}\b/],
+  ['Slack token', /\bxox[baprs]-[A-Za-z0-9-]{10,}/],
+  ['Anthropic/OpenAI key', /\bsk-(ant-)?[A-Za-z0-9_-]{20,}\b/],
+  ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
+];
+// Names of the patterns that match a line added in a unified diff.
+export function secretsInDiff(diff) {
+  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
+  return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
+}
