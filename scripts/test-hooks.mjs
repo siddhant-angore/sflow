@@ -1,12 +1,13 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
+import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -18,7 +19,7 @@ const reasonOf = (r) => r?.hookSpecificOutput?.permissionDecisionReason ?? '';
 const denied = (hook, ev) => run(hook, ev)?.hookSpecificOutput?.permissionDecision === 'deny';
 
 // A repo with an origin whose main carries the policy, and a feature branch checked out.
-const repo = mkdtempSync(join(tmpdir(), 'harness-test-'));
+const repo = makeScratch('harness-test-');
 sh(repo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 'echo base={base}'] }));
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -220,6 +221,42 @@ for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'ech
 for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
+// SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
+const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;
+const unhookDeny = ['rm -rf .git/hooks', 'rm -f .git/hooks/pre-push', 'mv .git/hooks /tmp/x', 'rm -rf .git/sflow-hooks', 'rm .git/sflow-hooks/pre-push', 'rm -rf .husky', 'rm -rf .husky/', 'rm .husky/pre-commit',
+  'mv .husky/pre-commit .husky/off', 'rm -rf .git/hoo*', 'rm -rf .git/*', 'rm -rf .gi?/hooks', 'rm -rf .git/[h]ooks', 'rm -rf .git/sflow-*', 'rm -rf .hu*', 'cd .git && rm -rf hooks', 'cd .git/hooks && rm pre-push', 'cd .husky; rm pre-commit',
+  'rm -rf "$(git rev-parse --git-path hooks)"', 'rm -rf `git rev-parse --git-path hooks`', 'rm -rf "$(git rev-parse --git-common-dir)/hooks"', 'rm -rf "$GIT_DIR/hooks"', 'GIT_DIR=/r/.git rm -rf /r/.git/hooks',
+  'rm -rf /workspace/repo/.git/hooks', 'rm -rf /workspace/repo/.git/worktrees/wt/hooks', 'rm -r .git/modules/sub/hooks', 'unlink .git/hooks/pre-commit', 'rmdir .git/hooks', 'shred -u .git/hooks/pre-push', 'rm -rf ./.git//hooks/',
+  'find .git/hooks -delete', 'find .git/hooks -type f -exec rm {} +', 'find .husky -name pre-commit -delete', 'chmod -x .git/hooks/pre-push', 'chmod 644 .git/sflow-hooks/pre-commit', 'chmod -R a-x .husky', 'sudo rm -rf .git/hooks',
+  'mv -t /tmp .git/hooks', 'mv --target-directory=/tmp .git/hooks/pre-push', 'true; rm -rf .git/hooks', 'echo "$(rm -rf .git/hooks)"', 'git status && rm -rf .git/hooks'];
+const unhookAllow = ['rm -rf build/', 'rm hooks.txt', 'rm -rf hooks', 'rm -rf src/hooks', 'rm -rf node_modules', 'rm .gitignore', 'rm -rf .github/x', 'rm -rf *', 'ls .git/hooks', 'cat .git/hooks/pre-push', 'ls .husky',
+  'cp .git/hooks/pre-push /tmp/sflow-x', 'find .git/hooks -name x', 'find . -name "*.pyc" -delete', 'chmod +x scripts/x.sh', 'mv a b', "echo 'rm -rf .git/hooks'"];
+for (const c of unhookDeny) { const r = reasonOf(run('pre-bash.mjs', bash(c))); assert.match(r, UNHOOK, `SID-155 must deny: ${c} (got: ${r || 'allowed'})`); }
+assert.ok(denied('pre-bash.mjs', bash('rm -rf .h*')), 'SID-155: .h* could match .husky and .harness.json; denied (the policy reason wins)');
+for (const c of unhookAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-155 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// CTO review of #23 (5725928139): a wrapper line with a trailing rm-family word used to skip the GIT_CMDS write scan, allowing writes main denies.
+// The 11 rows from the review, then every wrapper x write x trailing rm word. All go through bash(), so the regression check below also proves main denies them.
+const wrapRm = ['env tee .git/hooks/pre-commit rm', 'xargs tee .git/hooks/pre-commit rm', 'command tee .git/hooks/pre-commit rm', 'nohup tee .git/hooks/post-checkout shred',
+  'nohup sed -i s/x/y/ .git/hooks/pre-commit unlink', 'env perl -pi -e s/a/b/ .git/hooks/pre-commit rm', 'time dd of=.git/hooks/pre-push rm', 'env tee .git/config rm',
+  'sudo tee -a .git/config chmod', 'env sed -i s/a/b/ .git/config rmdir', 'env truncate -s0 .git/config unlink'];
+for (const w of ['env', 'sudo', 'nohup', 'time', 'xargs', 'command']) for (const wr of ['tee .git/hooks/pre-commit', 'tee -a .git/config', 'sed -i s/a/b/ .git/hooks/pre-push', 'dd of=.git/config', 'truncate -s0 .git/hooks/pre-commit'])
+  for (const r of ['rm', 'unlink', 'rmdir', 'shred', 'find', 'chmod']) wrapRm.push(`${w} ${wr} ${r}`);
+for (const c of wrapRm) assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: wrapper + write + trailing rm word must stay denied: ${c}`);
+// Overwriting or emptying a stub disables SID-147 as well as deleting it: writes into .git/sflow-hooks and a linked worktree's hooks are git-dir hook writes.
+for (const c of ["printf 'exit 0\\n' > .git/sflow-hooks/pre-push", 'cp /dev/null .git/sflow-hooks/pre-push', 'tee .git/sflow-hooks/pre-commit', 'echo x >> .git/sflow-hooks/pre-commit',
+  'echo x > .git/worktrees/wt/hooks/pre-push', 'cp evil /r/.git/sflow-hooks/pre-push', 'ln -sf /tmp/x .git/sflow-hooks/pre-push', 'sed -i s/node/true/ .git/sflow-hooks/pre-push'])
+  assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: writing a stub must be denied: ${c}`);
+assert.deepEqual(newGitWrites('cd .git && rm -rf hooks'), [{ path: '.git/hooks', kind: 'unhook' }]);
+assert.deepEqual(newGitWrites('mv .git/hooks /tmp/x'), [{ path: '.git/hooks', kind: 'unhook' }], 'mv: the source goes, /tmp/x is no git write');
+{ // real git: a linked worktree's hooks path, as git itself reports it, is denied from inside the worktree; nothing was run, the hooks dir is still there.
+  const wt = `${repo}.wt155`;
+  sh(repo, `git worktree add -q -b feat/wt155 "${wt}"`);
+  const hp = sh(wt, 'git rev-parse --path-format=absolute --git-path hooks');
+  for (const c of [`rm -rf ${hp}`, `rm -f ${hp}/pre-push`, `mv ${hp} /tmp/x`, 'rm -rf "$(git rev-parse --git-path hooks)"']) assert.match(reasonOf(run('pre-bash.mjs', bash(c, wt))), UNHOOK, `SID-155 linked worktree: ${c}`);
+  assert.ok(existsSync(hp), 'the guard only decides; the hooks dir is untouched');
+  sh(repo, `git worktree remove --force "${wt}" && git branch -q -D feat/wt155`);
+}
+
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
 assert.ok(denied('pre-bash.mjs', bash('gh pr merge 1')), 'working-tree policy edit must not take effect');
@@ -258,7 +295,7 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git status'))), /failing closed/
 setPolicy({ gate: ['test -f a'] });
 
 // Linked worktree: .git is a file; gate and stop still work.
-const wt = join(repo, '..', 'wt-' + Date.now());
+const wt = trackScratch(join(repo, '..', 'wt-' + Date.now()));
 sh(repo, `git worktree add -q -b feat/wt "${wt}" main && cd "${wt}" && echo w > w && git add w && git commit -qm w`);
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/wt', wt)), null, 'gate passes in a worktree');
 assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), 'harness-gate', sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
@@ -274,7 +311,7 @@ assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: false }), null, 'sam
 assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: true }), null, 'never loops');
 sh(repo, 'git checkout -q -- a');
 assert.match(run('stop.mjs', { cwd: repo, stop_hook_active: false })?.reason ?? '', /gate/);
-const plain = mkdtempSync(join(tmpdir(), 'plain-'));
+const plain = makeScratch('plain-');
 sh(plain, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && echo b > b');
 assert.equal(run('stop.mjs', { cwd: plain, stop_hook_active: false }), null, 'repo without .harness.json is left alone');
 assert.equal(run('pre-bash.mjs', bash('git push --force', plain))?.hookSpecificOutput?.permissionDecision, 'deny', 'guard still applies without a policy file');
@@ -307,7 +344,7 @@ const runsAfter = readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8').tr
 assert.ok(runsAfter.some((r) => r.kind === 'stop' && r.decision === 'brake'), 'brake recorded');
 
 // Solo repo: an explicit empty protectedBranches turns the push guard off but keeps every other rule.
-const solo = mkdtempSync(join(tmpdir(), 'harness-solo-'));
+const solo = makeScratch('harness-solo-');
 sh(solo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(solo, '.harness.json'), JSON.stringify({ protectedBranches: [], gate: [] }));
 sh(solo, 'git add .harness.json && git commit -qm p && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin');
@@ -320,7 +357,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 {
   const { config } = await import(join(hooks, 'lib.mjs'));
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid65-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid65-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mk = (name) => { // repo on feat/x, bare origin with main only (no policy), origin/HEAD unset
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -598,7 +635,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
       for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .', 'cp a .claude/settings.json']) assert.ok(verdict(d, cmd).deny, `k8 ${tag}: SID-66 must deny: ${cmd}`);
       for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'jq . .harness.json']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: SID-66 must allow: ${cmd} (${verdict(d, cmd).why})`);
     }
-    const nonRepo = mkdtempSync(join(tmpdir(), 'harness-sid65-k8n-'));
+    const nonRepo = makeScratch('harness-sid65-k8n-');
     made.push(nonRepo);
     for (const cmd of ['gh pr merge 1 -R o/r', 'git push -f origin HEAD:main']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: must deny: ${cmd}`);
     for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
@@ -690,7 +727,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 // Deny messages say what to do instead; narrow rules, so normal work stays allowed. Symlink defence and the SID-65 backstop are covered too.
 {
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid66-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid66-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mkNone = (name) => { // repo on feat/x, bare origin with main only: no policy committed
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -869,14 +906,14 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Three baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+// Four baselines (the fourth, 5c959d2, is main before SID-155): main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2']]) { // 5c959d2: main when SID-155 started
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
-  const dir = mkdtempSync(join(tmpdir(), 'harness-main-'));
+  const dir = makeScratch('harness-main-');
   for (const f of ['lib.mjs', 'guard-rules.mjs']) writeFileSync(join(dir, f), gitHere('show', `${rev}:workflows/hooks/${f}`));
   const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
   baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
