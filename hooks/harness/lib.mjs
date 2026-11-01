@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -603,8 +603,36 @@ export function segments(cmd) {
   return [...new Set([...qa, ...blind])];
 }
 
-export function deny(reason, hookEventName = 'PreToolUse') {
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');
+// SID-191 review item 8 and re-review B6: a deny must reach Claude Code whole, or not pretend to. An async stdout write of more than a pipe buffer
+// (64 KiB) was cut off by the process.exit(0) after it (invalid JSON, exit 0 = no decision). So the TOTAL reason is capped (each line, and all
+// lines together: DENY_TOTAL_MAX), which keeps the whole JSON far inside one pipe buffer, and the write is synchronous, retrying a full
+// non-blocking pipe. If the write still fails (EAGAIN gone on too long, EPIPE, anything), deny() does NOT write a second deny on top of a
+// partial one: it exits 2 with a short reason on stderr, which Claude Code treats as a block.
+export const DENY_LINE_MAX = 1500;
+export const DENY_TOTAL_MAX = 4000;
+export const clip = (t, max = DENY_LINE_MAX) => (t.length > max ? `${t.slice(0, max)}… [${t.length - max} more chars]` : t);
+export const clipReason = (reason) => String(reason).split('\n').map((l) => clip(l)).join('\n');
+// Keeps the start (what was denied) and the end (a gate failure's last lines are the error, the policy note is the last line) when the total is over max.
+export const clipMid = (t, max) => { if (t.length <= max) return t; const head = max >> 2, tail = max - head; return `${t.slice(0, head)}\n… [${t.length - max} chars cut] …\n${t.slice(-tail)}`; };
+const sleep1ms = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+// write is injectable so tests can make it throw EAGAIN a few times.
+export function emit(text, fd = 1, write = writeSync, wait = sleep1ms) {
+  const buf = Buffer.from(text);
+  for (let off = 0, tries = 0; off < buf.length;) {
+    try { off += write(fd, buf, off); tries = 0; } catch (e) { if (e.code !== 'EAGAIN' || ++tries > 10000) throw e; wait(); }
+  }
+}
+export const BLOCKED = 'harness guard: blocked (the deny message could not be written to stdout); run `git status` and ask the user';
+export function deny(reason, hookEventName = 'PreToolUse', write = emit) {
+  // the total is cut at DENY_TOTAL_MAX chars; control characters and non-ASCII grow when escaped, so shrink further until the whole JSON is small
+  const build = (max) => JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: clipMid(clipReason(reason), max) } }) + '\n';
+  let json = build(DENY_TOTAL_MAX);
+  for (let max = DENY_TOTAL_MAX; Buffer.byteLength(json) > 3 * DENY_TOTAL_MAX && max > 100; max >>= 1) json = build(max);
+  try { write(json); } catch (e) {
+    // a partial JSON may already be on stdout: never add a second one. Exit 2 blocks, with the reason on stderr.
+    try { writeSync(2, `${BLOCKED} (${e.code ?? e.message})\n`); } catch {}
+    process.exit(2);
+  }
 }
 
 export function record(root, entry) {
@@ -613,6 +641,137 @@ export function record(root, entry) {
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, 'runs.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
   } catch {}
+}
+
+
+// SID-191: the command with each word's shell quoting resolved, the way the shell joins it: `g""h` -> gh, `"--for"ce` -> --force, `ma\in` -> main,
+// `$'\x67it'` -> git. A word that still holds a special character after unquoting is re-quoted in single quotes (so `-m "a b"` stays one word, and
+// quoted text stays data). A word with an expansion the shell would perform ($, a backtick, outside single quotes) is left exactly as written, so
+// the literal-argument rules still see it. Operators, comments and heredoc bodies are copied as they are. open: a quote is never closed.
+const SAFE_WORD = /^[\w@%+=:,./~^-]+$/;
+const ansi = (s) => s.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|[\s\S])/g, (_, e) => {
+  if (/^x/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^u/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^[0-7]/.test(e)) return String.fromCharCode(parseInt(e, 8) & 255);
+  return { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v' }[e] ?? e;
+});
+// End of the heredoc delimiter word that starts at j.
+const hereEnd = (s, j) => { let k = j; for (; k < s.length && !/[\s;&|()<>]/.test(s[k]); k++) { if (s[k] === '\\') k++; else if (s[k] === "'" || s[k] === '"') k = quoteEnd(s, k) - 1; } return k; };
+// Skip the heredoc bodies pending after the newline at i (index of the newline); returns the index after the last body line.
+const skipBodies = (s, i, pending) => {
+  let pos = i + 1;
+  for (const p of pending.splice(0)) for (;;) {
+    if (pos >= s.length) return s.length + 1; // never closed
+    const e = s.indexOf('\n', pos), end = e < 0 ? s.length : e, line = s.slice(pos, end);
+    pos = e < 0 ? s.length : e + 1;
+    if ((p.strip ? line.replace(/^\t+/, '') : line) === p.delim) break;
+  }
+  return pos;
+};
+// Index after the `)` that closes the $( opening at s[i] (quotes, nested $( ), backticks and heredocs inside are skipped); s.length + 1 if it never closes.
+function substEnd(s, i) {
+  let d = 1; const pending = [];
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === "'") { j = quoteEnd(s, j) - 1; }
+    else if (c === '"') { j = dqEnd(s, j) - 1; }
+    else if (c === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+    else if (c === '$' && s[j + 1] === '(') { j = substEnd(s, j + 1) - 1; }
+    else if (c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const strip = s[j + 2] === '-'; let k = j + 2 + strip; while (/[ \t]/.test(s[k] ?? '')) k++; const w = hereWord(s, k); if (w) pending.push({ delim: w[0], strip }); j = Math.max(k, hereEnd(s, k)) - 1; }
+    else if (c === '\n' && pending.length) { j = skipBodies(s, j, pending) - 1; }
+    else if (c === '(') d++;
+    else if (c === ')' && --d === 0) return j + 1;
+    if (j >= s.length) break;
+  }
+  return s.length + 1;
+}
+// Index after the `"` closing the double-quoted string opening at s[i] ($( ) and backticks inside are skipped whole); s.length + 1 if it never closes.
+function dqEnd(s, i) {
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') j++;
+    else if (s[j] === '"') return j + 1;
+    else if (s[j] === '$' && s[j + 1] === '(') j = substEnd(s, j + 1) - 1;
+    else if (s[j] === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+  }
+  return s.length + 1;
+}
+export function canon(cmd) {
+  let out = '', open = false, i = 0;
+  const n = cmd.length, pending = [];
+  const isOp = (c) => /[\s;&|()<>]/.test(c);
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\' && cmd[i + 1] === '\n') { i += 2; continue; } // line continuation
+    if (c === '\n' && pending.length) { const e = skipBodies(cmd, i, pending); out += cmd.slice(i, Math.min(e, n)); i = Math.min(e, n); continue; } // heredoc bodies, raw
+    if (c === '#' && (out === '' || /[\s;&|()]$/.test(out))) { const e = cmd.indexOf('\n', i), end = e < 0 ? n : e; out += cmd.slice(i, end); i = end; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+      const strip = cmd[i + 2] === '-'; let j = i + 2 + strip;
+      while (/[ \t]/.test(cmd[j] ?? '')) j++;
+      const w = hereWord(cmd, j), e = hereEnd(cmd, j);
+      if (w) pending.push({ delim: w[0], strip });
+      out += cmd.slice(i, e); i = Math.max(e, i + 2); continue;
+    }
+    if (isOp(c)) { out += c; i++; continue; }
+    const start = i; let val = '', quoted = false, expands = false, joined = false; // one word
+    while (i < n && !isOp(cmd[i])) {
+      const ch = cmd[i];
+      if (ch === '\\') { if (cmd[i + 1] === '\n') { joined = true; i += 2; continue; } quoted = true; val += cmd[i + 1] ?? ''; i += 2; }
+      else if (ch === "'") { const e = cmd.indexOf("'", i + 1); quoted = true; if (e < 0) { open = true; i = n; } else { val += cmd.slice(i + 1, e); i = e + 1; } }
+      else if (ch === '$' && cmd[i + 1] === "'") { const e = quoteEnd(cmd, i); quoted = true; if (e > n) { open = true; i = n; } else { val += ansi(cmd.slice(i + 2, e - 1)); i = e; } }
+      else if (ch === '"' || (ch === '$' && cmd[i + 1] === '"')) {
+        if (ch === '$') i++;
+        const e = dqEnd(cmd, i); quoted = true;
+        if (e > n) { open = true; i = n; break; }
+        const body = cmd.slice(i + 1, e - 1);
+        if (/[$`]/.test(body.replace(/\\[\s\S]/g, ''))) expands = true;
+        val += body.replace(/\\([$`"\\\n])/g, (_, x) => (x === '\n' ? '' : x)); i = e;
+      }
+      else if (ch === '$' && cmd[i + 1] === '(') { expands = true; const e = substEnd(cmd, i + 1); if (e > n) { open = true; i = n; break; } val += cmd.slice(i, e); i = e; }
+      else if (ch === '`') { expands = true; let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; if (k >= n) { open = true; i = n; break; } val += cmd.slice(i, k + 1); i = k + 1; }
+      else { if (ch === '$') expands = true; val += ch; i++; }
+    }
+    // SID-191 review B2: a line continuation inside a word joins it (`c\<newline>ore.hooksPath` is core.hooksPath), so the word is rewritten too.
+    const raw = joined ? cmd.slice(start, i).replace(/\\\n/g, '') : cmd.slice(start, i);
+    out += !quoted || expands ? raw : val !== '' && SAFE_WORD.test(val) ? val : `'${val.replace(/'/g, `'\\''`)}'`;
+  }
+  if (pending.length) open = open; // an unterminated heredoc still runs (bash warns), so it does not count as open
+  return { text: out, open };
+}
+
+// SID-191: the simple commands of a line with their command substitutions left whole (segments() cuts `git checkout "$(x)"` down to
+// `git checkout "$`), so expansionReason can see that an argument is an expansion. Commands inside $( ), backticks and sh -c payloads
+// are added as their own entries. Normalized like segments().
+export function outerCommands(cmd, depth = 0) {
+  const out = [], n = cmd.length, pending = [];
+  let cur = '', i = 0;
+  const flush = () => { const s = normalize(cur); if (s) { out.push(s); if (depth < 8) for (const p of payload(s)) out.push(...outerCommands(p, depth + 1)); } cur = ''; };
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\') { cur += cmd.slice(i, i + 2); i += 2; continue; }
+    if (c === "'") { const e = cmd.indexOf("'", i + 1), end = e < 0 ? n : e + 1; cur += cmd.slice(i, end); i = end; continue; }
+    if (c === '$' && cmd[i + 1] === "'") { const e = Math.min(quoteEnd(cmd, i), n); cur += cmd.slice(i, e); i = e; continue; }
+    if (c === '"') { const e = Math.min(dqEnd(cmd, i), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) for (const m of innerSubs(body)) out.push(...outerCommands(m, depth + 1)); continue; }
+    if (c === '$' && cmd[i + 1] === '(') { const e = Math.min(substEnd(cmd, i + 1), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) out.push(...outerCommands(body.slice(2, -1), depth + 1)); continue; }
+    if (c === '`') { let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; const body = cmd.slice(i, k + 1); cur += body; i = k + 1; if (depth < 8) out.push(...outerCommands(body.slice(1, -1), depth + 1)); continue; }
+    if (c === '#' && (cur === '' || /\s$/.test(cur))) { const e = cmd.indexOf('\n', i); i = e < 0 ? n : e; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') { const strip = cmd[i + 2] === '-'; let k = i + 2 + strip; while (/[ \t]/.test(cmd[k] ?? '')) k++; const w = hereWord(cmd, k); if (w) pending.push({ delim: w[0], strip }); const e = hereEnd(cmd, k); cur += cmd.slice(i, e); i = Math.max(e, i + 2); continue; }
+    if (c === '\n' && pending.length) { flush(); i = Math.min(skipBodies(cmd, i, pending), n); continue; }
+    if (c === '\n' || c === ';' || c === '|' || c === '(' || c === ')' || c === '{' && /(^|\s)$/.test(cur) || (c === '&' && cmd[i + 1] !== '>' && cmd[i - 1] !== '>')) { flush(); i++; continue; }
+    cur += c; i++;
+  }
+  flush();
+  return out;
+}
+// The $( ) and backtick bodies inside a double-quoted string.
+function innerSubs(dq) {
+  const out = [];
+  for (let j = 1; j < dq.length - 1; j++) {
+    if (dq[j] === '\\') j++;
+    else if (dq[j] === '$' && dq[j + 1] === '(') { const e = substEnd(dq, j + 1); out.push(dq.slice(j + 2, e - 1)); j = e - 1; }
+    else if (dq[j] === '`') { let k = j + 1; for (; k < dq.length && dq[k] !== '`'; k++) if (dq[k] === '\\') k++; out.push(dq.slice(j + 1, k)); j = k; }
+  }
+  return out;
 }
 
 // Secret patterns for the push gate (pre-bash.mjs) and the git pre-commit hook (git-hook.mjs, SID-147): one list, so the two cannot drift.
