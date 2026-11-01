@@ -1,6 +1,7 @@
-import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULTS = { protectedBranches: ['main', 'master'], gate: [], allowMerge: false, dod: [] };
@@ -103,6 +104,100 @@ export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: 
 export const POLICY_FILES = ['.harness.json', '.claude/settings.json', '.claude/settings.local.json'];
 const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/(\.\/)+/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
 export const isPolicyPath = (p) => { const n = norm(p); return POLICY_FILES.some((f) => n === f || n.endsWith('/' + f)); };
+// SID-162: the file tools (Edit/Write/MultiEdit/NotebookEdit) must not write where git looks for hooks or config, the same rule the shell guard applies.
+// Checked on the path as given, on every symlink hop (a dangling link is followed to where it would write) and on the final path, by name (.git/hooks,
+// .git/sflow-hooks, a linked worktree's or a submodule's hooks, .git/config*, .git/info/, ~/.gitconfig) and against the real dirs: <git common dir>/hooks,
+// /sflow-hooks, /info, config* in the common and per-worktree git dir, and every core.hooksPath value set locally, globally or system-wide. A file with
+// more than one link whose dev/inode is a hook or config file is that file (hardlink). Every error fails closed (throws; the caller denies).
+export const HOOK_FILE_DENY = 'writing into a hooks directory installs code git runs automatically; ask the user, or use the harness hook setup';
+export const GIT_FILE_DENY = 'writing a git config or .git/info file changes what git runs (hooks path, aliases, filters, sparse checkout); ask the user';
+const HOOK_FILE_RE = /(?:^|\/)\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:sflow-)?hooks(?:\/|$)/i;
+const GIT_FILE_RE = /(?:^|\/)\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:info(?:\/|$)|config[^\/]*$)/i;
+export const CASE_FOLD = process.platform === 'darwin' || process.platform === 'win32'; // default file systems there are case-insensitive
+export const pathWithin = (p, dir, fold = CASE_FOLD) => {
+  if (fold) { p = p.toLowerCase(); dir = dir.toLowerCase(); }
+  const r = relative(dir, p); return r === '' || (!!r && !r.startsWith('..') && !isAbsolute(r));
+};
+// Where a write to p lands: symlinks are followed, dangling ones too (the write creates the link's target). Every hop goes into trail.
+export function chase(p, trail = [], hops = 0) {
+  if (hops > 40) throw new Error(`too many symlinks at ${p}`);
+  try { const r = realpathSync(p); trail.push(r); return r; } catch {}
+  let st = null;
+  try { st = lstatSync(p); } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; }
+  if (st?.isSymbolicLink()) { const t = resolve(dirname(p), readlinkSync(p)); trail.push(t); return chase(t, trail, hops + 1); }
+  if (st) throw new Error(`cannot resolve ${p}`); // exists, yet realpath failed (permissions)
+  const up = dirname(p); if (up === p) return p;
+  const r = join(chase(up, trail, hops), basename(p)); trail.push(r); return r;
+}
+// git that tells "no repository" (null) from a failure (throws): a missing binary, a safe.directory refusal or a broken config all throw.
+function gitAt(at, args, unset = []) {
+  const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', at, ...args], { encoding: 'utf8', env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+  if (r.error) throw r.error;
+  if (r.status === 0) return r.stdout.replace(/\n$/, '');
+  if (unset.includes(r.status)) return null;
+  if (r.status === 128 && /not a git repository/i.test(r.stderr) && !/dubious ownership|safe\.directory/i.test(r.stderr)) return null;
+  throw new Error(`git ${args.join(' ')} failed (${r.status}): ${r.stderr.trim().split('\n')[0]}`);
+}
+const home = () => process.env.HOME || homedir();
+const hookDir = (hp, top) => (isAbsolute(hp) ? hp : /^~(\/|$)/.test(hp) ? join(home(), hp.slice(2)) : top ? resolve(top, hp) : null);
+const lines = (x) => (x ? x.split('\n').filter(Boolean) : []);
+// The protected places for one directory's repository (none outside a repository) plus the global and system ones.
+function protectedFor(at, out) {
+  const rel = gitAt(at, ['rev-parse', '--git-common-dir']);
+  if (rel) {
+    const common = resolve(at, rel);
+    const gd = gitAt(at, ['rev-parse', '--absolute-git-dir']), top = gitAt(at, ['rev-parse', '--show-toplevel'], [128]);
+    out.trees.push(join(common, 'hooks'), join(common, 'sflow-hooks'), join(gd, 'hooks')); out.info.push(join(common, 'info'), join(gd, 'info'));
+    out.cfgDirs.push(common, gd);
+    for (const hp of lines(gitAt(at, ['config', '--get-all', 'core.hooksPath'], [1]))) { const d = hookDir(hp, top ?? at); if (d) out.trees.push(d); }
+    out.tops.push(top ?? at);
+  }
+  return out;
+}
+function globalProtected(at, out) {
+  for (const scope of ['--global', '--system']) for (const hp of lines(gitAt(at, ['config', scope, '--get-all', 'core.hooksPath'], [1]))) {
+    if (isAbsolute(hp) || /^~(\/|$)/.test(hp)) out.trees.push(hookDir(hp));
+    else out.relHooks.push(hp); // relative to whichever repository runs the hooks
+  }
+  const xdg = process.env.XDG_CONFIG_HOME || join(home(), '.config');
+  out.files.push(join(home(), '.gitconfig'), join(xdg, 'git', 'config'), ...(process.env.GIT_CONFIG_GLOBAL ? [resolve(at, process.env.GIT_CONFIG_GLOBAL)] : []));
+  return out;
+}
+const existingDir = (p) => { let at = p; while (!existsSync(at) && dirname(at) !== at) at = dirname(at); return statSync(at).isDirectory() ? at : dirname(at); };
+function inodes(paths, limit = 5000) { // dev:ino of every file under the protected trees and of the config files (hardlink check)
+  const ids = new Set(); let n = 0;
+  const walk = (p) => {
+    let st; try { st = lstatSync(p); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return; throw e; }
+    if (++n > limit) throw new Error('too many files under the hooks dirs to check for hardlinks');
+    if (st.isDirectory()) { for (const x of readdirSync(p)) walk(join(p, x)); } else ids.add(`${st.dev}:${st.ino}`);
+  };
+  paths.forEach(walk); return ids;
+}
+// By name only, on the path and every symlink hop: needs no git. The shell guard falls back to it when git can't read the repository.
+export function hookFileName(file, cwd = process.cwd()) {
+  if (!file) return null;
+  const abs = resolve(cwd, String(file).replace(/\\/g, '/')), trail = [abs], real = chase(abs, trail);
+  const seen = [...new Set(trail)], name = (re) => seen.some((p) => re.test(p.replace(/\\/g, '/')));
+  return { why: name(HOOK_FILE_RE) ? HOOK_FILE_DENY : name(GIT_FILE_RE) ? GIT_FILE_DENY : null, real, seen };
+}
+export function hookFileReason(file, cwd = process.cwd()) {
+  if (!file) return null;
+  const { why, real, seen } = hookFileName(file, cwd);
+  if (why) return why;
+  const out = { trees: [], info: [], cfgDirs: [], files: [], relHooks: [], tops: [] }, at = existingDir(real);
+  protectedFor(at, out);
+  const here = resolve(cwd); if (existsSync(here) && statSync(here).isDirectory() && here !== at) protectedFor(here, out);
+  globalProtected(at, out);
+  for (const hp of out.relHooks) for (const top of out.tops) out.trees.push(resolve(top, hp));
+  const both = (xs) => xs.flatMap((d) => [d, chase(d)]), trees = both(out.trees), info = both(out.info), files = both(out.files).filter((f) => { try { return !statSync(f).isCharacterDevice(); } catch { return true; } }), cfgDirs = both(out.cfgDirs);
+  if (seen.some((p) => trees.some((d) => pathWithin(p, d)))) return HOOK_FILE_DENY;
+  if (seen.some((p) => info.some((d) => pathWithin(p, d)))) return GIT_FILE_DENY;
+  const fold = (x) => (CASE_FOLD ? x.toLowerCase() : x);
+  if (seen.some((p) => files.some((f) => fold(f) === fold(p)) || (/^config/i.test(basename(p)) && cfgDirs.some((d) => fold(d) === fold(dirname(p)))))) return GIT_FILE_DENY;
+  let st = null; try { st = statSync(real); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (st?.isFile() && st.nlink > 1) { const ids = inodes([...trees, ...info, ...files, ...cfgDirs.flatMap((d) => readdirSync(d).filter((x) => /^config/i.test(x)).map((x) => join(d, x)))]); if (ids.has(`${st.dev}:${st.ino}`)) return HOOK_FILE_DENY; }
+  return null;
+}
 // A glob token (* ? [ ]) that could expand to a policy path, e.g. .harness*, .claude/*, .claude/settings*.json. A * or ? at the start of a segment does not match a leading dot, as in the shell.
 const globRe = (g) => {
   let re = '', start = true;
@@ -465,6 +560,7 @@ function scan(cmd) {
       const j = args.findIndex((a) => /^-[a-zA-Z]*t$/.test(a) || a === '--target-directory'), eq = args.find((a) => a.startsWith('--target-directory='));
       const dest = eq ? eq.slice(19) : j >= 0 ? args[j + 1] : operands.at(-1);
       if (dest) put(dest);
+      if (name === 'ln') operands.filter((x) => x !== dest && (j < 0 || x !== args[j + 1])).forEach(hit); // SID-162: a link to or from a hook or git config file (`ln -s .git/hooks/post-commit pc`, `ln .git/hooks/pre-commit hl`) lets a later write or chmod change it
       if (name === 'mv') (eq || j >= 0 ? operands.filter((o) => o !== dest) : operands.slice(0, -1)).forEach(unhook); // SID-155: mv takes its sources away
     }
   }

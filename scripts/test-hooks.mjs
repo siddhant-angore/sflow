@@ -1,11 +1,11 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
+import { gitWrites as newGitWrites, pathWithin, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
@@ -479,6 +479,109 @@ assert.equal(run('pre-bash.mjs', bash('git push --force', plain))?.hookSpecificO
 for (const f of ['.harness.json', '.claude/settings.json'])
   assert.ok(denied('policy.mjs', { tool_name: 'Edit', tool_input: { file_path: join(repo, f) }, cwd: repo }), `policy denies ${f}`);
 assert.ok(!denied('policy.mjs', { tool_name: 'Edit', tool_input: { file_path: join(repo, 'src/x.ts') }, cwd: repo }));
+
+// SID-162: the file tools can't write git hook files either (the shell guard's `hooks` rule). By name, resolved (`..`, `//`, symlinked parents),
+// and against the repo's real hooks dirs: a separate git dir, a linked worktree, a configured core.hooksPath.
+const HOOK_FILE = /^harness: writing into a hooks directory installs code git runs automatically/;
+const fileTool = (tool, file_path, cwd) => reasonOf(run('policy.mjs', { tool_name: tool, tool_input: { file_path, content: 'x' }, cwd }));
+const hookRepo = realpathSync(makeScratch('harness-hookfile-'));
+sh(hookRepo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && mkdir -p hk src/hooks hooks/harness docs');
+sh(hookRepo, 'git worktree add -q -b wt wt');
+symlinkSync(join(hookRepo, '.git', 'hooks'), join(hookRepo, 'lnk'));
+const sep = realpathSync(makeScratch('harness-hookfile-sep-'));
+sh(sep, 'git init -q --separate-git-dir ../$(basename $PWD).gitdir w');
+const sepGit = trackScratch(join(dirname(sep), `${basename(sep)}.gitdir`)); // resolved, not via sep/.., so cleanup still finds it after sep is gone
+const hookDeny = [[join(hookRepo, '.git/hooks/pre-commit'), hookRepo], ['.git/hooks/pre-push', hookRepo], [join(hookRepo, '.git/sflow-hooks/pre-push'), hookRepo],
+  [join(hookRepo, '.git/worktrees/wt/hooks/pre-push'), hookRepo], [join(hookRepo, '.git/modules/sub/hooks/post-checkout'), hookRepo], [join(hookRepo, 'src/../.git/hooks/pre-commit'), hookRepo],
+  [join(hookRepo, '.git') + '//hooks/pre-commit', hookRepo], ['src/../.git/./hooks/x', hookRepo], [join(hookRepo, 'lnk/pre-commit'), hookRepo], [join(hookRepo, '.git/hooks'), hookRepo],
+  [join(hookRepo, '.git/sflow-hooks/previous-hooks-path'), hookRepo], ['../.git/hooks/pre-commit', join(hookRepo, 'wt')], [join(sepGit, 'hooks/pre-commit'), join(sep, 'w')], [join(sepGit, 'sflow-hooks/pre-push'), join(sep, 'w')]];
+for (const tool of ['Write', 'Edit', 'MultiEdit']) for (const [f, cwd] of hookDeny) assert.match(fileTool(tool, f, cwd), HOOK_FILE, `SID-162 must deny ${tool} ${f} (cwd ${cwd})`);
+const hookAllow = ['src/hooks/useX.ts', 'hooks/harness/x.mjs', 'docs/.git-hooks.md', '.github/hooks/x.yml', '.githooks/pre-commit', 'hk/pre-commit', 'a', 'wt/a', '.gitignore'];
+for (const f of hookAllow) assert.equal(fileTool('Write', join(hookRepo, f), hookRepo), '', `SID-162 must allow ${f}`);
+assert.equal(fileTool('Write', join(sep, 'w', 'src/x.ts'), join(sep, 'w')), '', 'SID-162: ordinary file in a separate-git-dir repo');
+sh(hookRepo, 'git config core.hooksPath hk'); // a configured hooks dir is protected too, relative to the work tree, from anywhere in the repo
+for (const [f, cwd] of [[join(hookRepo, 'hk/pre-commit'), hookRepo], ['hk/pre-push', hookRepo], ['../hk/x', join(hookRepo, 'src')], [join(hookRepo, 'hk/new/x'), hookRepo]])
+  assert.match(fileTool('Edit', f, cwd), HOOK_FILE, `SID-162 core.hooksPath must deny ${f}`);
+assert.equal(fileTool('Edit', join(hookRepo, 'src/hooks/useX.ts'), hookRepo), '', 'SID-162: core.hooksPath protects only that dir');
+sh(hookRepo, `git config core.hooksPath ${join(hookRepo, 'docs')}`);
+assert.match(fileTool('Write', join(hookRepo, 'docs/pre-push'), hookRepo), HOOK_FILE, 'SID-162: absolute core.hooksPath');
+sh(hookRepo, 'git config --unset core.hooksPath');
+assert.equal(fileTool('Write', join(hookRepo, 'hk/pre-commit'), hookRepo), '', 'SID-162: unset core.hooksPath, hk is an ordinary dir again');
+assert.equal(fileTool('Write', join(tmpdir(), 'not-a-repo-file.txt'), tmpdir()), '', 'SID-162: outside any repo nothing changes');
+
+// SID-162 review: dangling symlinks, hardlinks, global/system core.hooksPath, git config and .git/info files, NotebookEdit, fail closed.
+const GIT_FILE = /^harness: writing a git config or \.git\/info file changes what git runs/;
+const notebook = (notebook_path, cwd) => reasonOf(run('policy.mjs', { tool_name: 'NotebookEdit', tool_input: { notebook_path, new_source: 'x' }, cwd }));
+writeFileSync(join(hookRepo, '.git/hooks/pre-commit'), '#!/bin/sh\n'); mkdirSync(join(hookRepo, '.git/sflow-hooks'), { recursive: true }); writeFileSync(join(hookRepo, '.git/sflow-hooks/pre-push'), '#!/bin/sh\n');
+mkdirSync(join(sepGit, 'hooks'), { recursive: true }); writeFileSync(join(sepGit, 'hooks/pre-commit'), '#!/bin/sh\n');
+symlinkSync('.git/hooks/post-commit', join(hookRepo, 'pc')); // dangling: the hook does not exist yet, a Write creates it
+symlinkSync('pc', join(hookRepo, 'pc2')); // a chain of links
+symlinkSync(join(sepGit, 'hooks', 'post-merge'), join(sep, 'w', 'pm')); // dangling into a hooks dir whose path has no .git/hooks in it
+symlinkSync(join(hookRepo, 'nowhere', 'deeper'), join(hookRepo, 'dl')); // dangling, ordinary target
+linkSync(join(hookRepo, '.git/hooks/pre-commit'), join(hookRepo, 'hl')); linkSync(join(hookRepo, '.git/sflow-hooks/pre-push'), join(hookRepo, 'hl2'));
+linkSync(join(sepGit, 'hooks/pre-commit'), join(sep, 'w', 'hl3')); linkSync(join(sepGit, 'config'), join(sep, 'w', 'hlc'));
+writeFileSync(join(hookRepo, 'docs/one'), 'x'); linkSync(join(hookRepo, 'docs/one'), join(hookRepo, 'docs/two')); // an ordinary hardlinked pair
+for (const [f, cwd] of [['pc', hookRepo], [join(hookRepo, 'pc'), hookRepo], ['pc2', hookRepo], [join(sep, 'w', 'pm'), join(sep, 'w')], ['hl', hookRepo], ['hl2', hookRepo], ['hl3', join(sep, 'w')]])
+  for (const tool of ['Write', 'Edit']) assert.match(fileTool(tool, f, cwd), HOOK_FILE, `SID-162 review must deny ${tool} ${f} (link)`);
+assert.match(fileTool('Edit', join(sep, 'w', 'hlc'), join(sep, 'w')), HOOK_FILE, 'SID-162 review: hardlink to the git config');
+for (const f of ['dl', 'docs/two', 'docs/one']) assert.equal(fileTool('Write', join(hookRepo, f), hookRepo), '', `SID-162 review must allow ${f}`);
+const gitFileDeny = [[join(hookRepo, '.git/config'), hookRepo], ['.git/config.worktree', hookRepo], ['.git/CONFIG', hookRepo], [join(hookRepo, '.git/worktrees/wt/config.worktree'), hookRepo], ['.git/info/exclude', hookRepo],
+  ['.git/info/attributes', hookRepo], ['.git/info/sparse-checkout', hookRepo], [join(hookRepo, '.git/modules/sub/config'), hookRepo], [join(sepGit, 'config'), join(sep, 'w')], [join(sepGit, 'config.worktree'), join(sep, 'w')], [join(sepGit, 'info/exclude'), join(sep, 'w')]];
+for (const [f, cwd] of gitFileDeny) assert.match(fileTool('Write', f, cwd), GIT_FILE, `SID-162 review must deny config/info ${f}`);
+for (const f of ['config/app.json', 'src/config.ts', '.gitattributes', 'info/readme.md', 'docs/gitconfig.md', 'wt/.git-info']) assert.equal(fileTool('Write', join(hookRepo, f), hookRepo), '', `SID-162 review must allow ${f}`);
+assert.match(notebook(join(hookRepo, '.git/hooks/nb.ipynb'), hookRepo), HOOK_FILE, 'SID-162 review: NotebookEdit is checked (notebook_path)');
+assert.equal(notebook(join(hookRepo, 'docs/nb.ipynb'), hookRepo), '', 'SID-162 review: NotebookEdit on an ordinary notebook');
+assert.ok(JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8')).hooks.PreToolUse.some((h) => /NotebookEdit/.test(h.matcher) && h.hooks.some((x) => /policy\.mjs/.test(x.command))), 'SID-162 review: NotebookEdit in the policy matcher');
+// Global and system core.hooksPath (absolute, ~/, relative) and the global config files, from any repo or none.
+const ghome = realpathSync(makeScratch('harness-hookfile-home-')), other = realpathSync(makeScratch('harness-hookfile-other-'));
+sh(other, 'git init -q -b main');
+const runEnv = (hook, input, env) => spawnSync(process.execPath, [join(hooks, hook)], { input: typeof input === 'string' ? input : JSON.stringify(input), cwd: (typeof input === 'object' && input.cwd) || other, env: { ...process.env, ...env }, encoding: 'utf8' });
+const verdict = (r) => { let j = null; try { j = JSON.parse(r.stdout.trim().split('\n').pop() || 'null'); } catch {} return { status: r.status, why: j?.hookSpecificOutput?.permissionDecisionReason ?? (r.status === 2 ? r.stderr : '') }; };
+const envTool = (file_path, cwd, env) => verdict(runEnv('policy.mjs', { tool_name: 'Write', tool_input: { file_path, content: 'x' }, cwd }, env));
+const sysCfg = join(ghome, 'sysconfig');
+writeFileSync(join(ghome, '.gitconfig'), `[core]\n\thooksPath = ${join(ghome, 'abs-hooks')}\n`);
+writeFileSync(sysCfg, '[core]\n\thooksPath = ~/tilde-hooks\n');
+const genv = { HOME: ghome, XDG_CONFIG_HOME: join(ghome, '.config'), GIT_CONFIG_GLOBAL: join(ghome, '.gitconfig'), GIT_CONFIG_SYSTEM: sysCfg, GIT_CONFIG_NOSYSTEM: '' };
+for (const [f, cwd] of [[join(ghome, 'abs-hooks/pre-commit'), other], [join(ghome, 'abs-hooks/pre-commit'), tmpdir()], [join(ghome, 'tilde-hooks/pre-push'), other], [join(ghome, 'abs-hooks/pre-commit'), hookRepo]])
+  assert.match(envTool(f, cwd, genv).why, HOOK_FILE, `SID-162 review: global/system core.hooksPath must deny ${f} (cwd ${cwd})`);
+for (const f of [join(ghome, '.gitconfig'), join(ghome, '.config/git/config')]) assert.match(envTool(f, other, genv).why, GIT_FILE, `SID-162 review must deny ${f}`);
+assert.match(envTool(join(ghome, 'alt.gitconfig'), other, { ...genv, GIT_CONFIG_GLOBAL: join(ghome, 'alt.gitconfig') }).why, GIT_FILE, 'SID-162 review: GIT_CONFIG_GLOBAL file');
+writeFileSync(join(ghome, '.gitconfig'), '[core]\n\thooksPath = rel-hooks\n'); // relative: whichever repository runs its hooks
+assert.match(envTool(join(other, 'rel-hooks/pre-commit'), other, genv).why, HOOK_FILE, 'SID-162 review: relative global core.hooksPath in the target repo');
+assert.match(envTool(join(other, 'rel-hooks/pre-commit'), hookRepo, genv).why, HOOK_FILE, 'SID-162 review: relative global core.hooksPath, cwd in another repo');
+assert.equal(envTool(join(ghome, 'notes.txt'), other, genv).why, '', 'SID-162 review: an ordinary file in HOME');
+// Fail closed: every error path denies (JSON deny, or exit 2 with the reason on stderr), and outside a repository a normal write still passes.
+const FAIL = /harness hook error \(failing closed\)/;
+const noGit = realpathSync(makeScratch('harness-hookfile-nogit-'));
+assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { PATH: noGit }).why, FAIL, 'SID-162 review: missing git binary denies');
+assert.match(envTool(join(tmpdir(), 'plain.txt'), tmpdir(), { PATH: noGit }).why, FAIL, 'SID-162 review: missing git binary denies outside a repo too');
+assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { GIT_TEST_ASSUME_DIFFERENT_OWNER: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }).why, FAIL, 'SID-162 review: a safe.directory refusal denies'); // empty global, no system config: a runner's safe.directory=* can't lift the refusal
+// A git (older or patched) whose safe.directory refusal also says "not a git repository" must still fail closed, not read as "no repository".
+const fakeGit = realpathSync(makeScratch('harness-hookfile-fakegit-'));
+writeFileSync(join(fakeGit, 'git'), "#!/bin/sh\necho \"fatal: not a git repository (or any parent): unsafe repository; add it to safe.directory\" >&2\nexit 128\n"); chmodSync(join(fakeGit, 'git'), 0o755);
+assert.match(envTool(join(hookRepo, 'docs/x.md'), hookRepo, { PATH: `${fakeGit}:${process.env.PATH}` }).why, FAIL, 'SID-162 review: a refusal worded as "not a git repository ... safe.directory" denies');
+const broken = realpathSync(makeScratch('harness-hookfile-broken-'));
+sh(broken, 'git init -q -b main && printf "[core\\n\\tbad = = =\\n" >> .git/config');
+assert.match(envTool(join(broken, 'x.md'), broken, {}).why, FAIL, 'SID-162 review: an unparsable git config denies');
+const unread = realpathSync(makeScratch('harness-hookfile-unread-'));
+sh(unread, 'git init -q -b main'); chmodSync(join(unread, '.git/config'), 0o000);
+try { assert.match(envTool(join(unread, 'x.md'), unread, {}).why, FAIL, 'SID-162 review: an unreadable git config denies'); } finally { chmodSync(join(unread, '.git/config'), 0o644); }
+assert.match(verdict(runEnv('policy.mjs', 'not json', {})).why, FAIL, 'SID-162 review: an unreadable event denies');
+assert.match(verdict(runEnv('policy.mjs', '', {})).why, FAIL, 'SID-162 review: an empty event denies');
+const nul = verdict(runEnv('policy.mjs', { tool_name: 'Write', tool_input: { file_path: `${hookRepo}/a\u0000b` }, cwd: hookRepo }, {}));
+assert.match(nul.why, FAIL, 'SID-162 review: an exception inside the check denies');
+for (const r of [runEnv('policy.mjs', 'not json', {}), runEnv('policy.mjs', { tool_name: 'Write', tool_input: { file_path: `${hookRepo}/a\u0000b` }, cwd: hookRepo }, {})]) assert.equal(r.status, 2, 'SID-162 review: fail-closed exits 2 (blocking)');
+assert.equal(envTool(join(tmpdir(), 'plain.txt'), tmpdir(), {}).why, '', 'SID-162 review: outside a repository a normal Write is allowed');
+assert.equal(envTool(join(tmpdir(), 'new-dir-x', 'plain.txt'), tmpdir(), {}).why, '', 'SID-162 review: a new file in a new dir outside a repository');
+assert.equal(envTool(join(other, 'src/new.ts'), other, {}).why, '', 'SID-162 review: a normal write in a repository');
+// Case-insensitive comparison on darwin and win32 (default case-insensitive file systems), exact elsewhere.
+assert.ok(pathWithin('/r/.GIT/Hooks/pre-commit', '/r/.git/hooks', true) && !pathWithin('/r/.GIT/Hooks/pre-commit', '/r/.git/hooks', false) && pathWithin('/r/.git/hooks/x', '/r/.git/hooks', false), 'SID-162 review: pathWithin folds case only when asked');
+// Shell guard: ln to or from a hook or config file, and chmod/chown through a link into a hooks dir.
+const lnDeny = ['ln -s .git/hooks/post-commit pc3', 'ln .git/hooks/pre-commit hl4', 'ln -sf ../.git/hooks/x docs/pc', 'ln -s .git/sflow-hooks/pre-push sp', `ln ${join(sepGit, 'hooks/pre-commit')} hl5`, 'ln -s .git/config cfg',
+  'ln -t docs .git/hooks/pre-commit', 'ln -s "$PWD/.git/hooks/post-merge" pm', 'chmod +x pc', 'chmod 755 pc2', 'chmod +x .git/hooks/pre-commit', 'chown me pc', 'chmod +x hl'];
+for (const c of lnDeny) assert.ok(denied('pre-bash.mjs', bash(c, hookRepo)), `SID-162 review: shell must deny ${c}`);
+for (const c of ['ln -s a b', 'ln -s ../src/a docs/b', 'ln docs/one docs/three', 'chmod +x docs/one', 'chmod -R u+w src', 'ln -s hooks/harness hh', 'chmod +x dl'])
+  assert.ok(!denied('pre-bash.mjs', bash(c, hookRepo)), `SID-162 review: shell must allow ${c} (${reasonOf(run('pre-bash.mjs', bash(c, hookRepo)))})`);
 
 // Run record: gate and stop outcomes are appended as JSON lines.
 const runs = readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
