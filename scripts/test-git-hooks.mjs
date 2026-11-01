@@ -6,7 +6,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DISPATCHER, stub } from './hooks.mjs';
+import { DISPATCHER, ORIGIN_OK, source, sourceProblem, STABLE_CLONE, stub } from './hooks.mjs';
 import { scratch } from './scratch.mjs';
 import { guardVerdict, pushCommand } from '../hooks/harness/git-hook.mjs';
 
@@ -242,6 +242,53 @@ t('k12: the chained hooks dir can\'t be redirected by an agent: git config is ig
   const g = repo(); assert.equal(cli('install', '--repo', g).status, 0);
   ok(g, 'git config --remove-section core'); // as a human could: check says so, and a fresh install repairs it
   assert.match(cli('check', '--repo', g).stdout, /NOT INSTALLED/);
+});
+
+t('k13: `source` keeps the stable clone on merged main: ff-only, refuses dirty/branch/origin, --check is read-only', () => {
+  assert.equal(STABLE_CLONE, join(process.env.HOME, '.local', 'share', 'sflow'));
+  for (const u of ['https://github.com/siddhant-angore/sflow.git', 'https://github.com/siddhant-angore/sflow', 'git@github.com:siddhant-angore/sflow.git', 'ssh://git@github.com/siddhant-angore/sflow.git']) assert.ok(ORIGIN_OK(u), u);
+  for (const u of ['https://github.com/someone/sflow.git', 'https://github.com/siddhant-angore/sflow-fork.git', 'https://evil.com/siddhant-angore/sflow.git', 'https://github.com.evil.com/siddhant-angore/sflow.git', '/tmp/x.git', '../r1.origin.git', 'https://github.com/siddhant-angore/sflow.git.evil'])
+    assert.ok(!ORIGIN_OK(u), u);
+  const up = repo(null), originDir = join(up, '..', `r${n}.origin.git`);
+  const local = (u) => u === originDir || u === realpathSync(originDir); // tests only: a local bare origin stands in for github
+  const clone = join(tmp, `clone${n}`); ok(tmp, `git clone -q ${originDir} ${clone}`);
+  const lines = []; const run = (o = {}) => { lines.length = 0; return source(clone, { log: (l) => lines.push(l), originOk: local, ...o }); };
+  const head = () => ok(clone, 'git rev-parse HEAD'), main = () => ok(up, 'git rev-parse origin/main');
+  assert.equal(run({ checkOnly: true }), true); assert.match(lines[0], /^ok .* is on origin main/);
+  assert.equal(run(), true); assert.match(lines[0], /^current /);
+  const old = head(); ok(up, 'git checkout -q main && echo 2 > two && git add two && git commit -qm two && git push -q origin main && git fetch -q origin && git checkout -q feat/x');
+  assert.equal(run({ checkOnly: true }), false); assert.match(lines[0], /^BEHIND .* a human runs: npm run hooks -- source/);
+  assert.equal(head(), old, '--check changes nothing'); assert.notEqual(ok(clone, 'git rev-parse origin/main'), main(), '--check does not fetch');
+  assert.equal(run(), true); assert.equal(lines[0], `updated   ${realpathSync(clone)} ${old} -> ${main()}`); assert.equal(head(), main());
+  assert.equal(run({ checkOnly: true }), true);
+  // refusals change nothing
+  const refused = (setup, undo, want) => {
+    ok(up, 'git checkout -q main && echo $RANDOM >> two && git commit -qam more && git push -q origin main && git checkout -q feat/x');
+    const before = head(); ok(clone, setup);
+    for (const checkOnly of [true, false]) { assert.equal(run({ checkOnly }), false, setup); assert.match(lines[0], want); assert.match(lines[0], /nothing changed/); }
+    assert.equal(head(), before, `refused: ${setup}`); ok(clone, undo);
+  };
+  refused('echo x >> two', 'git checkout -q -- two', /^REFUSED .*not clean/);
+  refused('echo x > untracked', 'rm untracked', /^REFUSED .*not clean/);
+  refused('echo x > staged && git add staged', 'git rm -q --cached staged && rm staged', /^REFUSED .*not clean/);
+  refused('git checkout -q -b other', 'git checkout -q main', /^REFUSED .*on other, not main/);
+  refused('git checkout -q --detach', 'git checkout -q main', /^REFUSED .*detached HEAD, not main/);
+  refused(`git config url.${originDir}.insteadOf /nowhere/x.git && git remote set-url origin /nowhere/x.git`, `git config --remove-section url.${originDir} && git remote set-url origin ${originDir}`, /^REFUSED .*origin is \/nowhere\/x\.git/);
+  refused(`git config url./nowhere/evil.git.insteadOf ${originDir}`, 'git config --remove-section url./nowhere/evil.git', /^REFUSED .*-> \/nowhere\/evil\.git/); // insteadOf can't redirect it
+  assert.equal(run(), true); assert.equal(head(), main());
+  // the real origin check: a local origin is refused by the CLI default
+  assert.match(sourceProblem(clone), /not github\.com\/siddhant-angore\/sflow/);
+  const c = cli('source', '--check', '--clone', clone); assert.equal(c.status, 1); assert.match(c.stdout, /REFUSED/);
+  assert.equal(cli('source', '--bogus').status, 2);
+  assert.match(sourceProblem(join(clone, 'skills') + '-none'), /not the top of a git checkout/);
+  // ff-only: a clone with its own commit is never merged or reset
+  ok(clone, 'echo mine > mine && git add mine && git commit -qm mine');
+  const mine = head(); ok(up, 'git checkout -q main && echo 3 >> two && git commit -qam three && git push -q origin main && git checkout -q feat/x');
+  assert.equal(run({ checkOnly: true }), false); assert.match(lines[0], /^BEHIND /);
+  assert.equal(run(), false); assert.match(lines[0], /^FAILED .*still at /); assert.equal(head(), mine, 'diverged: nothing merged');
+  ok(up, 'git fetch -q origin'); ok(clone, `git fetch -q origin && git reset -q --hard origin/main`); // test cleanup only
+  ok(clone, 'echo ahead > ahead && git add ahead && git commit -qm ahead');
+  assert.equal(run({ checkOnly: true }), false); assert.match(lines[0], /^AHEAD .* has commits main does not/);
 });
 
 console.log('git hooks tests ok');
