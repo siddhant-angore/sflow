@@ -1,12 +1,13 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
+import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -18,7 +19,7 @@ const reasonOf = (r) => r?.hookSpecificOutput?.permissionDecisionReason ?? '';
 const denied = (hook, ev) => run(hook, ev)?.hookSpecificOutput?.permissionDecision === 'deny';
 
 // A repo with an origin whose main carries the policy, and a feature branch checked out.
-const repo = mkdtempSync(join(tmpdir(), 'harness-test-'));
+const repo = makeScratch('harness-test-');
 sh(repo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 'echo base={base}'] }));
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -258,7 +259,7 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git status'))), /failing closed/
 setPolicy({ gate: ['test -f a'] });
 
 // Linked worktree: .git is a file; gate and stop still work.
-const wt = join(repo, '..', 'wt-' + Date.now());
+const wt = trackScratch(join(repo, '..', 'wt-' + Date.now()));
 sh(repo, `git worktree add -q -b feat/wt "${wt}" main && cd "${wt}" && echo w > w && git add w && git commit -qm w`);
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/wt', wt)), null, 'gate passes in a worktree');
 assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), 'harness-gate', sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
@@ -274,7 +275,7 @@ assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: false }), null, 'sam
 assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: true }), null, 'never loops');
 sh(repo, 'git checkout -q -- a');
 assert.match(run('stop.mjs', { cwd: repo, stop_hook_active: false })?.reason ?? '', /gate/);
-const plain = mkdtempSync(join(tmpdir(), 'plain-'));
+const plain = makeScratch('plain-');
 sh(plain, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && echo b > b');
 assert.equal(run('stop.mjs', { cwd: plain, stop_hook_active: false }), null, 'repo without .harness.json is left alone');
 assert.equal(run('pre-bash.mjs', bash('git push --force', plain))?.hookSpecificOutput?.permissionDecision, 'deny', 'guard still applies without a policy file');
@@ -307,7 +308,7 @@ const runsAfter = readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8').tr
 assert.ok(runsAfter.some((r) => r.kind === 'stop' && r.decision === 'brake'), 'brake recorded');
 
 // Solo repo: an explicit empty protectedBranches turns the push guard off but keeps every other rule.
-const solo = mkdtempSync(join(tmpdir(), 'harness-solo-'));
+const solo = makeScratch('harness-solo-');
 sh(solo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(solo, '.harness.json'), JSON.stringify({ protectedBranches: [], gate: [] }));
 sh(solo, 'git add .harness.json && git commit -qm p && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin');
@@ -320,7 +321,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 {
   const { config } = await import(join(hooks, 'lib.mjs'));
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid65-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid65-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mk = (name) => { // repo on feat/x, bare origin with main only (no policy), origin/HEAD unset
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -598,7 +599,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
       for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .', 'cp a .claude/settings.json']) assert.ok(verdict(d, cmd).deny, `k8 ${tag}: SID-66 must deny: ${cmd}`);
       for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'jq . .harness.json']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: SID-66 must allow: ${cmd} (${verdict(d, cmd).why})`);
     }
-    const nonRepo = mkdtempSync(join(tmpdir(), 'harness-sid65-k8n-'));
+    const nonRepo = makeScratch('harness-sid65-k8n-');
     made.push(nonRepo);
     for (const cmd of ['gh pr merge 1 -R o/r', 'git push -f origin HEAD:main']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: must deny: ${cmd}`);
     for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
@@ -690,7 +691,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 // Deny messages say what to do instead; narrow rules, so normal work stays allowed. Symlink defence and the SID-65 backstop are covered too.
 {
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid66-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid66-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mkNone = (name) => { // repo on feat/x, bare origin with main only: no policy committed
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -876,26 +877,35 @@ const baselines = [];
 for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
-  const dir = mkdtempSync(join(tmpdir(), 'harness-main-'));
+  const dir = makeScratch('harness-main-');
   for (const f of ['lib.mjs', 'guard-rules.mjs']) writeFileSync(join(dir, f), gitHere('show', `${rev}:workflows/hooks/${f}`));
   const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
   baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
 }
 const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
 const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
+// Round-7 templates (brace forms, sort -o, uniq -, git log --output, sort --co=). Their quoted payload runs nowhere, so baselines and the guard both allow
+// the bare forms and the gap check asserts nothing for them; ROUND7_SEMI (SID-110) adds `true; <template>` and `<template>; <body>` so they bite.
+const ROUND7 = [
+  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
+  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
+  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`
+];
 const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`, (x) => `bash -c "true && ${x}"`, (x) => `bash -c -- 'true; ${x}'`, (x) => `sh -c '${x}'`, (x) => `setsid sh -c 'true; ${x}'`, (x) => `busybox sh -c 'true; ${x}'`, (x) => `fish -c 'true; ${x}'`,
   (x) => `docker exec c sh -c 'true; ${x}'`, (x) => `tmux new 'true; ${x}'`, (x) => `perl -e 'system("true; ${x}")'`, (x) => `parallel ::: 'true; ${x}'`, (x) => `xargs sh -c 'true; ${x}'`, (x) => `ssh host 'cd x; ${x}'`, (x) => `nohup sh -c 'true; ${x}'`,
   (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
   (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
   (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`,
   (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`,
-  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
-  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
-  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`,
+  ...ROUND7,
   (x) => `echo '${x}' | sh`, (x) => String.raw`printf '${x}\n' | bash`, (x) => `echo '${x}' | tee >(sh)`, (x) => `sh <(echo '${x}')`, (x) => `echo '${x}' | xargs -I{} sh -c {}`, (x) => `echo ${x} | sh`, (x) => `echo '${x}' > >(sh)`,
   (x) => `source <(echo '${x}')`, (x) => `. <(echo '${x}')`, (x) => `echo '${x}' | source /dev/stdin`, (x) => `echo '${x}' | xargs -I{} sh -c 'eval {}'`, (x) => `echo '${x}' | xargs sh -c 'eval "$@"' _`,
   (x) => `sh -c "$(echo '${x}')"`, (x) => `bash -c "\`printf '${x}'\`"`, (x) => `eval "$(echo '${x}')"`, (x) => `eval \`echo ${x}\``];
+const ROUND7_SEMI = ROUND7.flatMap((t) => [(x) => `true; ${t(x)}`, (x) => `${t(x)}; ${x}`]);
+TEMPLATES.push(...ROUND7_SEMI);
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
+// SID-110: `<template>; <body>` runs the body as its own command, so the current guard must deny every one, on a feature and a protected branch.
+for (const t of ROUND7_SEMI.filter((_, k) => k % 2)) for (const x of BODIES) for (const b of ['feat/x', 'main']) assert.ok(newDenies(t(x), b), `SID-110 ; variant must be denied on ${b}: ${t(x)}`);
 const everything = [...new Set([...corpus, ...generated])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
 const ALLOWLIST = new Map([
