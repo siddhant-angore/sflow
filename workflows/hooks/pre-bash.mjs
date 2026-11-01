@@ -12,6 +12,9 @@ if (ev.tool_name !== 'Bash') process.exit(0);
 const cmd = String(ev.tool_input?.command ?? '');
 try {
   const cfg = config(ev.cwd);
+  // SID-82/83: a committed policy that exists but can't be used fails closed exactly as a parse error always did: every command is denied
+  // (nothing that was denied becomes allowed), now with the reason and who fixes it instead of a bare exception.
+  if (cfg.broken) { deny(`harness hook error (failing closed): ${policyNote(cfg)}. Every shell command is blocked until then; ask a human to fix .harness.json on origin/${cfg.broken.base} (PR, merge) and run git fetch origin in this checkout.`); process.exit(0); }
   // Branch unknown (null) when there is no root, or the command retargets git at another repo or dir: the hook cwd's branch is not the one pushed, so a push must name its branch.
   const branch = cfg.root && !retargets(cmd) ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
   const env = envReason(cmd);
