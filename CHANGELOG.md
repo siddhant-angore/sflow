@@ -43,6 +43,11 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - `scripts/test-plugin-root-space.mjs` now also runs every `hooks:` command in the frontmatter of both plugins' agents (`agents/*.md`) and skills (`skills/*/SKILL.md`). A self-check confirms it catches the old unquoted form.
   - This is the only frontmatter hook in either plugin. (SID-49)
 - Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 923 to 922 files. (SID-49)
+- Harness: the file tools can't write git hook files (SID-162, security; found by sflow Engineer). The shell guard already denied writes into hooks dirs, but `Write`, `Edit` and `MultiEdit` went through the policy hook, which only checked the policy files, so an agent could create `.git/hooks/pre-commit` (or a `.git/sflow-hooks/` stub) with the file tools.
+  - `policy.mjs` now also denies, with the shell guard's message, a path in `.git/hooks`, `.git/sflow-hooks`, a linked worktree's or a submodule's hooks dir (by name, case-insensitive), and anything inside the repo's real `<git common dir>/hooks`, `<git common dir>/sflow-hooks` or a configured `core.hooksPath` (relative to the work tree, absolute, or `~/`). The path is checked as given and resolved (`..`, `//`, symlinked parents), so a separate git dir or a symlink to `.git/hooks` is covered.
+  - Tighten-only: nothing that was denied becomes allowed. Ordinary files named like hooks stay allowed (`src/hooks/`, `hooks/harness/`, `.github/hooks/`, `.githooks/` unless it is `core.hooksPath`). Outside a git repo nothing changes.
+  - Not covered: `.git/config` through the file tools (it can set `core.hooksPath`); tracked as the next tightening in SID-162.
+  - `npm run test:hooks` has must-deny and must-allow cases for all three tools; six mutations of the check are each caught.
 
 **Upstream pins**
 

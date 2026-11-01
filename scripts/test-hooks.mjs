@@ -291,7 +291,7 @@ const HOOK_FILE = /^harness: writing into a hooks directory installs code git ru
 const fileTool = (tool, file_path, cwd) => reasonOf(run('policy.mjs', { tool_name: tool, tool_input: { file_path, content: 'x' }, cwd }));
 const hookRepo = realpathSync(makeScratch('harness-hookfile-'));
 sh(hookRepo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && mkdir -p hk src/hooks hooks/harness docs');
-sh(hookRepo, 'git worktree add -q -b wt wt && git submodule--helper 2>/dev/null; true');
+sh(hookRepo, 'git worktree add -q -b wt wt');
 symlinkSync(join(hookRepo, '.git', 'hooks'), join(hookRepo, 'lnk'));
 const sep = realpathSync(makeScratch('harness-hookfile-sep-'));
 sh(sep, 'git init -q --separate-git-dir ../$(basename $PWD).gitdir w');
