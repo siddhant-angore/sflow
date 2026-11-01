@@ -652,6 +652,63 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
     for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must deny: ${cmd}`);
     for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'cp .harness.json backup/']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: SID-66 must allow: ${cmd} (${verdict(nonRepo, cmd).why})`);
 
+    // k10. SID-82/83: a committed policy that exists but is unusable (invalid JSON, not an object, over the 1 MB cap) is BROKEN: strict defaults,
+    // nothing falls through to the next candidate, config() never throws, and pre-bash still fails closed on EVERY command, as a parse error
+    // always did (Siddhant, Oct 31: B ships fail-closed with no read or git status allowance), now naming the reason and who fixes it.
+    const { POLICY_MAX } = await import(join(hooks, 'lib.mjs'));
+    const policyRaw = (d, branch, text) => { // like policyOn, but commits the exact bytes given (written by node, not the shell)
+      sh(d, `git checkout -q -B ${branch} $(git rev-parse -q --verify origin/${branch} || echo HEAD)`);
+      writeFileSync(join(d, '.harness.json'), text);
+      sh(d, `git add .harness.json && git commit -qm policy && git push -q origin ${branch} && git checkout -q feat/x && git branch -q -D ${branch}`);
+    };
+    const pad = (n) => { const head = '{"allowMerge":true,"protectedBranches":["main"],"pad":"', tail = '"}'; return head + 'x'.repeat(n - head.length - tail.length) + tail; };
+    const stillDenied = ['ls', 'git status', 'git fetch origin', 'npm test', 'gh pr view 1', 'cat .harness.json'];
+    const holdsBroken = (d, tag, reasonRe) => {
+      const c = config(d);
+      assert.ok(c.broken && c.present === false && c.allowMerge === false && c.gate.length === 0 && c.dod.length === 0, `${tag}: broken, strict defaults`);
+      assert.deepEqual([c.source, c.base, c.broken.base, typeof c.baseSha], ['origin/main', 'main', 'main', 'string'], `${tag}: origin/main is the policy candidate`);
+      assert.match(c.broken.reason, reasonRe, `${tag}: reason`);
+      for (const n of ['main', 'master']) assert.ok(c.protectedBranches.includes(n), `${tag}: ${n} protected`);
+      for (const cmd of [...stillDenied, 'git push origin main', 'git push origin feat/x', 'gh pr merge 1', 'gh pr create --fill', 'gh pr ready 1']) {
+        const v = verdict(d, cmd);
+        assert.ok(v.deny, `${tag}: must deny: ${cmd}`);
+        assert.ok(v.why.includes(`the .harness.json on origin/main ${c.broken.reason}; strict defaults apply`), `${tag}: ${cmd} names the broken policy and reason (${v.why})`);
+        assert.match(v.why, /until a human fixes it on main/, `${tag}: ${cmd} says who fixes it`);
+        assert.match(v.why, /^harness hook error \(failing closed\): /, `${tag}: ${cmd} fails closed as before`);
+      }
+      const ctx = run('session-start.mjs', { hook_event_name: 'SessionStart', cwd: d }).hookSpecificOutput.additionalContext;
+      assert.ok(ctx.includes(`the .harness.json on origin/main ${c.broken.reason}`), `${tag}: SessionStart surfaces the note`);
+      assert.equal(run('stop.mjs', { cwd: d, stop_hook_active: false }), null, `${tag}: Stop is silent, as with no policy`);
+    };
+    // 1. invalid JSON on origin/main; a permissive policy on master must not be used
+    const k10a = mk('k10a');
+    policyRaw(k10a, 'main', '{"allowMerge": tru');
+    policyRaw(k10a, 'master', JSON.stringify({ protectedBranches: [], allowMerge: true }));
+    holdsBroken(k10a, 'k10 invalid JSON', /^is not valid JSON \(.+\)$/);
+    assert.ok(verdict(k10a, 'gh pr merge 1').why.includes(config(k10a).broken.reason), 'k10 invalid JSON: the deny text carries the parse error');
+    // 2. over the cap on main, permissive on master: master is not consulted
+    const k10b = mk('k10b');
+    policyRaw(k10b, 'main', pad(POLICY_MAX + 1));
+    policyRaw(k10b, 'master', JSON.stringify({ protectedBranches: [], allowMerge: true }));
+    holdsBroken(k10b, 'k10 over 1 MB', new RegExp(`^is over 1 MB \\(${POLICY_MAX + 1} bytes\\)$`));
+    assert.equal(config(k10b).allowMerge, false, 'k10 over 1 MB: master allowMerge not used');
+    // 3. exactly at the cap still works
+    const k10c = mk('k10c');
+    policyRaw(k10c, 'main', pad(POLICY_MAX));
+    const c10c = config(k10c);
+    assert.deepEqual([c10c.present, c10c.broken ?? null, c10c.allowMerge, c10c.source], [true, null, true, 'origin/main'], 'k10 at the cap: policy read');
+    assert.ok(!verdict(k10c, 'gh pr merge 1').deny, 'k10 at the cap: committed allowMerge honoured');
+    // 4. valid JSON that is not an object
+    for (const [i, text] of [['arr', '[]'], ['str', '"x"'], ['num', '42'], ['null', 'null']]) {
+      const d = mk(`k10d${i}`);
+      policyRaw(d, 'main', text);
+      holdsBroken(d, `k10 non-object ${text}`, /^is not valid JSON for a policy \(it must be an object/);
+    }
+    // 5. a missing file on main still falls through to master (SID-65 behaviour unchanged)
+    const k10e = mk('k10e');
+    policyOn(k10e, 'master', { gate: [] });
+    assert.deepEqual([config(k10e).present, config(k10e).source, config(k10e).broken ?? null], [true, 'origin/master', null], 'k10 no file on main: falls through to master');
+
     // k9. Branch unknown: the hook cwd's branch is not what a push updates when git has no work tree (cwd inside .git, core.bare) or the command
     // targets another repository. Then a push must name its branch. With the branch known and no retargeting, behaviour is unchanged.
     const { retargets } = await import(join(hooks, 'guard-rules.mjs'));

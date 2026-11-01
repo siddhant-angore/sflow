@@ -11,6 +11,8 @@
     "test:eval-brake": "node scripts/test-eval-brake.mjs",
     "test:upstream": "node scripts/test-upstream.mjs",
     "test:vendor": "node scripts/test-vendor.mjs",
+    "model-budget": "node scripts/model-budget.mjs",
+    "test:model-budget": "node scripts/test-model-budget.mjs",
     "hooks": "node scripts/hooks.mjs",
     "test:git-hooks": "node scripts/test-git-hooks.mjs",
     "upstream": "node scripts/upstream.mjs"

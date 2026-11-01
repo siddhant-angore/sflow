@@ -45,23 +45,38 @@ export const baseCandidates = (root) => [...new Set([remoteDefault(root), 'main'
 
 // The policy is the .harness.json committed on origin's base branch: origin/HEAD's branch, then main, then master.
 // The working tree is never read as policy, so an agent edit changes nothing. With no committed policy the config fails
-// closed: strict defaults (merges denied, no gate, no Stop items) and present is false. Parse errors throw; pre-bash denies on throw.
+// closed: strict defaults (merges denied, no gate, no Stop items) and present is false.
+// SID-82/83: "no .harness.json on this candidate" falls through to the next candidate (as always). A file that EXISTS but cannot be used
+// (over POLICY_MAX, unreadable, not valid JSON, not a JSON object) is broken: that candidate is the policy, nothing falls through (the next
+// candidate may be permissive, and skipping the gate silently is the same hole), and the result is strict defaults + broken:{ base, reason }, never a throw; pre-bash then denies every command (fail-closed, as a throw did).
+export const POLICY_MAX = 1 << 20; // 1 MB; git() buffers a blob in memory with the default maxBuffer
 export function config(cwd = process.cwd()) {
   const found = repoRoot(cwd);
   if (!found) return { ...DEFAULTS, root: null, present: false, candidates: [], unreadable: true };
   const { root, noWorkTree } = found;
   const candidates = baseCandidates(root);
-  let text = null, source = null, base = null, baseSha = null;
+  let text = null, source = null, base = null, baseSha = null, broken = null;
   for (const b of candidates) {
     const sha = remoteSha(root, b);
     if (!sha) continue;
-    try { text = git(root, 'show', `${sha}:.harness.json`); source = `origin/${b}`; base = b; baseSha = sha; break; } catch {}
+    let size;
+    try { size = Number(git(root, 'cat-file', '-s', `${sha}:.harness.json`)); } catch { continue; } // no such file here (or no such tree): next candidate
+    source = `origin/${b}`; base = b; baseSha = sha;
+    if (!Number.isInteger(size) || size < 0) broken = { base: b, reason: `could not be read (unexpected size ${JSON.stringify(size)})` };
+    else if (size > POLICY_MAX) broken = { base: b, reason: `is over 1 MB (${size} bytes)` };
+    else try { text = git(root, 'show', `${sha}:.harness.json`); } catch (e) { broken = { base: b, reason: `could not be read (${e.message.split('\n')[0]})` }; }
+    break;
   }
+  let parsed = null;
+  if (text !== null) {
+    try { parsed = JSON.parse(text); } catch (e) { broken = { base, reason: `is not valid JSON (${e.message})` }; }
+    if (!broken && (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))) broken = { base, reason: `is not valid JSON for a policy (it must be an object, not ${parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`})` };
+  }
+  if (broken) return { ...DEFAULTS, protectedBranches: [...new Set([...DEFAULTS.protectedBranches, broken.base].filter(Boolean))], allowMerge: false, gate: [], dod: [], root, noWorkTree, present: false, broken, source, base, baseSha, candidates };
   if (text === null) {
     const head = remoteDefault(root);
     return { ...DEFAULTS, protectedBranches: [...new Set([...DEFAULTS.protectedBranches, head].filter(Boolean))], allowMerge: false, gate: [], dod: [], root, noWorkTree, present: false, source: null, base: head ?? 'main', baseSha: remoteSha(root, head ?? 'main'), candidates, ignoredLocal: existsSync(join(root, '.harness.json')) };
   }
-  const parsed = JSON.parse(text);
   // A non-array protectedBranches is dropped. The base branch must itself be protected, or an agent could push a new policy there; [] (solo repo) is kept.
   let protectedBranches = Array.isArray(parsed.protectedBranches) ? parsed.protectedBranches : DEFAULTS.protectedBranches;
   if (protectedBranches.length && !protectedBranches.includes(base)) protectedBranches = [...protectedBranches, base];
@@ -75,9 +90,13 @@ const ADOPT = (base) => ` The working-tree .harness.json is NOT trusted until it
 export const policyNote = (cfg) => policyLine(cfg) + (cfg.noWorkTree ? ` (no work tree: git dir ${cfg.root})` : '');
 const policyLine = (cfg) => cfg.unreadable
   ? 'policy: git could not read a repository here (rev-parse failed), so strict defaults apply: protected main, master; merges denied. If this is a repository, check its config (core.bare, core.repositoryformatversion, core.worktree, include.path).'
+  : cfg.broken
+  ? brokenNote(cfg)
   : cfg.present
   ? `policy: .harness.json on origin/${cfg.base}`
   : `policy: none committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}); strict defaults, protected: ${cfg.protectedBranches.join(', ')}, merges denied.${cfg.ignoredLocal ? ADOPT(cfg.base) : ''}`;
+// SID-82/83: the committed policy exists but is unusable. Strict defaults hold until a human fixes it on the base branch.
+export const brokenNote = (cfg) => `policy: the .harness.json on origin/${cfg.broken.base} ${cfg.broken.reason}; strict defaults apply (protected: ${cfg.protectedBranches.join(', ')}, merges denied) until a human fixes it on ${cfg.broken.base}`;
 export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: no policy is committed on origin (checked ${cfg.candidates.map((b) => `origin/${b}`).join(', ')}), so strict defaults apply (protected: ${cfg.protectedBranches.join(', ')}, merges denied, no gate).${ADOPT(cfg.base)}`;
 
 // The policy files no agent may write: the harness policy and Claude Code's own permissions. Matched by "path ends with", case-insensitively (macOS).

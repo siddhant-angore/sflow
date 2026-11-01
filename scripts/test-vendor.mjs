@@ -251,6 +251,19 @@ const tests = [
     const c = f.check(); assert.equal(c.status, 0, c.out);
     assert.equal(f.read('domains/x/LICENSES/two.LICENSE'), lic); assert.equal(f.read('domains/x/NOTICE.md'), notice);
   })],
+  ['r: a target overlay edits a vendored JSON file, NOTICE says so, and a bad anchor or broken JSON fails sync', () => withTmp((tmp) => {
+    const { f } = simple(tmp, { 'cfg/h.json': '{ "c": "bash $R/x.sh" }\n' }, { from: 'cfg', to: 'out' });
+    const overlay = (change) => writeFileSync(join(f.root, 'workflows/o.md'), `---\ntarget: out/h.json\nwhen: quote the root (SID-49).\n---\n# o\n- **Replace** "bash $R/x.sh": ${change}\n`);
+    overlay('bash \\"$R/x.sh\\"');
+    f.goodSync();
+    assert.deepEqual(JSON.parse(f.read('out/h.json')), { c: 'bash "$R/x.sh"' });
+    assert.match(f.read('NOTICE.md'), /^- `out\/h\.json` carries an sflow change: quote the root \(SID-49\)\.$/m);
+    assert.equal(f.check().status, 0); assert.equal(f.goodSync().status, 0); assert.equal(f.read('out/h.json').split('\\"').length, 3);
+    overlay('bash "$R/x.sh"');   // unescaped quotes: the result is not JSON
+    let r = f.sync(); assert.notEqual(r.status, 0); assert.match(r.out, /out\/h\.json is not valid JSON after the overlay/);
+    writeFileSync(join(f.root, 'workflows/o.md'), '---\ntarget: out/h.json\nwhen: w\n---\n- **Replace** "not there": y\n');
+    r = f.sync(); assert.notEqual(r.status, 0); assert.match(r.out, /"not there" is not in out\/h\.json/);
+  })],
 ];
 
 let failed = 0;
