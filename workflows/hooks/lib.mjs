@@ -646,7 +646,7 @@ export const secretsInDiff = (diff) => secretNames(addedLines(diff));
 // The flags stop repo config hiding added lines: color puts escape codes before the `+`, an external diff or textconv driver can print anything, and -diff, binary, a binary diff driver or a NUL byte print
 // `Binary files differ` unless --text. Shared with the pre-commit scan, so the two cannot drift.
 // core.bigFileThreshold=1g is defence in depth no test can tell from --text on git 2.47: only the binary sniff reads the threshold and --text skips the sniff, --cc and diff-tree -c never read it, and a file a textconv read takes for binary is read raw by the --text read.
-// core.commitGraph=false: git trusts a graph file's parent column, so a hand-edited graph can cut commits out of the walk.
+// core.commitGraph=false: git trusts a graph file's parent column, so a hand-edited graph can cut commits out of the walk. GIT_SHALLOW_FILE=/dev/null also turns the graph off today, because git counts a repo with any shallow file as shallow; this does not lean on that.
 const SCAN_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.bigFileThreshold=1g', '-c', 'core.commitGraph=false'];
 const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '--text'];
 const SCAN_EXCLUDES = [':(exclude)*.lock', ':(exclude)*.snap'];
@@ -668,7 +668,7 @@ const addedByMerges = (read, merges) => merges.flatMap(([merge, ...parents]) => 
   const changed = read(['diff-tree', '-c', '--name-only', '-z', '--no-commit-id', merge], { flags: [], paths: [] }).split('\0').filter(Boolean);
   if (!changed.length) return [];
   // A name that is not UTF-8 decodes to U+FFFD and could not be passed back to git, so such a merge is read whole.
-  const paths = changed.some((p) => p.includes('�')) ? SCAN_PATHS : ['--', ...changed.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES];
+  const paths = changed.some((p) => p.includes('\ufffd')) ? SCAN_PATHS : ['--', ...changed.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES];
   const perParent = parents.map((p) => new Set(addedLines(read(['diff', `${p}..${merge}`], { paths }))));
   return [...perParent[0]].filter((line) => perParent.every((added) => added.has(line)));
 });

@@ -163,6 +163,14 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
       sh(d, `git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; echo resolved > m.txt; git add m.txt && git commit -qm merge-main`);
       assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
     },
+    'lock-in: a plain merge of origin main with a big file reads no path and does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, 'git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat && git merge -q --no-ff -m merge-main origin/main');
+      assert.ok(!sh(d, 'git diff-tree -c --name-only --no-commit-id HEAD'), 'the merge changes no path against every parent');
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
     'a NUL before the token, past byte 8000, does not hide a secret a merge adds, removed later': () => {
       const d = scanRepo();
       evilMerge(d, lateNulToken);
@@ -214,6 +222,16 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
       clean(clone, 'more');
       refused(push(clone), CLOSED, 'error');
     },
+    'a genuinely shallow clone with commits above the base still scans them': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch main "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git checkout -q -b feat/x');
+      clean(clone, 'more');
+      passed(push(clone));
+      addToken(clone);
+      refused(push(clone), NET, 'secret');
+    },
     'gate commands run with the shallow file off': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); passed(push(d)); },
     'log.showSignature does not run gpg.program during the scan': () => {
       const d = scanRepo(), { marker, program } = fakeGpg(d);
@@ -237,7 +255,7 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
       const d = scanRepo({ gate: ['echo base={base}'] }), base = sh(d, 'git rev-parse origin/main'), older = sh(d, 'git rev-parse origin/main~1');
       clean(d, 'one'); const one = head(d); clean(d, 'two'); const two = head(d); clean(d, 'three');
       poisonGraph(d, [[one, older], [older, two]], { [base]: 20, [older]: 19 });
-      assert.notEqual(sh(d, `git merge-base HEAD ${base}`), base, 'the graph gives a false merge-base');
+      assert.notEqual(sh(d, `git merge-base HEAD ${base} || echo none`), base, 'the graph gives a false merge-base, or none');
       const r = push(d); passed(r);
       assert.ok(r.runs.some((x) => x.command === `echo base=${base}`), `base is ${base}: ${JSON.stringify(r.runs)}`);
     },
