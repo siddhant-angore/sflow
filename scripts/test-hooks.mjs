@@ -220,6 +220,30 @@ for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'ech
 for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
+// SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
+const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;
+const unhookDeny = ['rm -rf .git/hooks', 'rm -f .git/hooks/pre-push', 'mv .git/hooks /tmp/x', 'rm -rf .git/sflow-hooks', 'rm .git/sflow-hooks/pre-push', 'rm -rf .husky', 'rm -rf .husky/', 'rm .husky/pre-commit',
+  'mv .husky/pre-commit .husky/off', 'rm -rf .git/hoo*', 'rm -rf .git/*', 'rm -rf .gi?/hooks', 'rm -rf .git/[h]ooks', 'rm -rf .git/sflow-*', 'rm -rf .hu*', 'cd .git && rm -rf hooks', 'cd .git/hooks && rm pre-push', 'cd .husky; rm pre-commit',
+  'rm -rf "$(git rev-parse --git-path hooks)"', 'rm -rf `git rev-parse --git-path hooks`', 'rm -rf "$(git rev-parse --git-common-dir)/hooks"', 'rm -rf "$GIT_DIR/hooks"', 'GIT_DIR=/r/.git rm -rf /r/.git/hooks',
+  'rm -rf /workspace/repo/.git/hooks', 'rm -rf /workspace/repo/.git/worktrees/wt/hooks', 'rm -r .git/modules/sub/hooks', 'unlink .git/hooks/pre-commit', 'rmdir .git/hooks', 'shred -u .git/hooks/pre-push', 'rm -rf ./.git//hooks/',
+  'find .git/hooks -delete', 'find .git/hooks -type f -exec rm {} +', 'find .husky -name pre-commit -delete', 'chmod -x .git/hooks/pre-push', 'chmod 644 .git/sflow-hooks/pre-commit', 'chmod -R a-x .husky', 'sudo rm -rf .git/hooks',
+  'mv -t /tmp .git/hooks', 'mv --target-directory=/tmp .git/hooks/pre-push', 'true; rm -rf .git/hooks', 'echo "$(rm -rf .git/hooks)"', 'git status && rm -rf .git/hooks'];
+const unhookAllow = ['rm -rf build/', 'rm hooks.txt', 'rm -rf hooks', 'rm -rf src/hooks', 'rm -rf node_modules', 'rm .gitignore', 'rm -rf .github/x', 'rm -rf *', 'ls .git/hooks', 'cat .git/hooks/pre-push', 'ls .husky',
+  'cp .git/hooks/pre-push /tmp/sflow-x', 'find .git/hooks -name x', 'find . -name "*.pyc" -delete', 'chmod +x scripts/x.sh', 'mv a b', "echo 'rm -rf .git/hooks'"];
+for (const c of unhookDeny) { const r = reasonOf(run('pre-bash.mjs', bash(c))); assert.match(r, UNHOOK, `SID-155 must deny: ${c} (got: ${r || 'allowed'})`); }
+assert.ok(denied('pre-bash.mjs', bash('rm -rf .h*')), 'SID-155: .h* could match .husky and .harness.json; denied (the policy reason wins)');
+for (const c of unhookAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-155 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+assert.deepEqual(newGitWrites('cd .git && rm -rf hooks'), [{ path: '.git/hooks', kind: 'unhook' }]);
+assert.deepEqual(newGitWrites('mv .git/hooks /tmp/x'), [{ path: '.git/hooks', kind: 'unhook' }], 'mv: the source goes, /tmp/x is no git write');
+{ // real git: a linked worktree's hooks path, as git itself reports it, is denied from inside the worktree; nothing was run, the hooks dir is still there.
+  const wt = `${repo}.wt155`;
+  sh(repo, `git worktree add -q -b feat/wt155 "${wt}"`);
+  const hp = sh(wt, 'git rev-parse --path-format=absolute --git-path hooks');
+  for (const c of [`rm -rf ${hp}`, `rm -f ${hp}/pre-push`, `mv ${hp} /tmp/x`, 'rm -rf "$(git rev-parse --git-path hooks)"']) assert.match(reasonOf(run('pre-bash.mjs', bash(c, wt))), UNHOOK, `SID-155 linked worktree: ${c}`);
+  assert.ok(existsSync(hp), 'the guard only decides; the hooks dir is untouched');
+  sh(repo, `git worktree remove --force "${wt}" && git branch -q -D feat/wt155`);
+}
+
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
 assert.ok(denied('pre-bash.mjs', bash('gh pr merge 1')), 'working-tree policy edit must not take effect');
@@ -869,11 +893,11 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Three baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+// Four baselines (the fourth, 5c959d2, is main before SID-155): main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2']]) { // 5c959d2: main when SID-155 started
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
   const dir = mkdtempSync(join(tmpdir(), 'harness-main-'));
