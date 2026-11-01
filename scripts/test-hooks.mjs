@@ -87,6 +87,7 @@ const sid191More = [
   'git reset "$X"', 'git reset $X', 'git $SUB -f', '$G push -f', '${G} reset --hard', '$(which git) push -f origin feat/x', 'gh pr $X 1', 'gh $X merge 1', 'gh api $M repos/o/r', 'gh api repos/$R/pulls', 'git branch $F x', 'git clean $F', 'git checkout $X', 'git stash $X',
   'git -c "$K"=x status', 'git -c core.$K=x status', 'git --config-env=$K status', 'GIT_CONFIG_PARAMETERS="$X" git status', 'GIT_CONFIG_KEY_0=$K GIT_CONFIG_VALUE_0=x GIT_CONFIG_COUNT=1 git status', 'eval $X', 'eval "$CMD"', 'git commit $FLAGS -m x',
   'git checkout "$(echo .)"', 'git checkout `echo .`', 'echo "$(git reset "$X")"', 'git checkout -b $Y', 'git -c core.hooksPath=$X commit -m x',
+  '$CMD push', '$CMD push origin feat/x', '${G} commit -m x', '$GH pr merge 1', '$GH repo edit', '$X publish', '$A $B', '"$CMD" reset', 'gh workflow $X ci.yml', 'gh repo $X o/r',
 ];
 for (const c of sid191More) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 must deny on ${b}: ${c}`);
 const sid191Allow = [
@@ -100,7 +101,7 @@ const sid191Allow = [
 const sid191Collateral = ['git checkout $BRANCH', 'git checkout "$BRANCH"', 'git switch "$BRANCH"', 'git restore "$F"', 'git restore --staged "$F"', 'git reset $SHA', 'git reset --soft "$SHA"', 'git merge $B', 'git branch -d $B',
   'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's"];
 for (const c of sid191Collateral) assert.ok(guardDenies(c), `SID-191 collateral (documented, fails closed): ${c}`);
-const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git config user.name "$NAME"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d'];
+const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git config user.name "$NAME"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'cd "$D" && ls'];
 for (const c of sid191Kept) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 for (const c of sid191Allow) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 // Generated quote-split suite: every word of each guarded command, split in the middle (or wholly wrapped) by each quoting style, stays denied.

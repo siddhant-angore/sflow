@@ -469,6 +469,9 @@ export function expansionReason(seg, cfg, branch, vars = new Map()) {
   if (hasExp(w[0])) cands = ['git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'uv'].map((e) => [e, ...w.slice(1)]);
   else if (/^(git|gh)$/.test(w[0])) cands = [w];
   else return null;
+  // the rest of the line names a guarded subcommand (`$CMD push`, `$GH pr merge 1`, `$X publish`), or is itself an expansion: a guarded program
+  // could be in that variable, so it fails closed. `$EDITOR notes.md`, `$PYTHON x.py`, `$CMD status` stay allowed.
+  if (hasExp(w[0]) && w[1] !== undefined && (hasExp(w[1]) || [...GIT_SUBS, ...GH_SUBS, 'publish', 'unpublish', 'deprecate', 'filter-repo'].includes(canon(w[1]).text))) return say(w[0]);
   for (words of cands) {
     const exe = words[0];
     if (hasExp(w[0])) { const c = normalize(canon(words.join(' ')).text); if (reason(c, cfg, branch)) return say(w[0]); }
@@ -537,11 +540,11 @@ export function lineReason(cmd) {
   if (C.open) return NO_OPEN;
   return [...new Set([cmd, C.text])].map(envReason).find(Boolean) ?? hiddenConfigReason(cmd);
 }
-// Every segment that may run: segments() of both forms, and each segment again with its own quoting resolved (text inside $( ),
+// Every segment that may run: segments() of the line, and each segment again with its own quoting resolved (text inside $( ),
 // sh -c '..' and piped-in scripts is unquoted only once it is a segment of its own).
 export function guardSegments(cmd) {
   const segs = [], seen = new Set();
-  for (const todo = [...new Set([cmd, canon(cmd).text])].flatMap(segments); todo.length;) {
+  for (const todo = segments(cmd); todo.length;) { // the whole line's canon form adds nothing: each segment below is re-read with its quoting resolved (a mutation dropping it survived)
     const s = todo.shift();
     if (seen.has(s)) continue;
     seen.add(s); segs.push(s);
