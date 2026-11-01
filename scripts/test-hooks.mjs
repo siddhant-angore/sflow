@@ -59,6 +59,19 @@ const onceDenies = (hookFile, command, branch) => {
 // ===== SID-247: the approved loosening of the hook-skip rule (Siddhant via the CTO, Nov 1 2026, 6:10 PM IST) =====
 // SFLOW_SID247_ONLY=1 stops after this block (the fast loop in scripts/mutate-merge-n.mjs; npm run check never sets it).
 const sid247Rules = newRules, sid247Cfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+// CTO review 5730668319: a word in git's global-option position that is quoted, escaped or an expansion and resolves to a dash-word. Git may read the next word as its value, so `merge` can hide a real `git commit -n`.
+const SID247_QUOTED_ATTACKS = [
+  'git --namespace"" merge commit -n -m x', 'git --namespace"" merge commit -m x -n', 'git -"-namespace" merge commit -n -m x', 'git --namespac\\e merge commit -n -m x', 'git -"C" merge commit -n -m x', 'git -\\C merge commit -n -m x', 'git --namespace"" rebase commit -n -m x', `bash -c 'git --namespace"" merge commit -n -m x'`, 'env git --namespace"" merge commit -n -m x',
+  // allowed on e7d30ea, closed here as a tightening (CTO review 5730668319): the old rule never read this line, since it normalizes to `git x commit -n -m x`
+  'git --namespace"" x commit -n -m x',
+  'git "-C" merge commit -n -m x', "git '--namespace' merge commit -n -m x", 'git \\-C merge commit -n -m x', 'git --git-dir"" merge commit -n -m x', 'git --work-tree"" merge commit -n -m x', 'git merge -n main && git --namespace"" merge commit -n -m x',
+  // the same words, as other spellings and behind other forms the guard reads
+  'git -"C" . merge -n main', "git $'-C' . merge -n main", "git $'\\x2dC' . merge -n main", 'git -C . --namespace"" merge commit -n -m x', 'git -c a=b -"C" . merge -n main', 'git --namespace`true` merge commit -n -m x', 'git --namespace$(true) merge commit -n -m x', 'git --namespace$X merge commit -n -m x', 'git -$X . merge -n main', 'git "--namespace$(true)" merge commit -n -m x',
+  'git >f --namespace"" merge commit -n -m x', 'git 2>&1 -"C" . merge -n main', '"env" git -"C" . merge -n main', 'g"i"t -"C" . merge -n main', '\\git --namespace"" x commit -n -m x', 'timeout 5 git --namespace"" x commit -n -m x', 'sudo -u x git --namespace"" x commit -n -m x', 'xargs git --namespace"" x commit -n -m x', 'chrt -f 5 git -"C" . merge -n main',
+  `b"ash" -c 'git -"C" . merge -n main'`, `eval 'git -"C" . merge -n main'`, `echo 'git -"C" . merge -n main' | sh`, 'bash <<E\ngit -"C" . merge -n main\nE', 'echo $(git -"C" . merge -n main)', `bash -c "bash -c 'git -\\"C\\" . merge -n main'"`, 'true && { git -"C" . merge -n main; }',
+];
+// Newly denied by the same rule, with no merge or commit to hide: pinned collateral. Each could be written plainly, and the deny says how.
+const SID247_QUOTED_COLLATERAL = ['git --git-dir="my dir" status', 'git --namespace="x" status', 'git --git-dir=$D status', 'git -"C" . status', 'git "--no-pager" status', 'echo git "-C"'];
 const SID247_MUST_ALLOW = [
   'git merge -n main', 'git rebase -n main', 'git merge -n', 'git rebase -n', 'git merge -n -m msg feat', 'git merge -m msg -n feat', 'git rebase -n --onto main feat', 'git merge --no-ff -n feat', 'git merge -n --no-ff feat', 'git merge -n -n feat',
   'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge -Xpatience main', 'git merge -Xrenormalize main', 'git merge -Xno-renames main', 'git merge -Xfind-renames=50 main', 'git rebase -Xno-renames main',
@@ -100,6 +113,7 @@ const SID247_MUST_DENY = [
   'git merge --strat -n main', 'git merge --mess -n feat', 'git merge -n --mess x feat', 'git rebase --ont -n main', 'git merge -n --onto x feat', 'git merge -n --root feat', 'git rebase -n --into-name x main',
   // run 4: a quoted value glued to an option it can't name; the option word is read up to the quote
   "git rebase -n -x'git commit -n' main", 'git rebase -n -x"make test" main', "git merge -n -x'a b' main", "git rebase -n -ix'make test' main", "git rebase -n --exec='make test' main", 'git rebase -n --"exec"=make main', 'git merge -n --"unknown" main',
+  ...SID247_QUOTED_ATTACKS, ...SID247_QUOTED_COLLATERAL,
 ];
 // [command, 'deny' | 'allow', why]
 const SID247_NEAR = [
@@ -113,6 +127,10 @@ const SID247_NEAR = [
   ['git merge "-n --no-verify" main', 'allow', "one quoted word, allowed today; git refuses it as an unknown option"], ['git merge -n "--no-verify x" main', 'allow', 'one quoted word that is not the flag; git refuses it'], ["git merge -X'a b' main", 'allow', 'allowed today'], ["git merge -X'a -nv b' main", 'allow', 'one quoted -X value, allowed today'],
   ['git merge -Xn main', 'allow', 'an -X value is not flags'], ['git rebase -Xn main', 'allow', 'an -X value is not flags'], ['git rebase -n -Xsubtree=box main', 'allow', 'the x is in an -X value, not -x'], ['git rebase -iXax main', 'allow', 'allowed today: -i, then -X with value ax'], ['git rebase -n -iXax main', 'allow', 'a bare -n beside -iX with a value that holds x, not -x'], ['git merge -n -x main', 'deny', 'run 4: merge has no -x; an unknown short option keeps today\'s verdict'], ['git merge -x main', 'allow', 'allowed today, no n for the rule to read; git refuses it'], ['git constructor -n', 'allow', 'allowed today: not a command the rule reads, and not a key of the option table'], ['git constructor -x', 'allow', 'allowed today: an inherited key of the option table must not reach the walker'], ['git merge -n main 2>&1', 'allow', 'a redirection is not an option word'], ['git merge -m"a b" -n feat', 'allow', 'a glued quoted value takes no next word'],
   ['git rebase -n --empty=keep --edit-todo', 'allow', '--e prefixes that are not --exec'], ['git merge -n --no-ff --no-edit feat', 'allow', '--no- options that are not a prefix of the flag'],
+  // CTO review 5730668319: the quoted-option rule reads global options only. The first three are the approved allowance, denied on e7d30ea and allowed since 704e88f.
+  ['git --namespace merge commit -n -m x', 'deny', 'the unquoted control: git runs commit -n, and gitSub reads the same'],
+  ['git -C . merge -n main', 'allow', 'a plain global option in front of the approved shape'], ['git --no-pager rebase -n main', 'allow', 'a plain global option in front of the approved shape'], ['git -c "core.pager=less -R" merge -n main', 'allow', 'a quoted value of a plain -c is not an option'],
+  ['git -C "some dir" status', 'allow', 'a quoted value of a plain -C is not an option'], ['git -C "-odd dir" status', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git log "-1"', 'allow', 'past the subcommand: not a global option'], ['git -c "core.pager=less -R" log "-1"', 'allow', 'past the subcommand: not a global option'], ['git status "-s"', 'allow', 'past the subcommand: not a global option'], ['git "" status', 'allow', 'an empty word does not start with a dash; git refuses it'],
 ];
 // Today's verdict, allowed on e7d30ea and unchanged here: known gaps with their own issues. Do not read these as approved; they are pinned so a fix there is a visible test change.
 const SID247_PINS = [
@@ -127,11 +145,12 @@ const sid247Quotes = (f) => [f, `"${f}"`, `'${f}'`, `-"${f.slice(1)}"`, `-'${f.s
 const sid247Nest = (x) => (x.includes("'") ? `"${x.replace(/(["\\$`])/g, '\\$1')}"` : `'${x}'`);
 const SID247_WRAPS = [(x) => x, (x) => `env ${x}`, (x) => `env FOO=1 ${x}`, (x) => `command ${x}`, (x) => x.replace(/^git /, '/usr/bin/git '), (x) => x.replace(/^git /, 'git -C . '), (x) => x.replace(/^git /, 'git --no-pager '), (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `bash -c ${sid247Nest(x)}`, (x) => `sh -c ${sid247Nest(x)}`, (x) => `true; ${x}`, (x) => `${x} && git status`];
 const sid247Gen = (bases) => [...new Set(bases.flatMap(([t, flags]) => flags.flatMap((f) => sid247Quotes(f).flatMap((q) => SID247_WRAPS.map((w) => w(t(q)))))))];
-const SID247_GEN_ALLOW = sid247Gen([
-  [(f) => `git merge ${f} main`, ['-n', '-Xignore-space-change', '-Xno-renames']],
-  [(f) => `git rebase ${f} main`, ['-n', '-Xignore-space-at-eol', '-Xno-renames']],
-  [(f) => `git merge -n ${f} main`, ['-Xpatience']],
-]);
+const SID247_ALLOW_BASES = [
+  [(f) => `merge ${f} main`, ['-n', '-Xignore-space-change', '-Xno-renames']],
+  [(f) => `rebase ${f} main`, ['-n', '-Xignore-space-at-eol', '-Xno-renames']],
+  [(f) => `merge -n ${f} main`, ['-Xpatience']],
+];
+const SID247_GEN_ALLOW = sid247Gen(SID247_ALLOW_BASES.map(([t, flags]) => [(f) => `git ${t(f)}`, flags]));
 const SID247_GEN_DENY = sid247Gen([
   [(f) => `git commit ${f} -m x`, ['-n', '-nq', '-vn']],
   [(f) => `git merge ${f} main`, ['-nv', '-vn', '-ns', '--no-verify']],
@@ -146,6 +165,14 @@ const SID247_GEN_DENY = sid247Gen([
   [(f) => `git merge ${f} -x main`, ['-n']],
   [(f) => `git merge -n ${f} main`, ['-x']],
 ]);
+// CTO review 5730668319: each quoted or escaped global option x merge, rebase x a hidden commit x the wrappers, and in front of the generated allow set.
+const SID247_QUOTED_OPTS = ['--namespace""', '-"C"', '-\\C', '--git-dir""', '--work-tree""', '-"-namespace"', '--namespac\\e'];
+const SID247_QUOTED_WRAPS = [(x) => x, (x) => `bash -c ${sid247Nest(x)}`, (x) => `sh -c ${sid247Nest(x)}`, (x) => `env ${x}`, (x) => `command ${x}`, (x) => x.replace(/^git /, '/usr/bin/git '), (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `git merge -n main && ${x}`];
+const SID247_GEN_QUOTED = [
+  ...SID247_QUOTED_OPTS.flatMap((o) => ['merge', 'rebase'].flatMap((s) => ['commit -n -m x', 'commit -m x -n', 'commit -nm x'].flatMap((b) => SID247_QUOTED_WRAPS.map((w) => w(`git ${o} ${s} ${b}`))))),
+  ...SID247_QUOTED_OPTS.flatMap((o) => sid247Gen(SID247_ALLOW_BASES.map(([t, flags]) => [(f) => `git ${o} . ${t(f)}`, flags]))),
+];
+SID247_GEN_DENY.push(...SID247_GEN_QUOTED);
 const sid247All = [...SID247_MUST_ALLOW, ...SID247_MUST_DENY, ...SID247_NEAR.map(([c]) => c), ...SID247_PINS, ...SID247_GEN_ALLOW, ...SID247_GEN_DENY];
 sid247All.forEach((c) => corpus.add(c));
 // The ALLOWLIST matcher (the regression check below): written apart from the guard's own code, so it can't drift with it. It matches a line only when the old rule hits it,
@@ -171,7 +198,7 @@ const sid247OptionsOut = (s) => {
   return ['git', sub, ...out].join(' ');
 };
 const sid247Approved = (c) => {
-  const segs = [...sid247Rules.guardSegments(c)], text = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""'), named = /^git\s+(merge|rebase)\s/;
+  const segs =[...sid247Rules.guardSegments(c)], text = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""'), named = /^git\s+(merge|rebase)\s/;
   const prefixOf = (w, flag) => w.length >= 3 && flag.startsWith(w.split('=')[0]);
   if (segs.some((s) => s.split(/\s+/).some((w) => prefixOf(w, '--no-verify')))) return false;
   if (segs.some((s) => named.test(s) && sid247OptionsOut(text(s)) === null)) return false;
@@ -193,7 +220,12 @@ const sid247Approved = (c) => {
   };
   // The matcher takes the approved shape and nothing else.
   for (const c of ['git merge -n main', 'git rebase -n main', 'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge "-n" main', "bash -c 'git rebase -n main'", 'git merge -n main && git status', 'git merge -m msg -n feat', 'git merge -X ours -n main', 'git rebase --onto main -n feat']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
-  for (const c of ['git commit -n -m x', 'git commit -nm x', 'git merge -nv main', 'git merge -vn', 'git rebase -in', 'git merge -n --no-verify main', 'git merge -n --no-verif main', 'git rebase -n --no-veri main', 'git am -n x.patch', 'git am --no-verify', 'git merge-file -n a b c', 'git merge-base -n 1 a b', 'git rebase -n -x make main', 'git rebase -n --exec=make main', 'git merge -n main && git commit -n -m x', 'git merge -n "$B"', 'git merge -Xours main', 'git status', 'git merge -- -n', 'git merge -- "-n"', 'git merge -m "-n" feat', "git merge -m '-n' feat", 'git merge -X -n main', 'git merge -X "-n" main', 'git merge -n -x main', 'git merge "-n" -x main', 'git merge -n main; git merge -x feat', 'git merge -n --unknown main', 'git merge --strat -n main', 'git rebase --onto -n feat', 'git merge -s -n', 'git merge -F -n', 'git merge -n -- -n', 'git merge -n main && git commit --no-verif -m x']) if (sid247Approved(c)) wrong.push(`matcher must reject: ${c}`);
+  for (const c of ['git commit -n -m x', 'git commit -nm x', 'git merge -nv main', 'git merge -vn', 'git rebase -in', 'git merge -n --no-verify main', 'git merge -n --no-verif main', 'git rebase -n --no-veri main', 'git am -n x.patch', 'git am --no-verify', 'git merge-file -n a b c', 'git merge-base -n 1 a b', 'git rebase -n -x make main', 'git rebase -n --exec=make main', 'git merge -n main && git commit -n -m x', 'git merge -n "$B"', 'git merge -Xours main', 'git status', 'git merge -- -n', 'git merge -- "-n"', 'git merge -m "-n" feat', "git merge -m '-n' feat", 'git merge -X -n main', 'git merge -X "-n" main', 'git merge -n -x main', 'git merge "-n" -x main', 'git merge -n main; git merge -x feat', 'git merge -n --unknown main', 'git merge --strat -n main', 'git rebase --onto -n feat', 'git merge -s -n', 'git merge -F -n', 'git merge -n -- -n', 'git merge -n main && git commit --no-verif -m x', ...SID247_QUOTED_ATTACKS, ...SID247_GEN_QUOTED]) if (sid247Approved(c)) wrong.push(`matcher must reject: ${c}`);
+  for (const c of ['git -C . merge -n main', 'git --no-pager rebase -n main', 'git -c "core.pager=less -R" merge -n main', 'git -C "some dir" merge -n main']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
+  // Each layer on its own: a quoted global option keeps the hook-skip rule whole even without the deny, and the deny says how to rewrite. Without a quoted option the rule stays loose.
+  for (const c of SID247_QUOTED_ATTACKS) if (sid247Rules.keepsHookRule?.(sid247Rules.guardSegments(c), c) !== true) wrong.push(`a quoted global option must keep the hook-skip rule: ${c}`);
+  for (const c of ['git merge -n main', 'git -C . merge -n main', 'git -c "core.pager=less -R" merge -n main']) if (sid247Rules.keepsHookRule?.(sid247Rules.guardSegments(c), c) !== false) wrong.push(`must not keep the hook-skip rule: ${c}`);
+  for (const c of ['git -"C" . status', 'git --namespace"" merge commit -n -m x']) if (!/plainly, unquoted and unescaped/.test(sid247Rules.segmentReason(c, sid247Cfg, 'feat/x')?.why ?? '')) wrong.push(`the deny must say how to rewrite: ${c}`);
   console.log(`SID-247: ${Object.entries(reds).map(([k, [n, r]]) => `${k} ${n} (${r} verdicts wrong)`).join(', ')}, x 2 branches through the rule function and the real pre-bash.mjs`);
   if (process.env.SID247_SHOW) for (const w of wrong) console.log(`  ${w.replace(/\n/g, '\\n')}`);
   assert.deepEqual(wrong.slice(0, 40), [], `SID-247: ${wrong.length} wrong verdicts`);
