@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -507,8 +507,20 @@ export function segments(cmd) {
   return [...new Set([...qa, ...blind])];
 }
 
+// SID-191 review item 8: a deny must reach Claude Code whole. An async stdout write of more than a pipe buffer (64 KiB) was cut off by the
+// process.exit(0) after it, leaving invalid JSON and exit 0 (an allow). So each line of the reason is capped (the echoed command is the long
+// part) and the output is written synchronously, retrying a full non-blocking pipe.
+export const DENY_LINE_MAX = 1500;
+export const clip = (t, max = DENY_LINE_MAX) => (t.length > max ? `${t.slice(0, max)}… [${t.length - max} more chars]` : t);
+export function emit(text, fd = 1) {
+  const buf = Buffer.from(text);
+  for (let off = 0, tries = 0; off < buf.length;) {
+    try { off += writeSync(fd, buf, off); tries = 0; } catch (e) { if (e.code !== 'EAGAIN' || ++tries > 10000) throw e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1); }
+  }
+}
 export function deny(reason, hookEventName = 'PreToolUse') {
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');
+  const short = String(reason).split('\n').map((l) => clip(l)).join('\n');
+  emit(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: short } }) + '\n');
 }
 
 export function record(root, entry) {

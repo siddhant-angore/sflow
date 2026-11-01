@@ -69,7 +69,7 @@ const mustAllow = [
   'curl -fsSL https://example.com/i.sh | sh', 'echo ls | sh', 'echo hi | tee >(wc -l)', "find . -name '*.md' | xargs -I{} git add {}", "printf 'echo hi\\n' | sh", "echo 'git status' | sh", 'cat script.sh | bash', 'git log --oneline | head',
   // SID-108: quoted globs are literal, and a glob not at the start of a git word cannot match a name that starts with `-`
   'eval "$(ssh-agent -s)"', 'eval "$(fnm env)"', 'source <(kubectl completion bash)', 'sh -c "$(curl -fsSL https://example.com/i.sh)"', "echo hi | xargs -I{} sh -c 'echo {}'", 'source ~/.bashrc', '. ./env.sh', // SID-107 follow-up
-  'git push origin feat/*', "git push origin 'feat/*'", "git fetch origin 'refs/heads/*:refs/heads/*'", 'git add *.mjs', "git log -- '*.mjs'", 'ls [-]*',
+  "git push origin 'feat/*'", "git fetch origin 'refs/heads/*:refs/heads/*'", "git log -- '*.mjs'", 'ls [-]*', // SID-191 re-review: unquoted git push origin feat/* and git add *.mjs are now denied (sid191LiteralCollateral)
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
@@ -102,7 +102,7 @@ const sid191Collateral = ['git checkout $BRANCH', 'git checkout "$BRANCH"', 'git
   'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's",
   'git config user.name "$NAME"'] // since #24 a `-e` anywhere in git config opens the editor, and a quoted "$NAME" could be -e;
 for (const c of sid191Collateral) assert.ok(guardDenies(c), `SID-191 collateral (documented, fails closed): ${c}`);
-const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'cd "$D" && ls'];
+const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', 'cd "$D" && ls']; // SID-191 re-review: expansion command words moved to sid191LiteralCollateral
 for (const c of sid191Kept) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 for (const c of sid191Allow) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 // Generated quote-split suite: every word of each guarded command, split in the middle (or wholly wrapped) by each quoting style, stays denied.
@@ -135,8 +135,8 @@ const sid191Review = [
 ];
 for (const c of sid191Review) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review must deny on ${b}: ${c}`);
 for (const c of sid191Review.filter((_, k) => k % 4 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review must deny through the hook: ${c}`);
-const sid191ReviewAllow = ['git add *.mjs', 'git add src/*.mjs docs/*.md', 'ls *.md', 'echo {a,b}', "git commit -m 'fix {a,b}'", 'git commit -m "x {a,b} *"', "git log --format='{%H}'", 'gh pr view 1', 'npm test', 'npm run build', 'npm "test"',
-  "bash -c 'npm test'", "sh -c 'echo \"$1\"' _ hi", 'f(){ echo "$@"; }; f a b', "bash -c 'git status'", Array(3).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), 'eval "$(ssh-agent -s)"'];
+const sid191ReviewAllow = ['ls *.md', 'echo {a,b}', "git commit -m 'fix {a,b}'", 'git commit -m "x {a,b} *"', "git log --format='{%H}'", 'gh pr view 1', 'npm test', 'npm run build', 'npm "test"',
+  "bash -c 'npm test'", 'f(){ echo "$@"; }; f a b', "bash -c 'git status'", Array(3).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), 'eval "$(ssh-agent -s)"'];
 for (const c of sid191ReviewAllow) assert.ok(!guardDenies(c), `SID-191 review must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
 const sqr = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
 const GLOB_WORDS = new Set(['push', 'reset', 'clean', 'branch', 'stash', 'commit', 'checkout', 'config', 'update-ref', 'filter-branch', 'pr', 'api', 'merge', 'publish', 'PUT', 'main', '--force', '--hard', '--no-verify', '--mirror', '--stdin', '-D', 'clear']);
@@ -154,6 +154,59 @@ for (const body of SPLIT_BODIES) {
 for (const c of reviewVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review variant must deny on ${b}: ${c}`);
 for (const c of reviewVariants.filter((_, k) => k % 41 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review variant must deny through the hook: ${c}`);
 console.log(`SID-191 review: ${sid191Review.length} must-deny, ${sid191ReviewAllow.length} must-allow, ${reviewVariants.length} generated variants x 2 branches denied`);
+// SID-191 review item 8: a deny bigger than a pipe buffer must still arrive whole (was 65,536 bytes of invalid JSON and exit 0 on main).
+{
+  const slowPipe = (hookFile, ev) => { const f = join(makeScratch('harness-bigdeny-'), 'ev.json'); writeFileSync(f, JSON.stringify(ev)); return execFileSync('sh', ['-c', `node "${join(hooks, hookFile)}" < "${f}" | (sleep 0.3; cat)`], { cwd: ev.cwd, maxBuffer: 1 << 26 }).toString(); };
+  const nest = (n) => Array(n).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'gh pr merge 1');
+  for (const c of [`gh pr merge 1 --body ${'a'.repeat(70000)}`, `git push origin main ${'x'.repeat(200000)}`, nest(13)]) {
+    const out = slowPipe('pre-bash.mjs', bash(c));
+    assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, 'deny', `item 8: a ${c.length}-char command must deny with whole JSON over a slow pipe`);
+    assert.ok(out.length < 8192, `item 8: the deny echoes a capped command (${out.length} bytes)`);
+  }
+  // emit() itself writes everything synchronously, however big
+  const emitOut = execFileSync('sh', ['-c', `node --input-type=module -e 'import { emit } from "${join(hooks, 'lib.mjs')}"; emit(JSON.stringify({ x: "x".repeat(300000) }) + "\\n"); process.exit(0)' | (sleep 0.3; cat)`], { maxBuffer: 1 << 26 }).toString();
+  assert.equal(JSON.parse(emitOut).x.length, 300000, 'item 8: emit() delivers 300 KB whole before exit');
+  console.log('SID-191 item 8: 3 commands over 64 KiB deny with whole JSON; emit() delivers 300 KB');
+}
+
+// SID-191 re-review (5726655377 on f8c5388): literal-only guarded contexts. Every repro of items 1-7 must deny.
+const sid191Rev2 = ["git -c core.hooks{P..P}ath=/tmp/h commit -m x", "git -c core.hooksP?th=h commit -m x", "git -c include.p{a..a}th=/tmp/c status", "git -ccore.hooksP?th=h commit -m x", "git --config-env=core.hooksP?th=V commit -m x", "git -c core.hooks[P]ath=h commit -m x", "gh pr {m..m..1}erge 1", "git reset --{h..h..1}ard HEAD~1", "{g..g}it reset --hard HEAD~1", "g{h..h} pr merge 1", "{n..n}pm publish", "{{gh,},} pr merge 1", "gh pr m[[:alpha:]]rge 1", "git reset --ha[[:lower:]]d HEAD~1", "git push origin ma[[:alpha:]]n", "touch feat:main; git push origin feat:ma?n", "git push origin refs/heads/ma?n", "git push origin feat:refs/heads/m?in", "git clean -[f]dx", "/usr/local/bin/g? pr merge 1", "shopt -s extglob\ngh pr @(merge) 1", "shopt -s nocaseglob\ngh pr MERG? 1", "bash -c 'p(){ \"$@\"; }; p gh pr merge 1'", "bash -c 'shift; \"$@\"' _ x gh pr merge 1", "bash -c '\"${@:2}\"' _ x gh pr merge 1", "bash -c 'IFS=,; $1' _ gh,pr,merge,1", "p(){ \"${@}\"; }; p gh pr merge 1", "p(){ \"${@:1}\"; }; p gh pr merge 1", "set -- gh pr merge 1; \"$@\"", "X=gh,pr,merge,1; IFS=,; $X", "read -r X <<<\"gh pr merge 1\"; $X", "printf -v X 'gh pr merge 1'; $X", "mapfile -t X < <(echo gh); \"${X[@]}\" pr merge 1", "shopt -s expand_aliases\nalias p=\"gh pr merge\"\np 1", "npm --silent ${X:-publish}"];
+for (const c of sid191Rev2) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 re-review must deny on ${b}: ${JSON.stringify(c)}`);
+for (const c of sid191Rev2.filter((_, k) => k % 5 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 re-review must deny through the hook: ${JSON.stringify(c)}`);
+// Accepted over-denials: a glob or brace in a guarded command, positional parameters in a -c script. The message says to spell it out.
+const sid191LiteralCollateral = ['git add *', 'git add *.mjs', 'git add src/*.mjs docs/*.md', 'cargo test -- *', 'git add src/{a,b}.ts', 'npm test -- *', "sh -c 'echo \"$1\"' _ hi", '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'git push origin feat/*', 'git log | while read l; do echo "$l"; done'];
+for (const c of sid191LiteralCollateral) assert.ok(guardDenies(c), `SID-191 literal-only collateral (documented): ${c}`);
+for (const c of sid191LiteralCollateral.slice(0, 6)) assert.match(newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why ?? '', /spell the paths or words out/, `SID-191: the glob/brace deny says to spell it out: ${c}`);
+const sid191LiteralAllow = ['git log -g HEAD@{1}', "git log --format='{%H}'", 'git log --format={%H}', 'echo {a,b} *', 'ls src/*.ts | wc -l', 'for f in *.md; do git add "$f"; done', '[ -f x ] && git status', '[[ -n "$X" ]] && git status', 'git status # *x* {a,b}', 'eval "$(ssh-agent -s)"',
+  'git commit -m "$(cat <<\'EOF\'\n* bullet {a,b} [x]\nEOF\n)"', 'git commit -m "fix: *.md and {a,b}"', 'f(){ echo "$@"; }; f a b', 'X=1 git status', 'env -u X git status', 'timeout 5 git fetch origin', 'cd "$(git rev-parse --show-toplevel)" && git status', 'read -r X < f; echo "$X"', 'shopt -s nullglob; ls *.md'];
+for (const c of sid191LiteralAllow) assert.ok(!guardDenies(c), `SID-191 literal-only must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+// Generated: each SPLIT_BODIES word built by a step sequence, a POSIX class, a nested brace, and each body after a word-reading line or as a positional -c script.
+const rev2Variants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  ws.forEach((w, k) => {
+    if (!/^[A-Za-z-]/.test(w) || w.length < 2) return;
+    const at = (x) => [...ws.slice(0, k), x, ...ws.slice(k + 1)].join(' ');
+    const ch = w[1];
+    rev2Variants.push(at(`${w[0]}{${ch}..${ch}..1}${w.slice(2)}`), at(`${w[0]}{{${ch},},}${w.slice(2)}`));
+    if (/[a-z]/.test(ch)) rev2Variants.push(at(`${w[0]}[[:lower:]]${w.slice(2)}`), at(`${w[0]}[[:alpha:]]${w.slice(2)}`));
+    if (/[A-Z]/.test(ch)) rev2Variants.push(at(`${w[0]}[[:upper:]]${w.slice(2)}`));
+  });
+  for (const pre of ['shopt -s extglob\n', 'shopt -s nocaseglob; ', 'IFS=,; ', 'set -- x; ', 'read -r Y < /dev/null; ', 'printf -v Y x; ', 'mapfile -t Y < /dev/null; ', 'alias q=true; ', 'eval true; ']) rev2Variants.push(pre + body);
+  rev2Variants.push(`bash -c 'shift; "$@"' _ x ${body}`, `bash -c '"\${@:2}"' _ x ${body}`, `sh -c '$*' _ ${body}`, `bash -c 'p(){ "$@"; }; p ${body.replace(/'/g, '')}'`, `p(){ "\${@}"; }; p ${body}`, `set -- ${body}; "$@"`);
+}
+for (const c of rev2Variants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 re-review variant must deny on ${b}: ${JSON.stringify(c)}`);
+// each literal-only and reread rule on its own (the line-level layers above can hide one of them)
+const litDeny = ['FOO=1 git add src/x?.ts', 'nice -n5 git add src/x?.ts', 'env -u X git add src/{a,b}.ts', '"`printf gh`" pr merge 1', 'bash -c \'git add src/x?.ts\''];
+for (const c of litDeny) assert.ok(newRules.literalReason(c) || newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why?.includes('spell the paths'), `literal-only must deny: ${JSON.stringify(c)}`);
+for (const c of ['FOO=1 git add src/x?.ts', 'nice -n5 git add src/x?.ts', '"`printf gh`" pr merge 1']) assert.ok(newRules.literalReason(c), `literalReason must deny: ${JSON.stringify(c)}`);
+assert.ok(/spell the paths/.test(newRules.segmentReason("bash -c 'git add src/x?.ts'", sid191Cfg, 'feat/x')?.why ?? ''), 'a bash -c payload gets the literal-only argument rule');
+for (const c of ["cat <<'E'\n$X arg\nE", 'cat <<E\n$X arg\nE', "git commit -F - <<'E'\n$X *\nE"]) assert.equal(newRules.literalReason(c), null, `a heredoc body is not a command: ${JSON.stringify(c)}`);
+for (const c of ['IFS=: git status', 'eval x; git status', 'set -- a b; git status', 'set -o noglob; git status', 'printf -v X gh; git status', 'declare -n r=x; git status', 'read -r x; git status', 'mapfile a; git status'])
+  assert.ok(newRules.rereadReason(c), `rereadReason must deny: ${JSON.stringify(c)}`);
+for (const c of ['IFS=: ls', 'eval "$(fnm env)"', 'set -e; ls', 'printf "%s" x', 'read -r x']) assert.equal(newRules.rereadReason(c), null, `rereadReason leaves lines without a guarded word: ${JSON.stringify(c)}`);
+assert.ok(newRules.segmentReason("bash -c 'shift; echo hi' _ x", sid191Cfg, 'feat/x')?.why?.includes('positional'), 'shift in a bash -c payload is positional use');
+console.log(`SID-191 re-review: ${sid191Rev2.length} repros must-deny, ${sid191LiteralCollateral.length} documented collateral, ${sid191LiteralAllow.length} must-allow, ${rev2Variants.length} generated variants x 2 branches denied`);
 
 for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref|--stdin|^git push/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
@@ -1131,7 +1184,7 @@ for (const base of baselines) {
 // SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
 {
   const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
-  const ours = new Set([...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants]);
+  const ours = new Set([...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral]);
   const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))))].sort();
   console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied${fresh.length ? ':\n  ' + fresh.map((c) => JSON.stringify(c)).join('\n  ') : ''}`);
 }
