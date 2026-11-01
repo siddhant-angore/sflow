@@ -281,8 +281,9 @@ t('k13: `source` keeps the stable clone on merged main: ff-only, refuses dirty/b
   const c = cli('source', '--check', '--clone', clone); assert.equal(c.status, 1); assert.match(c.stdout, /REFUSED/);
   assert.equal(cli('source', '--bogus').status, 2);
   assert.match(sourceProblem(join(clone, 'skills') + '-none'), /not the top of a git checkout/);
+  mkdirSync(join(clone, 'sub')); assert.match(sourceProblem(join(clone, 'sub')), /not the top of a git checkout/); ok(clone, 'rmdir sub');
   // ff-only: a clone with its own commit is never merged or reset
-  ok(clone, 'echo mine > mine && git add mine && git commit -qm mine');
+  ok(clone, 'git config user.name t && git config user.email t@t && echo mine > mine && git add mine && git commit -qm mine'); // with an identity, a plain merge would succeed: only --ff-only stops it
   const mine = head(); ok(up, 'git checkout -q main && echo 3 >> two && git commit -qam three && git push -q origin main && git checkout -q feat/x');
   assert.equal(run({ checkOnly: true }), false); assert.match(lines[0], /^BEHIND /);
   assert.equal(run(), false); assert.match(lines[0], /^FAILED .*still at /); assert.equal(head(), mine, 'diverged: nothing merged');
