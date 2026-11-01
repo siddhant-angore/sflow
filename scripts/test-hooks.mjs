@@ -222,14 +222,28 @@ for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
 // SID-147 review (5725928282): config changes that turn off the git hooks outside Claude, or point their chaining somewhere an agent chose, are denied.
-const HOOKS_CFG = /turns off the git hooks that run outside Claude|`git config --edit` can change any key/;
+const HOOKS_CFG = /turns off the git hooks that run outside Claude|`git config --edit` can change any key|overriding core\.hooksPath disables the project hooks/; // a core.hooksPath key in any case hits envReason first
 for (const c of ['git config --remove-section core', 'git config --rename-section core x', 'git config --rename-section x core', 'git config remove-section core', 'git config rename-section core x',
   'git config --local --remove-section CORE', 'git config -f .git/config --remove-section core', 'git -C . config --remove-section core', 'git -c user.name=x config --remove-section "core"',
   'git config --unset-all core.hookspath', 'git config core.HOOKSPATH /tmp/x', 'git config unset core.HooksPath', 'git config -e', 'git config --edit', 'git config --global --edit', 'git config edit',
   'git config sflow.previousHooksPath /tmp/evil', 'git config --add sflow.x y', 'git config set sflow.previousHooksPath /tmp/evil', 'git config --unset sflow.previousHooksPath', 'git config --remove-section sflow',
   'git config --local --rename-section sflow x', 'true && git config SFLOW.previousHooksPath /tmp/evil'])
   assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_CFG, `SID-147 must deny: ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
-for (const c of ['git config --get core.hookspath', 'git config --get sflow.previousHooksPath', 'git config --remove-section alias', 'git config --rename-section alias.x alias.y', 'git config user.name x', 'git config --list'])
+for (const c of ['git config --get sflow.previousHooksPath', 'git config --remove-section alias', 'git config --rename-section alias.x alias.y', 'git config user.name x', 'git config --list'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-147 review (CTO, Nov 1): core.hooksPath overrides in any letter case. git matches config keys case-insensitively, so each of these ran a planted
+// hook end to end before the `i` flag. Env var NAMES are case-sensitive (git ignores git_config_key_0), so lowercase names are not a bypass; they are
+// denied anyway because the text still names the key. Reading core.hooksPath (`git config --get core.hookspath`) is denied too, as before for the
+// camel-case spelling: over-broad, tracked on SID-161.
+const HOOKS_OVR = /^harness guard: overriding core\.hooksPath disables the project hooks/;
+for (const k of ['core.hooksPath', 'core.hookspath', 'CORE.HOOKSPATH', 'core.HooksPath', 'Core.hookSpath'])
+  for (const c of [`git -c ${k}=/tmp/evil commit -m x`, `git -c "${k}=/tmp/evil" commit -m x`, `git -c '${k}'=/tmp/evil push origin feat`, `HP=/tmp/evil git --config-env=${k}=HP commit -m x`,
+    `HP=/tmp/evil git --config-env ${k}=HP commit -m x`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`,
+    `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`, `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil; git commit -m x`,
+    `GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git commit -m x`, `env GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git push origin feat`, `export GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" && git commit -m x`,
+    `git_config_count=1 git_config_key_0=${k} git_config_value_0=/tmp/evil git commit -m x`, `git_config_parameters="'${k}'='/tmp/evil'" git commit -m x`])
+    assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_OVR, `SID-147 must deny (any case): ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git -c core.editor=vim commit -m x', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git commit -m x', 'git -c core.autocrlf=false status', 'git config --get core.editor'])
   assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 // SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
 const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;

@@ -166,7 +166,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge, unreadable },
 
 export function envReason(cmd) {
   // update-ref --stdin is denied outright in reason(), whatever its input.
-  if (/core\.hooksPath/.test(cmd)) return 'overriding core.hooksPath disables the project hooks';
+  if (/core\.hookspath/i.test(cmd)) return 'overriding core.hooksPath disables the project hooks'; // i: git config keys are case-insensitive (core.hookspath, CORE.HOOKSPATH work in -c, --config-env, GIT_CONFIG_KEY_n and GIT_CONFIG_PARAMETERS)
   if (/(^|\s)-c\s*["']?remote\.[^\s=]+\.fetch\s*=|--config-env[=\s]+["']?remote\.[^\s=]+\.fetch\b|\bGIT_CONFIG_KEY_\d+=["']?remote\.[^\s=]+\.fetch\b/i.test(cmd)) return NO_FETCH_OVERRIDE;
   if (/(^|\s)-c\s*["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s='"]+)["']?(\s*=|\s|$)|--config-env[=\s]+["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.[^\s=]+)\s*=|\bGIT_CONFIG_KEY_\d+=["']?(core\.(bare|repositoryformatversion|worktree)|include\.path|includeif\.\S+?)["']?(\s|$)/i.test(cmd)) return NO_DISCOVERY_CFG;
   const params = /\bGIT_CONFIG_PARAMETERS=("[^"]*"|'[^']*'|\S*)/.exec(cmd);
