@@ -9,7 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config, gitDir, NO_REPLACE_ENV, secretsInDiff } from './lib.mjs';
+import { config, GATE_RECORD_DIR, gitDir, NO_REPLACE_ENV, scanRead, secretsInDiff } from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ZERO = /^0+$/;
@@ -19,7 +19,7 @@ const SCRUB = /^GIT_(DIR|WORK_TREE|INDEX_FILE|PREFIX|OBJECT_DIRECTORY|ALTERNATE_
 export const cleanEnv = (env = process.env) => Object.fromEntries(Object.entries(env).filter(([k]) => !SCRUB.test(k)));
 
 const fail = (msg) => { process.stderr.write(`sflow ${process.argv[2] ?? 'git'} hook: ${msg}\n`); process.exit(1); };
-const gitOut = (cwd, ...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: { ...cleanEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, '');
+const gitOut = (cwd, ...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: cleanEnv(NO_REPLACE_ENV), stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, '');
 const tryGit = (cwd, ...args) => { try { return gitOut(cwd, ...args); } catch { return null; } };
 
 export const PREV_FILE = 'previous-hooks-path';
@@ -88,7 +88,7 @@ function prePush(root, remote, input) {
   const pushed = lines.filter((l) => !ZERO.test(l[1])).map((l) => l[1]);
   if (pushed.some((s) => s !== head)) fail(`the gate checks HEAD (${head?.slice(0, 12)}), and this push sends another commit; check out the branch you push, then push again`);
   if (!pushed.length) return console.error('sflow gate skipped: the push only deletes refs');
-  if (!existsSync(join(gitDir(root), 'harness-gate', head))) fail(`the gate passed no record for ${head.slice(0, 12)} (failing closed)`);
+  if (!existsSync(join(gitDir(root), GATE_RECORD_DIR, head))) fail(`the gate passed no record for ${head.slice(0, 12)} (failing closed)`);
   console.error(`sflow gate ok ${head.slice(0, 12)}`);
 }
 
@@ -97,7 +97,7 @@ function preCommit(root) {
   if (why) fail(why);
   // Staged secrets, with the push gate's patterns. GIT_INDEX_FILE is kept here on purpose: `git commit -a` and `git commit <path>` stage into a temporary index.
   let diff = '';
-  try { diff = execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', 'diff', '--cached', '--no-color', '--no-ext-diff', '--', '.', ':(exclude)*.lock', ':(exclude)*.snap'], { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch (e) { fail(`could not read the staged diff (failing closed): ${e.message}`); }
+  try { diff = scanRead(root, ['diff', '--cached']); } catch (e) { fail(`could not read the staged diff (failing closed): ${e.message}`); }
   const hits = secretsInDiff(diff);
   if (hits.length) fail(`staged text looks like a secret (${hits.join(', ')}); unstage it (git restore --staged <file>) and remove it`);
 }

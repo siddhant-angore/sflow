@@ -12,8 +12,11 @@ export function readEvent() {
 }
 
 // Replace refs (refs/replace/) can swap any object git reads, including the commit and file the policy comes from, so they are off for every call.
+// Grafts (.git/info/grafts) rewrite parents the same way, and git 2.47 still honours them under --no-replace-objects, so only GIT_GRAFT_FILE turns them off.
 // core.fsmonitor=false: a configured fsmonitor hook script would otherwise run inside the hook on `git status`/`diff`.
-export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
+export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null' };
+// <git dir>/<this>/<head> records that the gate passed for head. Versioned: a change that makes the gate stricter gets a new name, so a head that passed the weaker gate is checked again.
+export const GATE_RECORD_DIR = 'harness-gate-v2';
 export function git(root, ...args) {
   return execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
 }
@@ -628,29 +631,42 @@ export const SECRET_PATTERNS = [
 // Names of the patterns that match a line added in a unified or combined (--cc) diff. `+++` is a file header only between `diff ` and the first `@@`: inside a hunk it is
 // an added line starting with `++`, or an octopus merge's three-column prefix. A combined hunk opens with one `@` per parent plus one, and only a line with `+` in every
 // column is new in the merge. Any other line came from a parent, so that parent's own commit, or origin, already accounts for it.
-export function secretsInDiff(diff) {
+const addedLines = (diff) => {
   let inHunk = false, prefix = '+';
-  const added = diff.split('\n').filter((l) => {
+  return diff.split('\n').filter((l) => {
     if (l.startsWith('diff ')) { inHunk = false; prefix = '+'; return false; }
     if (l.startsWith('@@')) { inHunk = true; prefix = '+'.repeat(/^@+/.exec(l)[0].length - 1); return false; }
     return l.startsWith(prefix) && (inHunk || !l.startsWith('+++'));
-  }).join('\n');
-  return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
-}
+  });
+};
+const secretNames = (lines) => { const added = lines.join('\n'); return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n); };
+export const secretsInDiff = (diff) => secretNames(addedLines(diff));
+
+// The flags stop repo config hiding added lines: color puts escape codes before the `+`, an external diff or textconv driver can print anything, and -diff, binary, a binary diff driver or a NUL byte print
+// `Binary files differ` unless --text. A small core.bigFileThreshold also takes a file for binary: on git 2.47 either --text or the override alone defeats it, so removing just one changes no test. Shared with the pre-commit scan, so the two cannot drift.
+const SCAN_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.bigFileThreshold=1g'];
+const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '--text'];
+const SCAN_PATHS = ['--', '.', ':(exclude)*.lock', ':(exclude)*.snap'];
+export const scanRead = (root, args, maxBuffer = 256 << 20) => execFileSync('git', [...SCAN_GLOBALS, ...args, ...SCAN_FLAGS, ...SCAN_PATHS], { cwd: root, env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer }).toString();
 
 // SID-213: the push gate's scan of base..HEAD. Returns null when clean, else { result, detail, reason }: result 'secret' or 'error' for runs.jsonl, reason for the deny.
 // Any failure to read the range is an error, never "no secrets". The net diff sees what the final tree adds; the per-commit log sees what history carries to the remote even when a later commit removes it.
-// The flags stop repo config hiding added lines: color puts escape codes before the `+`, and an external diff or textconv driver can print anything.
 // log only: --full-history because a pathspec otherwise skips a side branch whose merge matches the other parent; --root because log.showroot=false hides a root commit's diff; --cc for what a merge itself adds.
-const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv'];
-const SCAN_PATHS = ['--', '.', ':(exclude)*.lock', ':(exclude)*.snap'];
+// --cc ignores --text, so a merge prints `Binary files differ` for a file it changes that is -diff, binary or holds a NUL byte. Each such merge is read against every parent instead:
+// as in --cc, only a line added against all of them is new in the merge. Only when --cc could not read one, because a diff against a parent can carry that whole parent's history into the buffer.
+const addedByMerges = (read, range) => read(['log', '--merges', '--full-history', '--format=%H %P', range]).split('\n').filter(Boolean).flatMap((entry) => {
+  const [merge, ...parents] = entry.split(' ');
+  const perParent = parents.map((p) => new Set(addedLines(read(['diff', `${p}..${merge}`]))));
+  return [...perParent[0]].filter((line) => perParent.every((added) => added.has(line)));
+});
 export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
-  const read = (...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args, ...SCAN_PATHS], { cwd: root, env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer }).toString();
+  const read = (args) => scanRead(root, args, maxBuffer), range = `${base}..HEAD`;
   let net, history;
   try {
     if (!base) throw new Error('no base commit to scan from');
-    net = secretsInDiff(read('diff', ...SCAN_FLAGS, `${base}..HEAD`));
-    history = secretsInDiff(read('log', '-p', '--cc', '--root', '--full-history', '--format=%H', ...SCAN_FLAGS, `${base}..HEAD`));
+    net = secretsInDiff(read(['diff', range]));
+    const log = read(['log', '-p', '--cc', '--root', '--full-history', '--format=%H', range]);
+    history = secretNames([...addedLines(log), ...(/^Binary files /m.test(log) ? addedByMerges(read, range) : [])]);
   } catch (e) {
     const first = (e.stderr?.toString().trim() || e.message).split('\n')[0];
     const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.' : '';

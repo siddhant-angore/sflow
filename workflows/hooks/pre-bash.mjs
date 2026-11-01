@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record, segments } from './lib.mjs';
+import { config, currentBranch, deny, GATE_RECORD_DIR, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record, segments } from './lib.mjs';
 import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -72,7 +72,7 @@ try {
   if (git(cfg.root, 'status', '--porcelain', '--untracked-files=no')) { deny('harness gate: tracked changes are uncommitted; commit them first so the gate checks what you push'); process.exit(0); }
   if (cfg.gate.some((c) => c.includes(PLACEHOLDER))) { deny(`harness gate: .harness.json still has the placeholder gate; set the project checks on ${cfg.source}`); process.exit(0); }
   const head = git(cfg.root, 'rev-parse', 'HEAD');
-  const dir = join(gitDir(cfg.root), 'harness-gate');
+  const dir = join(gitDir(cfg.root), GATE_RECORD_DIR);
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
   const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
