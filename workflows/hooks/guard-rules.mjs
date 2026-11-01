@@ -333,12 +333,12 @@ function inlineWrite(text, depth, out) {
         else if (!lit && a[0] && /^\s*(["'])[wax+]/.test(a[0]) && recv) hit ??= target(recv); // Path('x').open('w')
       } else if (mode === 'exec') {
         const sh = parseScript(call.args.join(' '))?.strs.join(' ');
-        if (sh && POLICY_NAME.test(sh)) { if (depth < 3) { const o = scan(sh, depth + 1, { hit: null, through: [], into: out.into, cds: [] }); hit ??= o.hit; } else hit ??= old(); }
+        if (sh && POLICY_NAME.test(sh)) { if (depth < 3) { const o = scan(sh, depth + 1, { hit: null, through: [], into: out.into, cds: [], links: out.links, modes: out.modes }); hit ??= o.hit; } else hit ??= old(); }
       }
     }
   }
   // Strings that name a policy file are also read as shell (cmd = "rm .harness.json"; os.system(cmd)): only a real write there denies; print('edit .claude/settings.json by hand') does not.
-  for (const x of strs) if (!hit && POLICY_NAME.test(x)) { if (depth >= 3) return old(); hit = scan(x, depth + 1, { hit: null, through: [], into: out.into, cds: [] }).hit; }
+  for (const x of strs) if (!hit && POLICY_NAME.test(x)) { if (depth >= 3) return old(); hit = scan(x, depth + 1, { hit: null, through: [], into: out.into, cds: [], links: out.links, modes: out.modes }).hit; }
   return hit;
 }
 const base = (x) => x.replace(/\/+$/, '').split('/').pop();
@@ -405,6 +405,7 @@ function oneCommand({ w, r }, depth, out) {
     const dest = t ?? pos.at(-1), srcs = t ? pos : pos.slice(0, -1);
     if (dest === undefined) { if (name === 'ln') hitAny(pos); return; }
     if (name !== 'mv') out.through.push(dest);
+    if (name === 'ln') { const sym = flags.some((f) => f === '--symbolic' || /^-[a-zA-Z]*s/.test(f) && !f.startsWith('--')); for (const x of srcs) { out.links.push(joined(x)); if (sym && !/^[/~]/.test(x)) out.links.push(posix.join(posix.dirname(joined(dest)), x), posix.join(joined(dest), x)); } } // SID-162: pre-bash resolves both ends against the hooks and git config files
     const pol = srcs.map(base).filter((b) => /^(\.harness\.json|settings(\.local)?\.json)$/i.test(b));
     if (pol.length) out.into.push({ dest, names: pol, dir: !!t || isDirish(dest), cds: [...out.cds] }); // pre-bash resolves dir/<name> against the cwd (and any cd seen so far) and denies only a landing on the root .harness.json or a .claude/settings*.json
     if (policy(dest)) out.hit ??= policy(dest);
@@ -413,6 +414,7 @@ function oneCommand({ w, r }, depth, out) {
     if (name === 'mv' ? [...srcs, dest].some(isClaudeDir) : isClaudeDir(dest) && srcs.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT;
     return;
   }
+  if (name === 'chmod' || name === 'chown' || name === 'chgrp') { out.modes.push(...pos.slice(flags.some((f) => f.startsWith('--reference')) ? 0 : 1).map(joined)); return; } // SID-162: pre-bash resolves these (a symlink into a hooks dir: `chmod +x pc`)
   if (/^(rm|unlink|truncate|shred)$/.test(name)) { if (name !== 'rm' && name !== 'unlink') out.through.push(...pos); hitAny(pos); if (name === 'rm' && recursive(flags) && pos.some(isClaudeDir)) out.hit ??= CLAUDE_DIR_HIT; return; }
   if (name === 'dd') { for (const a of args) if (a.startsWith('of=')) written(a.slice(3)); return; }
   if (name === 'sed') { if (flags.some((f) => /^-[A-Za-z]*i|^--in-place/.test(f))) { const sc = flags.filter((f) => /^-[A-Za-z]*[ef]$|^--(expression|file)$/.test(f)).length; pos.slice(sc || flags.some((f) => /^-[A-Za-z]*[ef]\S|^--(expression|file)=/.test(f)) ? sc : 1).forEach(written); } return; } // script words (the first positional, or one per -e/-f) are not files
@@ -421,5 +423,5 @@ function oneCommand({ w, r }, depth, out) {
 
 function scan(text, depth, out) { for (const c of simpleCommands(text)) oneCommand(c, depth, out); return out; }
 // { hit, through }: hit is the first policy path the command writes, creates, replaces, moves, links or deletes; through lists paths written through (symlink check in pre-bash), into lists copies of a policy-named file to a destination that may be a directory (resolved in pre-bash; copying FROM a policy file is a read), cds the `cd` arguments seen so far.
-export const analyzeWrites = (cmd) => scan(String(cmd), 0, { hit: null, through: [], into: [], cds: [] });
+export const analyzeWrites = (cmd) => scan(String(cmd), 0, { hit: null, through: [], into: [], cds: [], links: [], modes: [] });
 export const policyWriteReason = (cmd) => { const { hit } = analyzeWrites(cmd); return hit ? policyDeny(hit) : null; };

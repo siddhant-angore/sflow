@@ -45,9 +45,21 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 - Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 923 to 922 files. (SID-49)
 - Harness: the file tools can't write git hook files (SID-162, security; found by sflow Engineer). The shell guard already denied writes into hooks dirs, but `Write`, `Edit` and `MultiEdit` went through the policy hook, which only checked the policy files, so an agent could create `.git/hooks/pre-commit` (or a `.git/sflow-hooks/` stub) with the file tools.
   - `policy.mjs` now also denies, with the shell guard's message, a path in `.git/hooks`, `.git/sflow-hooks`, a linked worktree's or a submodule's hooks dir (by name, case-insensitive), and anything inside the repo's real `<git common dir>/hooks`, `<git common dir>/sflow-hooks` or a configured `core.hooksPath` (relative to the work tree, absolute, or `~/`). The path is checked as given and resolved (`..`, `//`, symlinked parents), so a separate git dir or a symlink to `.git/hooks` is covered.
-  - Tighten-only: nothing that was denied becomes allowed. Ordinary files named like hooks stay allowed (`src/hooks/`, `hooks/harness/`, `.github/hooks/`, `.githooks/` unless it is `core.hooksPath`). Outside a git repo nothing changes.
-  - Not covered: `.git/config` through the file tools (it can set `core.hooksPath`); tracked as the next tightening in SID-162.
+  - Tighten-only: nothing that was denied becomes allowed. Ordinary files named like hooks stay allowed (`src/hooks/`, `hooks/harness/`, `.github/hooks/`, `.githooks/` unless it is `core.hooksPath`).
   - `npm run test:hooks` has must-deny and must-allow cases for all three tools; six mutations of the check are each caught.
+  - Review round (CTO, 4 bypasses):
+    - Dangling symlinks: a link into a hooks dir is followed to its target even when the target doesn't exist yet, up to 40 hops (`ln -s .git/hooks/post-commit pc`, then `Write pc`).
+    - Hardlinks: a file with more than one link that shares dev and inode with a file in a hooks dir is denied (`ln .git/hooks/pre-commit hl`, then `Edit hl`), including `.git/sflow-hooks`.
+    - `core.hooksPath` outside the repo: the effective `--global` and `--system` values (absolute, `~/`, or relative to each repo) are protected in every repo, alongside the local one.
+    - Fail open: every error path now denies with exit 2 and the JSON deny ("harness hook error (failing closed)"). That covers a missing git binary, a safe.directory refusal, an unparsable or unreadable git config, any other git failure, an unreadable or empty event, a failed module load, and an uncaught exception.
+    - `.git/config*`, `.git/info/**`, `.git/worktrees/*/` and `.git/modules/*/` configs, `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config` and `$GIT_CONFIG_GLOBAL` can't be written through the file tools. Those files can set `core.hooksPath`, aliases or filters.
+    - `NotebookEdit` is in the policy matcher, and `notebook_path` is checked.
+    - Path comparisons fold case on darwin and win32.
+    - The shell guard denies `ln`/`ln -s` from or into a hooks dir, and `chmod`/`chown`/`chgrp` through a link into one.
+  - Outside a git repository a normal Write/Edit is allowed; only the global/system hooksPath and global config files are checked there. With no git binary, every file-tool write is denied, even outside a repo. In the shell guard, a git failure falls back to the name check, so shell commands in an unreadable repo behave as before; only hook-dir hits deny.
+  - Collateral denies: file-tool writes to `.git/info/exclude` and `.git/info/sparse-checkout`; `chmod +x .git/hooks/<x>` in the shell.
+  - Not covered: `~user/` paths in `core.hooksPath`, files pulled in by `include.path`, and the system gitconfig file itself.
+  - The review round's own tests (dangling and hard links, global and system hooksPath, every fail-closed path, the shell `ln`/`chmod` cases) are in `npm run test:hooks`. All 16 mutations of the new checks are killed.
 
 **Upstream pins**
 
