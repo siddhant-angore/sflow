@@ -489,3 +489,132 @@ export function record(root, entry) {
   } catch {}
 }
 
+
+// SID-191: the command with each word's shell quoting resolved, the way the shell joins it: `g""h` -> gh, `"--for"ce` -> --force, `ma\in` -> main,
+// `$'\x67it'` -> git. A word that still holds a special character after unquoting is re-quoted in single quotes (so `-m "a b"` stays one word, and
+// quoted text stays data). A word with an expansion the shell would perform ($, a backtick, outside single quotes) is left exactly as written, so
+// the literal-argument rules still see it. Operators, comments and heredoc bodies are copied as they are. open: a quote is never closed.
+const SAFE_WORD = /^[\w@%+=:,./~^-]+$/;
+const ansi = (s) => s.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|[\s\S])/g, (_, e) => {
+  if (/^x/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^u/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^[0-7]/.test(e)) return String.fromCharCode(parseInt(e, 8) & 255);
+  return { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v' }[e] ?? e;
+});
+// End of the heredoc delimiter word that starts at j.
+const hereEnd = (s, j) => { let k = j; for (; k < s.length && !/[\s;&|()<>]/.test(s[k]); k++) { if (s[k] === '\\') k++; else if (s[k] === "'" || s[k] === '"') k = quoteEnd(s, k) - 1; } return k; };
+// Skip the heredoc bodies pending after the newline at i (index of the newline); returns the index after the last body line.
+const skipBodies = (s, i, pending) => {
+  let pos = i + 1;
+  for (const p of pending.splice(0)) for (;;) {
+    if (pos >= s.length) return s.length + 1; // never closed
+    const e = s.indexOf('\n', pos), end = e < 0 ? s.length : e, line = s.slice(pos, end);
+    pos = e < 0 ? s.length : e + 1;
+    if ((p.strip ? line.replace(/^\t+/, '') : line) === p.delim) break;
+  }
+  return pos;
+};
+// Index after the `)` that closes the $( opening at s[i] (quotes, nested $( ), backticks and heredocs inside are skipped); s.length + 1 if it never closes.
+function substEnd(s, i) {
+  let d = 1; const pending = [];
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === "'") { j = quoteEnd(s, j) - 1; }
+    else if (c === '"') { j = dqEnd(s, j) - 1; }
+    else if (c === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+    else if (c === '$' && s[j + 1] === '(') { j = substEnd(s, j + 1) - 1; }
+    else if (c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const strip = s[j + 2] === '-'; let k = j + 2 + strip; while (/[ \t]/.test(s[k] ?? '')) k++; const w = hereWord(s, k); if (w) pending.push({ delim: w[0], strip }); j = Math.max(k, hereEnd(s, k)) - 1; }
+    else if (c === '\n' && pending.length) { j = skipBodies(s, j, pending) - 1; }
+    else if (c === '(') d++;
+    else if (c === ')' && --d === 0) return j + 1;
+    if (j >= s.length) break;
+  }
+  return s.length + 1;
+}
+// Index after the `"` closing the double-quoted string opening at s[i] ($( ) and backticks inside are skipped whole); s.length + 1 if it never closes.
+function dqEnd(s, i) {
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') j++;
+    else if (s[j] === '"') return j + 1;
+    else if (s[j] === '$' && s[j + 1] === '(') j = substEnd(s, j + 1) - 1;
+    else if (s[j] === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+  }
+  return s.length + 1;
+}
+export function canon(cmd) {
+  let out = '', open = false, i = 0;
+  const n = cmd.length, pending = [];
+  const isOp = (c) => /[\s;&|()<>]/.test(c);
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\' && cmd[i + 1] === '\n') { i += 2; continue; } // line continuation
+    if (c === '\n' && pending.length) { const e = skipBodies(cmd, i, pending); out += cmd.slice(i, Math.min(e, n)); i = Math.min(e, n); continue; } // heredoc bodies, raw
+    if (c === '#' && (out === '' || /[\s;&|()]$/.test(out))) { const e = cmd.indexOf('\n', i), end = e < 0 ? n : e; out += cmd.slice(i, end); i = end; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+      const strip = cmd[i + 2] === '-'; let j = i + 2 + strip;
+      while (/[ \t]/.test(cmd[j] ?? '')) j++;
+      const w = hereWord(cmd, j), e = hereEnd(cmd, j);
+      if (w) pending.push({ delim: w[0], strip });
+      out += cmd.slice(i, e); i = Math.max(e, i + 2); continue;
+    }
+    if (isOp(c)) { out += c; i++; continue; }
+    const start = i; let val = '', quoted = false, expands = false; // one word
+    while (i < n && !isOp(cmd[i])) {
+      const ch = cmd[i];
+      if (ch === '\\') { if (cmd[i + 1] === '\n') { i += 2; continue; } quoted = true; val += cmd[i + 1] ?? ''; i += 2; }
+      else if (ch === "'") { const e = cmd.indexOf("'", i + 1); quoted = true; if (e < 0) { open = true; i = n; } else { val += cmd.slice(i + 1, e); i = e + 1; } }
+      else if (ch === '$' && cmd[i + 1] === "'") { const e = quoteEnd(cmd, i); quoted = true; if (e > n) { open = true; i = n; } else { val += ansi(cmd.slice(i + 2, e - 1)); i = e; } }
+      else if (ch === '"' || (ch === '$' && cmd[i + 1] === '"')) {
+        if (ch === '$') i++;
+        const e = dqEnd(cmd, i); quoted = true;
+        if (e > n) { open = true; i = n; break; }
+        const body = cmd.slice(i + 1, e - 1);
+        if (/[$`]/.test(body.replace(/\\[\s\S]/g, ''))) expands = true;
+        val += body.replace(/\\([$`"\\\n])/g, (_, x) => (x === '\n' ? '' : x)); i = e;
+      }
+      else if (ch === '$' && cmd[i + 1] === '(') { expands = true; const e = substEnd(cmd, i + 1); if (e > n) { open = true; i = n; break; } val += cmd.slice(i, e); i = e; }
+      else if (ch === '`') { expands = true; let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; if (k >= n) { open = true; i = n; break; } val += cmd.slice(i, k + 1); i = k + 1; }
+      else { if (ch === '$') expands = true; val += ch; i++; }
+    }
+    const raw = cmd.slice(start, i);
+    out += !quoted || expands ? raw : val !== '' && SAFE_WORD.test(val) ? val : `'${val.replace(/'/g, `'\\''`)}'`;
+  }
+  if (pending.length) open = open; // an unterminated heredoc still runs (bash warns), so it does not count as open
+  return { text: out, open };
+}
+
+// SID-191: the simple commands of a line with their command substitutions left whole (segments() cuts `git checkout "$(x)"` down to
+// `git checkout "$`), so expansionReason can see that an argument is an expansion. Commands inside $( ), backticks and sh -c payloads
+// are added as their own entries. Normalized like segments().
+export function outerCommands(cmd, depth = 0) {
+  const out = [], n = cmd.length, pending = [];
+  let cur = '', i = 0;
+  const flush = () => { const s = normalize(cur); if (s) { out.push(s); if (depth < 8) for (const p of payload(s)) out.push(...outerCommands(p, depth + 1)); } cur = ''; };
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\') { cur += cmd.slice(i, i + 2); i += 2; continue; }
+    if (c === "'") { const e = cmd.indexOf("'", i + 1), end = e < 0 ? n : e + 1; cur += cmd.slice(i, end); i = end; continue; }
+    if (c === '$' && cmd[i + 1] === "'") { const e = Math.min(quoteEnd(cmd, i), n); cur += cmd.slice(i, e); i = e; continue; }
+    if (c === '"') { const e = Math.min(dqEnd(cmd, i), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) for (const m of innerSubs(body)) out.push(...outerCommands(m, depth + 1)); continue; }
+    if (c === '$' && cmd[i + 1] === '(') { const e = Math.min(substEnd(cmd, i + 1), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) out.push(...outerCommands(body.slice(2, -1), depth + 1)); continue; }
+    if (c === '`') { let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; const body = cmd.slice(i, k + 1); cur += body; i = k + 1; if (depth < 8) out.push(...outerCommands(body.slice(1, -1), depth + 1)); continue; }
+    if (c === '#' && (cur === '' || /\s$/.test(cur))) { const e = cmd.indexOf('\n', i); i = e < 0 ? n : e; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') { const strip = cmd[i + 2] === '-'; let k = i + 2 + strip; while (/[ \t]/.test(cmd[k] ?? '')) k++; const w = hereWord(cmd, k); if (w) pending.push({ delim: w[0], strip }); const e = hereEnd(cmd, k); cur += cmd.slice(i, e); i = Math.max(e, i + 2); continue; }
+    if (c === '\n' && pending.length) { flush(); i = Math.min(skipBodies(cmd, i, pending), n); continue; }
+    if (c === '\n' || c === ';' || c === '|' || c === '(' || c === ')' || c === '{' && /(^|\s)$/.test(cur) || (c === '&' && cmd[i + 1] !== '>' && cmd[i - 1] !== '>')) { flush(); i++; continue; }
+    cur += c; i++;
+  }
+  flush();
+  return out;
+}
+// The $( ) and backtick bodies inside a double-quoted string.
+function innerSubs(dq) {
+  const out = [];
+  for (let j = 1; j < dq.length - 1; j++) {
+    if (dq[j] === '\\') j++;
+    else if (dq[j] === '$' && dq[j + 1] === '(') { const e = substEnd(dq, j + 1); out.push(dq.slice(j + 2, e - 1)); j = e - 1; }
+    else if (dq[j] === '`') { let k = j + 1; for (; k < dq.length && dq[k] !== '`'; k++) if (dq[k] === '\\') k++; out.push(dq.slice(j + 1, k)); j = k; }
+  }
+  return out;
+}

@@ -73,6 +73,53 @@ const mustAllow = [
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
+// SID-191: shell quoting, backslashes and adjacent pieces of one word can't split a guarded word. Each of these was allowed on main 91c6b08.
+const sid191Cfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const guardDenies = (c, b = 'feat/x') => Boolean(newRules.lineReason(c) || newRules.segmentReason(c, sid191Cfg, b));
+const sid191 = ['gh pr "merge" 1', 'g""h pr merge 1', 'git push "--for"ce origin feat/x', 'git push origin "ma"in', 'git push origin ma\\in', 'git commit --no-"verify" -m x', 'git reset --"hard" HEAD~1', 'git -c "core.hooks"Path=/tmp/planted commit -m x'];
+for (const c of sid191) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 must deny: ${c}`);
+const sid191More = [
+  "$'\\x67it' push origin main", "git push origin $'ma\\151n'", "g\\h pr merge 1", "'gh' 'pr' 'merge' 1", 'git re"set" --ha\'rd\'', 'git -c core."hooksPath"=/tmp/p commit -m x', "git -c 'core.hooksPath=/tmp/p' commit -m x",
+  'echo "$(g""h pr merge 1)"', "sh -c 'g\"\"h pr merge 1'", "bash -c 'git push origin \"ma\"in'", 'echo \'g""h pr merge 1\' | sh', 'git br""anch -D x', 'git cl"ean" -fd', 'git stash "drop"', 'gh api -X "PUT" repos/o/r/pulls/1/merge', 'n""pm publish',
+  'git "push" origin HEAD:"main"', 'git push origin +"feat/x"', 'git push "--mirror"', 'git update-ref --"stdin"', 'git config core."bare" true', 'HU""SKY=0 git commit -m x', 'git commit -"n" -m x',
+  // fail closed: what can't be read where it could change a guarded command
+  "echo 'unclosed", 'echo "unclosed', 'echo $(unclosed', 'echo `unclosed', 'X=--hard; git reset $X', 'X=main; git push origin $X', 'C="git push -f"; $C', 'export M=merge; gh pr $M 1',
+  'git reset "$X"', 'git reset $X', 'git $SUB -f', '$G push -f', '${G} reset --hard', '$(which git) push -f origin feat/x', 'gh pr $X 1', 'gh $X merge 1', 'gh api $M repos/o/r', 'gh api repos/$R/pulls', 'git branch $F x', 'git clean $F', 'git checkout $X', 'git stash $X',
+  'git -c "$K"=x status', 'git -c core.$K=x status', 'git --config-env=$K status', 'GIT_CONFIG_PARAMETERS="$X" git status', 'GIT_CONFIG_KEY_0=$K GIT_CONFIG_VALUE_0=x GIT_CONFIG_COUNT=1 git status', 'eval $X', 'eval "$CMD"', 'git commit $FLAGS -m x',
+  'git checkout "$(echo .)"', 'git checkout `echo .`', 'echo "$(git reset "$X")"', 'git checkout -b $Y', 'git -c core.hooksPath=$X commit -m x',
+];
+for (const c of sid191More) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 must deny on ${b}: ${c}`);
+const sid191Allow = [
+  'git commit -m "$MSG"', 'git commit -m "fix: $X"', 'git log --format="%H $X"', 'gh pr create --title "$T" --body "$B"', 'gh pr create --fill --base "$BASE"', 'git add "$F"', 'git -C "$DIR" status', 'git diff $BASE...HEAD', 'git log $BASE..HEAD --oneline',
+  'git rev-parse $X', 'gh pr view $N', 'gh api "repos/$R/pulls"', 'gh issue comment 3 --body "$(cat notes.md)"', 'eval "$(ssh-agent -s)"', 'echo "it\'s"', "echo 'a \"b\" c'", 'npm run "test"', 'git push -u origin "feat/x"', "git push -u origin 'feat/x'",
+  'git commit -m "$(cat <<\'EOF\'\nfix: handle "quoted" it\'s (x)\nEOF\n)"', 'gh pr create --title "x" --body "$(cat <<\'EOF\'\n## Summary\n- a "b" (c)\nEOF\n)"', 'cat <<EOF > notes.md\nit\'s "x\nEOF', 'echo $HOME', 'cd "$(git rev-parse --show-toplevel)" && git status',
+  'X=$(git rev-parse HEAD) && echo "$X"', 'for f in *.md; do echo "$f"; done', 'git commit -m "a \\"quoted\\" word"', 'echo \\"hi\\"', 'git status # it\'s fine',
+];
+// The price of failing closed (collateral, measured against main 91c6b08, which allows every one): an expansion in a git argument that a probe
+// shows could be a denied value, and a message that is exactly a flag. Write the value out literally instead.
+const sid191Collateral = ['git checkout $BRANCH', 'git checkout "$BRANCH"', 'git switch "$BRANCH"', 'git restore "$F"', 'git restore --staged "$F"', 'git reset $SHA', 'git reset --soft "$SHA"', 'git merge $B', 'git branch -d $B',
+  'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's"];
+for (const c of sid191Collateral) assert.ok(guardDenies(c), `SID-191 collateral (documented, fails closed): ${c}`);
+const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git config user.name "$NAME"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d'];
+for (const c of sid191Kept) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+for (const c of sid191Allow) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+// Generated quote-split suite: every word of each guarded command, split in the middle (or wholly wrapped) by each quoting style, stays denied.
+const SPLIT_BODIES = ['git push --force origin feat/x', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard HEAD~1', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear',
+  'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish', 'git -c core.hooksPath=/tmp/p commit -m x', 'git update-ref --stdin', 'git config core.bare true', 'HUSKY=0 git commit -m x', 'git filter-branch --all'];
+const STYLES = [(a, b) => `"${a}"${b}`, (a, b) => `${a}"${b}"`, (a, b) => `'${a}'${b}`, (a, b) => `${a}'${b}'`, (a, b) => `${a}\\${b}`, (a, b) => `${a}""${b}`, (a, b) => `${a}''${b}`, (a, b) => `$'${a}'${b}`, (a, b) => `"${a}"'${b}'`, (a, b) => `"${a}${b}"`, (a, b) => `'${a}${b}'`];
+const splitVariants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  ws.forEach((w, k) => {
+    if (w.length < 2) return;
+    const m = Math.ceil(w.length / 2);
+    for (const st of STYLES) splitVariants.push([...ws.slice(0, k), st(w.slice(0, m), w.slice(m)), ...ws.slice(k + 1)].join(' '));
+  });
+}
+for (const c of splitVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 quote-split variant must deny on ${b}: ${c}`);
+for (const c of splitVariants.filter((_, k) => k % 37 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 quote-split variant must deny through the hook: ${c}`);
+console.log(`SID-191: ${sid191.length} reported + ${sid191More.length} more must-deny, ${sid191Allow.length} must-allow, ${splitVariants.length} generated quote-split variants x 2 branches denied`);
+
 for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref|--stdin|^git push/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
 assert.match(reasonOf(run('pre-bash.mjs', bash('git config core.bare true'))), /git config --get <key>/, 'discovery config message names git config --get');
@@ -927,11 +974,11 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Three baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+// Four baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65), 086c230 (the base the quote-aware PR started from) and 91c6b08 (main before SID-191). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['91c6b08']]) { // 91c6b08: main before SID-191
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
   const dir = makeScratch('harness-main-');
@@ -939,7 +986,7 @@ for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
   const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
   baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
 }
-const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
+const newDenies = (c, b) => Boolean(newRules.lineReason(c) || newRules.segmentReason(c, guardCfg, b)); // SID-191: the whole pre-bash rule path (quoting resolved, expansions probed)
 const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
 // Round-7 templates (brace forms, sort -o, uniq -, git log --output, sort --co=). Their quoted payload runs nowhere, so baselines and the guard both allow
 // the bare forms and the gap check asserts nothing for them; ROUND7_SEMI (SID-110) adds `true; <template>` and `<template>; <body>` so they bite.
@@ -985,6 +1032,13 @@ for (const base of baselines) {
   assert.deepEqual(gaps.filter((r) => r.was).map((r) => `${r.b}: ${r.c}`), [], `a generated body x template that ${base.sha} denied must stay denied`);
   console.log(`regression vs ${base.sha}: ${everything.length} commands x 2 branches, main denies ${rows.filter((r) => r.was).length}, new allows ${lost.length} (all allowlisted: ${[...new Set(lost.map((r) => r.c))].length} of ${ALLOWLIST.size} entries)`);
   console.log(`generated ${generated.length} combinations x 2 branches vs ${base.sha}: new denies all but ${gaps.length} that main also allows`);
+}
+// SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
+{
+  const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
+  const ours = new Set([...sid191, ...sid191More, ...splitVariants]);
+  const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))))].sort();
+  console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied${fresh.length ? ':\n  ' + fresh.map((c) => JSON.stringify(c)).join('\n  ') : ''}`);
 }
 for (const [c, why] of ALLOWLIST) {
   assert.ok(everything.includes(c), `stale ALLOWLIST entry (not in the corpus): ${c} (${why})`);
