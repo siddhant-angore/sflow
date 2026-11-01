@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, segments } from './lib.mjs';
+import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff, segments } from './lib.mjs';
 import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -100,17 +100,7 @@ try {
 }
 
 function secretHits(root, base) {
-  const patterns = [
-    ['private key', /-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY/],
-    ['AWS key', /\bAKIA[0-9A-Z]{16}\b/],
-    ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36,}\b/],
-    ['Slack token', /\bxox[baprs]-[A-Za-z0-9-]{10,}/],
-    ['Anthropic/OpenAI key', /\bsk-(ant-)?[A-Za-z0-9_-]{20,}\b/],
-    ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
-    ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
-  ];
   let diff = '';
   try { diff = execSync(`git --no-replace-objects -c core.fsmonitor=false diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
-  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
-  return patterns.filter(([, re]) => re.test(added)).map(([n]) => n);
+  return secretsInDiff(diff);
 }

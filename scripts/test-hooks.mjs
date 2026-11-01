@@ -221,6 +221,66 @@ for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'ech
 for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
+// SID-147 review (5725928282): config changes that turn off the git hooks outside Claude, or point their chaining somewhere an agent chose, are denied.
+const HOOKS_CFG = /turns off the git hooks that run outside Claude|`git config --edit` can change any key|overriding core\.hooksPath disables the project hooks/; // a core.hooksPath key in any case hits envReason first
+for (const c of ['git config --remove-section core', 'git config --rename-section core x', 'git config --rename-section x core', 'git config remove-section core', 'git config rename-section core x',
+  'git config --local --remove-section CORE', 'git config -f .git/config --remove-section core', 'git -C . config --remove-section core', 'git -c user.name=x config --remove-section "core"',
+  'git config --unset-all core.hookspath', 'git config core.HOOKSPATH /tmp/x', 'git config unset core.HooksPath', 'git config -e', 'git config --edit', 'git config --global --edit', 'git config edit',
+  'git config sflow.previousHooksPath /tmp/evil', 'git config --add sflow.x y', 'git config set sflow.previousHooksPath /tmp/evil', 'git config --unset sflow.previousHooksPath', 'git config --remove-section sflow',
+  'git config --local --rename-section sflow x', 'true && git config SFLOW.previousHooksPath /tmp/evil'])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_CFG, `SID-147 must deny: ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git config --get sflow.previousHooksPath', 'git config --remove-section alias', 'git config --rename-section alias.x alias.y', 'git config user.name x', 'git config --list'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-147 review (CTO, Nov 1): core.hooksPath overrides in any letter case. git matches config keys case-insensitively, so each of these ran a planted
+// hook end to end before the `i` flag. Env var NAMES are case-sensitive (git ignores git_config_key_0), so lowercase names are not a bypass; they are
+// denied anyway because the text still names the key. Reading core.hooksPath (`git config --get core.hookspath`) is denied too, as before for the
+// camel-case spelling: over-broad, tracked on SID-161.
+const HOOKS_OVR = /^harness guard: overriding core\.hooksPath disables the project hooks/;
+for (const k of ['core.hooksPath', 'core.hookspath', 'CORE.HOOKSPATH', 'core.HooksPath', 'Core.hookSpath'])
+  for (const c of [`git -c ${k}=/tmp/evil commit -m x`, `git -c "${k}=/tmp/evil" commit -m x`, `git -c '${k}'=/tmp/evil push origin feat`, `HP=/tmp/evil git --config-env=${k}=HP commit -m x`,
+    `HP=/tmp/evil git --config-env ${k}=HP commit -m x`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`,
+    `env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil git commit -m x`, `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=${k} GIT_CONFIG_VALUE_0=/tmp/evil; git commit -m x`,
+    `GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git commit -m x`, `env GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" git push origin feat`, `export GIT_CONFIG_PARAMETERS="'${k}'='/tmp/evil'" && git commit -m x`,
+    `git_config_count=1 git_config_key_0=${k} git_config_value_0=/tmp/evil git commit -m x`, `git_config_parameters="'${k}'='/tmp/evil'" git commit -m x`])
+    assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_OVR, `SID-147 must deny (any case): ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git -c core.editor=vim commit -m x', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git commit -m x', 'git -c core.autocrlf=false status', 'git config --get core.editor'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
+const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;
+const unhookDeny = ['rm -rf .git/hooks', 'rm -f .git/hooks/pre-push', 'mv .git/hooks /tmp/x', 'rm -rf .git/sflow-hooks', 'rm .git/sflow-hooks/pre-push', 'rm -rf .husky', 'rm -rf .husky/', 'rm .husky/pre-commit',
+  'mv .husky/pre-commit .husky/off', 'rm -rf .git/hoo*', 'rm -rf .git/*', 'rm -rf .gi?/hooks', 'rm -rf .git/[h]ooks', 'rm -rf .git/sflow-*', 'rm -rf .hu*', 'cd .git && rm -rf hooks', 'cd .git/hooks && rm pre-push', 'cd .husky; rm pre-commit',
+  'rm -rf "$(git rev-parse --git-path hooks)"', 'rm -rf `git rev-parse --git-path hooks`', 'rm -rf "$(git rev-parse --git-common-dir)/hooks"', 'rm -rf "$GIT_DIR/hooks"', 'GIT_DIR=/r/.git rm -rf /r/.git/hooks',
+  'rm -rf /workspace/repo/.git/hooks', 'rm -rf /workspace/repo/.git/worktrees/wt/hooks', 'rm -r .git/modules/sub/hooks', 'unlink .git/hooks/pre-commit', 'rmdir .git/hooks', 'shred -u .git/hooks/pre-push', 'rm -rf ./.git//hooks/',
+  'find .git/hooks -delete', 'find .git/hooks -type f -exec rm {} +', 'find .husky -name pre-commit -delete', 'chmod -x .git/hooks/pre-push', 'chmod 644 .git/sflow-hooks/pre-commit', 'chmod -R a-x .husky', 'sudo rm -rf .git/hooks',
+  'mv -t /tmp .git/hooks', 'mv --target-directory=/tmp .git/hooks/pre-push', 'true; rm -rf .git/hooks', 'echo "$(rm -rf .git/hooks)"', 'git status && rm -rf .git/hooks'];
+const unhookAllow = ['rm -rf build/', 'rm hooks.txt', 'rm -rf hooks', 'rm -rf src/hooks', 'rm -rf node_modules', 'rm .gitignore', 'rm -rf .github/x', 'rm -rf *', 'ls .git/hooks', 'cat .git/hooks/pre-push', 'ls .husky',
+  'cp .git/hooks/pre-push /tmp/sflow-x', 'find .git/hooks -name x', 'find . -name "*.pyc" -delete', 'chmod +x scripts/x.sh', 'mv a b', "echo 'rm -rf .git/hooks'"];
+for (const c of unhookDeny) { const r = reasonOf(run('pre-bash.mjs', bash(c))); assert.match(r, UNHOOK, `SID-155 must deny: ${c} (got: ${r || 'allowed'})`); }
+assert.ok(denied('pre-bash.mjs', bash('rm -rf .h*')), 'SID-155: .h* could match .husky and .harness.json; denied (the policy reason wins)');
+for (const c of unhookAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-155 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// CTO review of #23 (5725928139): a wrapper line with a trailing rm-family word used to skip the GIT_CMDS write scan, allowing writes main denies.
+// The 11 rows from the review, then every wrapper x write x trailing rm word. All go through bash(), so the regression check below also proves main denies them.
+const wrapRm = ['env tee .git/hooks/pre-commit rm', 'xargs tee .git/hooks/pre-commit rm', 'command tee .git/hooks/pre-commit rm', 'nohup tee .git/hooks/post-checkout shred',
+  'nohup sed -i s/x/y/ .git/hooks/pre-commit unlink', 'env perl -pi -e s/a/b/ .git/hooks/pre-commit rm', 'time dd of=.git/hooks/pre-push rm', 'env tee .git/config rm',
+  'sudo tee -a .git/config chmod', 'env sed -i s/a/b/ .git/config rmdir', 'env truncate -s0 .git/config unlink'];
+for (const w of ['env', 'sudo', 'nohup', 'time', 'xargs', 'command']) for (const wr of ['tee .git/hooks/pre-commit', 'tee -a .git/config', 'sed -i s/a/b/ .git/hooks/pre-push', 'dd of=.git/config', 'truncate -s0 .git/hooks/pre-commit'])
+  for (const r of ['rm', 'unlink', 'rmdir', 'shred', 'find', 'chmod']) wrapRm.push(`${w} ${wr} ${r}`);
+for (const c of wrapRm) assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: wrapper + write + trailing rm word must stay denied: ${c}`);
+// Overwriting or emptying a stub disables SID-147 as well as deleting it: writes into .git/sflow-hooks and a linked worktree's hooks are git-dir hook writes.
+for (const c of ["printf 'exit 0\\n' > .git/sflow-hooks/pre-push", 'cp /dev/null .git/sflow-hooks/pre-push', 'tee .git/sflow-hooks/pre-commit', 'echo x >> .git/sflow-hooks/pre-commit',
+  'echo x > .git/worktrees/wt/hooks/pre-push', 'cp evil /r/.git/sflow-hooks/pre-push', 'ln -sf /tmp/x .git/sflow-hooks/pre-push', 'sed -i s/node/true/ .git/sflow-hooks/pre-push'])
+  assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: writing a stub must be denied: ${c}`);
+assert.deepEqual(newGitWrites('cd .git && rm -rf hooks'), [{ path: '.git/hooks', kind: 'unhook' }]);
+assert.deepEqual(newGitWrites('mv .git/hooks /tmp/x'), [{ path: '.git/hooks', kind: 'unhook' }], 'mv: the source goes, /tmp/x is no git write');
+{ // real git: a linked worktree's hooks path, as git itself reports it, is denied from inside the worktree; nothing was run, the hooks dir is still there.
+  const wt = `${repo}.wt155`;
+  sh(repo, `git worktree add -q -b feat/wt155 "${wt}"`);
+  const hp = sh(wt, 'git rev-parse --path-format=absolute --git-path hooks');
+  for (const c of [`rm -rf ${hp}`, `rm -f ${hp}/pre-push`, `mv ${hp} /tmp/x`, 'rm -rf "$(git rev-parse --git-path hooks)"']) assert.match(reasonOf(run('pre-bash.mjs', bash(c, wt))), UNHOOK, `SID-155 linked worktree: ${c}`);
+  assert.ok(existsSync(hp), 'the guard only decides; the hooks dir is untouched');
+  sh(repo, `git worktree remove --force "${wt}" && git branch -q -D feat/wt155`);
+}
+
 // Gate: origin's policy wins over a working-tree edit; commit-and-push chains and dirty trees are refused; pass records HEAD and is skipped next time.
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: [], allowMerge: true }));
 assert.ok(denied('pre-bash.mjs', bash('gh pr merge 1')), 'working-tree policy edit must not take effect');
@@ -1030,11 +1090,11 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Three baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+// Four baselines (the fourth, 5c959d2, is main before SID-155): main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2']]) { // 5c959d2: main when SID-155 started
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
   const dir = makeScratch('harness-main-');
