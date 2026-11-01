@@ -357,4 +357,40 @@ t('k16: SID-213: a 0.5.0 gate record does not count at pre-push', () => {
   assert.equal(open.status, 0, open.stderr); assert.match(open.stderr, /sflow gate ok [0-9a-f]{12}/, 'a new record counts');
 });
 
+t('k17: SID-213: pre-commit scans textconv output and runs only what main ran', () => {
+  const encoded = `${Buffer.from(`key=${secret()}\n`).toString('base64')}\n`;
+  const staged = (driver) => {
+    const d = repo();
+    assert.equal(cli('install', '--repo', d).status, 0);
+    writeFileSync(join(d, '.gitattributes'), '*.b64 diff=z\n');
+    ok(d, `git config diff.z.textconv '${driver}' && git add .gitattributes && git commit -qm attrs`);
+    writeFileSync(join(d, 'k.b64'), encoded);
+    return d;
+  };
+  const leak = staged('base64 -d');
+  const refused = sh(leak, 'git add k.b64 && git commit -qm leak');
+  assert.notEqual(refused.status, 0, 'textconv output holds a token: commit refused'); assert.match(refused.stderr, /staged text looks like a secret \(AWS key\)/);
+  const broken = staged('false');
+  const closed = sh(broken, 'git add k.b64 && git commit -qm broken');
+  assert.notEqual(closed.status, 0, 'a failing driver: commit refused'); assert.match(closed.stderr, /could not read the staged diff \(failing closed\)/);
+
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  const ran = join(d, '.git', 'external-ran'), external = join(d, '.git', 'external');
+  writeFileSync(external, `#!/bin/sh\n: > "${ran}"\n`); chmodSync(external, 0o755);
+  ok(d, `git config diff.external "${external}" && echo plain > plain.txt && git add plain.txt && git commit -qm plain`);
+  assert.ok(!existsSync(ran), 'diff.external did not run: main passed --no-ext-diff here');
+});
+
+t('k18: SID-213: pre-push denies a head whose token sits behind a shallow boundary, and writes no record', () => {
+  const d = repo();
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git commit -qm leak && git rm -q cfg.txt && git commit -qm remove');
+  ok(d, 'git fetch -q --depth=1 "file://$PWD" feat/x');
+  assert.equal(ok(d, 'git rev-parse --is-shallow-repository'), 'true');
+  const r = dispatchPrePush(d);
+  assert.notEqual(r.status, 0, 'refused'); assert.match(r.stderr, /a commit in the pushed range adds text that looks like a secret \(AWS key\)/);
+  assert.ok(!existsSync(join(d, '.git', GATE_RECORD_DIR, ok(d, 'git rev-parse HEAD'))), 'no gate record');
+});
+
 console.log('git hooks tests ok');

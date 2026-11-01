@@ -82,6 +82,35 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
   const side = (d, name) => sh(d, `git checkout -q -b ${name} && echo ${name} > ${name} && git add ${name} && git commit -qm ${name} && git checkout -q feat/x`);
   const dropLast = (d, file) => sh(d, `sed -i '$d' ${file} && git add ${file} && git commit -qm remove-last-line`);
   const evilMerge = (d, write = `echo "k=${TOKEN}"`) => { side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${write} > merged.txt && git add merged.txt && git commit -qm evil`); assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit'); sh(d, 'git rm -q merged.txt && git commit -qm remove'); };
+  const lateNulToken = `{ for i in $(seq 120); do echo ${'p'.repeat(80)}; done; printf 'x\\000k=${TOKEN}\\n'; }`;
+  const changedAgainstAllParents = (d, ref, name) => sh(d, `git diff-tree -c --name-only -z --no-commit-id ${ref}`).split('\0').includes(name);
+  const octopus = (d, n, content) => {
+    const parent = head(d), tree = sh(d, 'git rev-parse HEAD^{tree}');
+    const parents = sh(d, `for i in $(seq ${n}); do git commit-tree ${tree} -p ${parent} -m p$i; done`).split('\n');
+    const merged = content ? sh(d, `blob=$(printf '%s\\n' '${content}' | git hash-object -w --stdin) && git update-index --add --cacheinfo 100644,$blob,merged.txt && git write-tree && git reset -q`) : tree;
+    sh(d, `git reset -q --hard $(git commit-tree ${merged} ${parents.map((p) => `-p ${p}`).join(' ')} -m octopus)`);
+    assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, n + 1, `${n} parents`);
+  };
+  const refusedWide = (d, n = 64) => { const r = push(d); refused(r, new RegExp(`a merge in the pushed range has ${n} parents`), 'error'); assert.match(r.why, /failing closed/); assert.match(r.why, /split/i); };
+  const b64 = (text) => Buffer.from(text).toString('base64');
+  const script = (d, name, body) => { const x = join(gitDirOf(d), name); writeFileSync(x, `#!/bin/sh\n${body}\n`); chmodSync(x, 0o755); return x; };
+  const textconvFile = (d, driver = 'base64 -d') => { writeFileSync(join(d, '.gitattributes'), '*.b64 diff=z\n'); writeFileSync(join(d, 'k.b64'), `${b64(`k=${TOKEN}\n`)}\n`); sh(d, `git config diff.z.textconv '${driver}' && git add .gitattributes k.b64 && git commit -qm encoded`); };
+  // Git trusts a graph file's parent column: only `git commit-graph verify` reads the checksum.
+  const poisonGraph = (d, parents, generations = {}) => {
+    sh(d, 'git -c commitGraph.generationVersion=1 commit-graph write --reachable --no-progress');
+    const f = join(gitDirOf(d), 'objects', 'info', 'commit-graph'), b = readFileSync(f);
+    const chunk = (id) => { for (let i = 8; ; i += 12) if (b.toString('latin1', i, i + 4) === id) return Number(b.readBigUInt64BE(i + 4)); };
+    const oids = chunk('OIDL'), count = b.readUInt32BE(chunk('OIDF') + 255 * 4);
+    const pos = (sha) => { for (let i = 0; i < count; i++) if (b.toString('hex', oids + 20 * i, oids + 20 * i + 20) === sha) return i; throw new Error(`${sha} not in the graph`); };
+    const row = (sha) => chunk('CDAT') + 36 * pos(sha);
+    for (const [commit, parent] of parents) b.writeUInt32BE(pos(parent), row(commit) + 20);
+    for (const [sha, gen] of Object.entries(generations)) b.writeUInt32BE(gen << 2, row(sha) + 28);
+    rmSync(f, { force: true }); writeFileSync(f, b);
+  };
+  const fakeGpg = (d) => {
+    const marker = join(gitDirOf(d), 'gpg-ran');
+    return { marker, program: script(d, 'fake-gpg', `case "$*" in *--verify*) : > "${marker}";; esac\ncase "$*" in *-bsau*) echo '[GNUPG:] SIG_CREATED ' >&2; printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n';; esac\nexit 0`) };
+  };
   const diffOffTxt = (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); };
 
   const cases = {
@@ -114,17 +143,114 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
     'lock-in: a clean merge adding a -diff file passes': () => { const d = scanRepo(); diffOffTxt(d); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo clean > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
     'a binary in the net diff over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
     'a binary only in history over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big && git rm -q big.bin && git commit -qm rm'); assert.equal(sh(d, 'git diff origin/main..HEAD'), '', 'empty net diff'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    // The merge changes big.bin against both parents. Against feat/x that is the whole file, so only the per-parent read can overflow.
     'a merge of origin main whose per-parent read is over maxBuffer denies and says split the push': () => {
       const d = scanRepo(), limit = 1 << 16;
       diffOffTxt(d);
       sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x`);
       bigBinary(d);
-      sh(d, `printf '1\\nm\\n' > f.txt && git add big.bin f.txt && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nm\\nresolved\\n' > f.txt; git add f.txt && git commit -qm merge-main`);
+      sh(d, `printf '1\\nm\\n' > f.txt && git add big.bin f.txt && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nm\\nresolved\\n' > f.txt; printf 'changed\\n' >> big.bin; git add f.txt big.bin && git commit -qm merge-main`);
       const base = sh(d, 'git rev-parse origin/main');
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'big.bin'), 'the merge changes big.bin against every parent');
       assert.ok(sh(d, `git log -p --cc --text --full-history --format=%H ${base}..HEAD`).length < limit, 'the log itself fits, so only the per-parent read can overflow');
       const v = pushSecretScan(d, base, limit);
       assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/);
     },
+    'lock-in: merging origin main with a big file the merge leaves alone does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, `git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; echo resolved > m.txt; git add m.txt && git commit -qm merge-main`);
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
+    'a NUL before the token, past byte 8000, does not hide a secret a merge adds, removed later': () => {
+      const d = scanRepo();
+      evilMerge(d, lateNulToken);
+      const cc = sh(d, 'git log -1 -p --cc --format= HEAD~1');
+      assert.doesNotMatch(cc, /^Binary files /m, 'git takes the file for text');
+      assert.deepEqual(secretsInDiff(cc), [], '--cc cuts the line at the NUL');
+      assert.ok(changedAgainstAllParents(d, 'HEAD~1', 'merged.txt'), 'the path list names the file');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a merge adding a secret to an awkwardly named file, removed later, is denied': () => {
+      for (const name of ['m[x].txt', 'a\\012b.txt', 'f\\377.txt', 'sp ace/*.txt', ':(top)x.txt']) {
+        const d = scanRepo();
+        side(d, 'o1'); clean(d);
+        sh(d, `n=$(printf '${name}') && git merge -q --no-ff --no-commit o1 && mkdir -p "$(dirname "$n")" && ${lateNulToken} > "$n" && git add -- ":(literal)$n" && git commit -qm evil && git rm -q -- ":(literal)$n" && git commit -qm remove`);
+        refused(push(d), HISTORY, 'secret');
+      }
+    },
+    'lock-in: a merge adding a token to a *.lock or *.snap file stays out of the scan': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${lateNulToken} > x.lock && ${lateNulToken} > y.snap && git add x.lock y.snap && git commit -qm evil`); passed(push(d)); },
+    'lock-in: a clean evil-shaped merge is allowed': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo fine > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
+    ...Object.fromEntries([64, 65].map((n) => [`a ${n}-parent octopus adding a secret in a new file, removed later, is denied`, () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      octopus(d, n, `k=${TOKEN}`);
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'merged.txt'), 'the path list names the file');
+      sh(d, 'git rm -q merged.txt && git commit -qm remove');
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], '--cc has no all-plus column at this width');
+      const r = push(d);
+      assert.ok(r.why, 'denied'); assert.ok(!r.recorded, 'no gate record');
+    }])),
+    'a 64-parent merge with no secret is denied and says to split it': () => { const d = scanRepo(); octopus(d, 64, 'fine'); refusedWide(d); },
+    'a 64-parent merge equal to all its parents is denied too': () => { const d = scanRepo(); octopus(d, 64); refusedWide(d); },
+    'a 63-parent octopus adding a secret, removed later, is denied': () => { const d = scanRepo(); octopus(d, 63, `k=${TOKEN}`); sh(d, 'git rm -q merged.txt && git commit -qm remove'); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: a clean 63-parent octopus is allowed': () => { const d = scanRepo(); octopus(d, 63, 'fine'); passed(push(d)); },
+    'a shallow boundary does not hide a token in the commit behind it, before or after unshallowing': () => {
+      const d = scanRepo(), mirror = join(makeScratch('harness-mirror-'), 'm.git');
+      addRemove(d);
+      sh(d, `git clone -q --no-local --mirror . "${mirror}" && git fetch -q --depth=1 "file://$PWD" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'true', 'the head is a shallow boundary');
+      assert.deepEqual(secretsInDiff(sh(d, 'git log -p --cc --format= HEAD')), [], 'the boundary hides the token from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+      sh(d, `git fetch -q --unshallow "${mirror}" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'false', 'unshallowed');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a genuinely shallow clone whose range reaches the boundary fails closed': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      addRemove(d); sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch feat/x "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git fetch -q --depth=1 origin main:refs/remotes/origin/main');
+      clean(clone, 'more');
+      refused(push(clone), CLOSED, 'error');
+    },
+    'gate commands run with the shallow file off': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); passed(push(d)); },
+    'log.showSignature does not run gpg.program during the scan': () => {
+      const d = scanRepo(), { marker, program } = fakeGpg(d);
+      sh(d, `echo c > c && git add c && git -c gpg.program="${program}" commit -S -qm signed && git config gpg.program "${program}" && git config log.showSignature true`);
+      assert.match(sh(d, 'git cat-file commit HEAD'), /^gpgsig /m, 'a signed commit');
+      sh(d, 'git log -1');
+      assert.ok(existsSync(marker), 'a plain git log runs the program');
+      rmSync(marker);
+      passed(push(d));
+      assert.ok(!existsSync(marker), 'the scan did not run it');
+    },
+    // Tips come from the object itself, so the graph lies about a commit below them.
+    'a commit-graph with rewritten parents does not hide a token commit': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      addRemove(d); clean(d);
+      poisonGraph(d, [[sh(d, 'git rev-parse HEAD~1'), base]]);
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], 'the graph hides the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a commit-graph giving a false merge-base does not change the base': () => {
+      const d = scanRepo({ gate: ['echo base={base}'] }), base = sh(d, 'git rev-parse origin/main'), older = sh(d, 'git rev-parse origin/main~1');
+      clean(d, 'one'); const one = head(d); clean(d, 'two'); const two = head(d); clean(d, 'three');
+      poisonGraph(d, [[one, older], [older, two]], { [base]: 20, [older]: 19 });
+      assert.notEqual(sh(d, `git merge-base HEAD ${base}`), base, 'the graph gives a false merge-base');
+      const r = push(d); passed(r);
+      assert.ok(r.runs.some((x) => x.command === `echo base=${base}`), `base is ${base}: ${JSON.stringify(r.runs)}`);
+    },
+    'textconv output is scanned in the tree': () => { const d = scanRepo(); textconvFile(d); assert.deepEqual(secretsInDiff(sh(d, 'git diff --no-textconv origin/main..HEAD')), [], 'the raw file holds no token'); refused(push(d), NET, 'secret'); },
+    'a failing textconv driver fails closed': () => { const d = scanRepo(); textconvFile(d, 'false'); refused(push(d), CLOSED, 'error'); },
+    'history is not read with textconv: a driver for a file only in history does not run': () => {
+      const d = scanRepo(), ran = join(gitDirOf(d), 'conv-ran');
+      textconvFile(d, script(d, 'conv', `: > "${ran}"\nexec base64 -d "$1"`));
+      sh(d, 'git rm -q k.b64 && git commit -qm remove');
+      passed(push(d));
+      assert.ok(!existsSync(ran), 'the driver did not run');
+    },
+    'a diff.external printing a token still denies the push, as on main': () => { const d = scanRepo(); clean(d); const x = script(d, 'loud-diff', `echo '+k=${TOKEN}'`); sh(d, `git config diff.external "${x}"`); refused(push(d), NET, 'secret'); },
     'lock-in: a binary under the limit passes the scan': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 23), null); },
     'a .git/info/grafts cycle over two token commits is denied': () => {
       const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
