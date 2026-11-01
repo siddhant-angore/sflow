@@ -31,5 +31,6 @@
     "./agents/thermo-nuclear-review-subagent.md",
     "./agents/web-performance-auditor.md"
   ],
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "icon": "./assets/sflow-mark.png"
 }

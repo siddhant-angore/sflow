@@ -86,7 +86,6 @@ sflow is assembled from 8 vendored sources (7 MIT, 1 BSD-3-Clause), pinned by co
 - `agents/poteto-agent.md` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/agents/*`)
 - `agents/thermo-nuclear-code-quality-review-subagent.md` from cursor/plugins/thermos@4dd1d05818d1 (`thermos/agents/*`)
 - `agents/thermo-nuclear-review-subagent.md` from cursor/plugins/thermos@4dd1d05818d1 (`thermos/agents/*`)
-- `assets` from cursor/plugins/pstack@4dd1d05818d1 (`pstack/assets`)
 - `docs/harness` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/docs/harness`)
 - `docs/guide` from cursor/plugins/pstack@4dd1d05818d1 (`harness/pstack/claude-code/docs/guide`)
 - `docs/upstream/pstack-README.md` from cursor/plugins/pstack@4dd1d05818d1 (`pstack/README.md`)
@@ -229,3 +228,5 @@ sflow is assembled from 8 vendored sources (7 MIT, 1 BSD-3-Clause), pinned by co
 - `domains/flutter/agents/best-practices-research-agent.md` from VeryGoodOpenSource/vgv-wingspan@e78608956d26 (`agents/research/*`)
 - `domains/flutter/agents/official-docs-research-agent.md` from VeryGoodOpenSource/vgv-wingspan@e78608956d26 (`agents/research/*`)
 - `domains/flutter/docs/upstream/vgv-wingspan-README.md` from VeryGoodOpenSource/vgv-wingspan@e78608956d26 (`README.md`)
+- `domains/flutter/hooks/hooks.json` carries an sflow change: Quote ${CLAUDE_PLUGIN_ROOT} in each hook command so it runs when the plugin path contains a space (SID-49).
+- `domains/flutter/agents/flutter-reviewer.md` carries an sflow change: Quote ${CLAUDE_PLUGIN_ROOT} in the agent's frontmatter hook command so it runs when the plugin path contains a space (SID-49).

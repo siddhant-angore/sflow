@@ -126,6 +126,13 @@ function syncInPlace() {
     }
     // Vendored skill dirs that are not SKILL.md skills (e.g. wingspan's shared/) are left as-is; Claude Code ignores them.
   }
+  // A `target:` overlay changes a vendored file, so NOTICE says so, per file, from the overlay's own `when` line (the pack notice inherits it).
+  const ovDir = join(root, 'workflows');
+  for (const f of existsSync(ovDir) ? readdirSync(ovDir).filter((n) => n.endsWith('.md')).sort() : []) {
+    const fm = readFileSync(join(ovDir, f), 'utf8').replaceAll('\r\n', '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+    const target = fm.match(/^target:[ \t]*(.*)$/m)?.[1].trim(), when = fm.match(/^when:[ \t]*(.*)$/m)?.[1].trim();
+    if (target) notice.push(`- \`${target}\` carries an sflow change: ${when}`);
+  }
   mkdirSync(join(root, 'LICENSES'), { recursive: true });
   for (const name of Object.keys(manifest.sources)) cpSync(join(checkout(name), manifest.sources[name].licensePath ?? 'LICENSE'), join(root, 'LICENSES', licenseName(name)));
   const owned = new Set(Object.keys(manifest.sources).map(licenseName));
