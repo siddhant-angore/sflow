@@ -228,3 +228,4 @@ sflow is assembled from 8 vendored sources (7 MIT, 1 BSD-3-Clause), pinned by co
 - `domains/flutter/agents/official-docs-research-agent.md` from VeryGoodOpenSource/vgv-wingspan@e78608956d26 (`agents/research/*`)
 - `domains/flutter/docs/upstream/vgv-wingspan-README.md` from VeryGoodOpenSource/vgv-wingspan@e78608956d26 (`README.md`)
 - `domains/flutter/hooks/hooks.json` carries an sflow change: Quote ${CLAUDE_PLUGIN_ROOT} in each hook command so it runs when the plugin path contains a space (SID-49).
+- `domains/flutter/agents/flutter-reviewer.md` carries an sflow change: Quote ${CLAUDE_PLUGIN_ROOT} in the agent's frontmatter hook command so it runs when the plugin path contains a space (SID-49).

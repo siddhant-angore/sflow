@@ -13,6 +13,10 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 ### Fixed
 
 - sflow-flutter hook commands quote `"${CLAUDE_PLUGIN_ROOT}"` so they run when the plugin path contains a space (the five `bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<x>.sh` commands split at the space). Applied as an sflow overlay (`workflows/flutter-hooks-quoting.md`, a `target:` overlay, now checked for valid JSON) to the file vendored from VeryGoodOpenSource/vgv-ai-flutter-plugin (MIT, credit Very Good Ventures); `NOTICE.md` and `domains/flutter/NOTICE.md` list the file as carrying an sflow change. `scripts/test-plugin-root-space.mjs` runs every hook command of both plugins from a root path with a space, and fails on the old unquoted form. (SID-49)
+- The sflow-flutter `flutter-reviewer` agent's frontmatter hook now quotes `"${CLAUDE_PLUGIN_ROOT}"` (`bash "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/allow-readonly-git.sh"`). When the plugin path had a space, the unquoted command could not find its script, so the read-only restriction on the agent's Bash never ran.
+  - The fix is a second `target:` overlay, `workflows/flutter-reviewer-hook-quoting.md`, and NOTICE lists the change.
+  - `scripts/test-plugin-root-space.mjs` now also runs every `hooks:` command in the frontmatter of both plugins' agents (`agents/*.md`) and skills (`skills/*/SKILL.md`). A self-check confirms it catches the old unquoted form.
+  - This is the only frontmatter hook in either plugin. (SID-49)
 - Both plugins now declare the sflow mark as their icon (`icon` in `plugin.json`, `assets/sflow-mark.png` and `domains/flutter/assets/sflow-mark.png`), clearing `ICON_MISSING`. The borrowed pstack logo (`assets/logo.png`, vendored from cursor/plugins/pstack) is no longer vendored: its manifest entry is gone and the lock goes from 916 to 915 files. (SID-49)
 
 ## [0.5.0] - 2026-10-31
