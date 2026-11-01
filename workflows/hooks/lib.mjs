@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULTS = { protectedBranches: ['main', 'master'], gate: [], allowMerge: false, dod: [] };
@@ -103,6 +103,35 @@ export const ignoredNote = (cfg) => `The working-tree .harness.json is ignored: 
 export const POLICY_FILES = ['.harness.json', '.claude/settings.json', '.claude/settings.local.json'];
 const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/(\.\/)+/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
 export const isPolicyPath = (p) => { const n = norm(p); return POLICY_FILES.some((f) => n === f || n.endsWith('/' + f)); };
+// SID-162: the file tools (Edit/Write/MultiEdit) must not write where git looks for hooks, the same rule the shell guard applies (writes kind `hooks`).
+// Checked on the path as given and on its resolved form (`..`, `//`, symlinked parents), by name (.git/hooks, .git/sflow-hooks, a linked worktree's or a
+// submodule's hooks) and against this repo's real hooks dirs: <git common dir>/hooks, <git common dir>/sflow-hooks and a configured core.hooksPath.
+export const HOOK_FILE_DENY = 'writing into a hooks directory installs code git runs automatically; ask the user, or use the harness hook setup';
+const HOOK_FILE_RE = /(?:^|\/)\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:sflow-)?hooks(?:\/|$)/i;
+const settled = (p) => { // realpath of the deepest existing ancestor, with the rest appended
+  let head = p, tail = '';
+  for (;;) {
+    try { return tail ? join(realpathSync(head), tail) : realpathSync(head); } catch {}
+    const up = dirname(head); if (up === head) return p;
+    tail = tail ? join(basename(head), tail) : basename(head); head = up;
+  }
+};
+const within = (p, dir) => { const r = relative(dir, p); return r === '' || (!!r && !r.startsWith('..') && !isAbsolute(r)); };
+export function hookFileReason(file, cwd = process.cwd()) {
+  if (!file) return null;
+  const abs = resolve(cwd, String(file).replace(/\\/g, '/')), real = settled(abs), seen = [abs, real];
+  if (seen.some((p) => HOOK_FILE_RE.test(p.replace(/\\/g, '/')))) return HOOK_FILE_DENY;
+  let at = dirname(abs); while (!existsSync(at) && dirname(at) !== at) at = dirname(at);
+  try { if (!statSync(at).isDirectory()) at = dirname(at); } catch { return null; }
+  const dirs = [];
+  try { const common = resolve(at, git(at, 'rev-parse', '--git-common-dir')); dirs.push(join(common, 'hooks'), join(common, 'sflow-hooks')); } catch { return null; } // not in a repo
+  try {
+    const hp = git(at, 'config', '--get', 'core.hooksPath');
+    let top; try { top = git(at, 'rev-parse', '--show-toplevel'); } catch { top = at; }
+    if (hp) dirs.push(isAbsolute(hp) ? hp : /^~\//.test(hp) ? join(process.env.HOME ?? '~', hp.slice(2)) : resolve(top, hp));
+  } catch {} // core.hooksPath unset
+  return dirs.some((d) => seen.some((p) => within(p, d) || within(p, settled(d)))) ? HOOK_FILE_DENY : null;
+}
 // A glob token (* ? [ ]) that could expand to a policy path, e.g. .harness*, .claude/*, .claude/settings*.json. A * or ? at the start of a segment does not match a leading dot, as in the shell.
 const globRe = (g) => {
   let re = '', start = true;

@@ -1,7 +1,7 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -284,6 +284,36 @@ assert.equal(run('pre-bash.mjs', bash('git push --force', plain))?.hookSpecificO
 for (const f of ['.harness.json', '.claude/settings.json'])
   assert.ok(denied('policy.mjs', { tool_name: 'Edit', tool_input: { file_path: join(repo, f) }, cwd: repo }), `policy denies ${f}`);
 assert.ok(!denied('policy.mjs', { tool_name: 'Edit', tool_input: { file_path: join(repo, 'src/x.ts') }, cwd: repo }));
+
+// SID-162: the file tools can't write git hook files either (the shell guard's `hooks` rule). By name, resolved (`..`, `//`, symlinked parents),
+// and against the repo's real hooks dirs: a separate git dir, a linked worktree, a configured core.hooksPath.
+const HOOK_FILE = /^harness: writing into a hooks directory installs code git runs automatically/;
+const fileTool = (tool, file_path, cwd) => reasonOf(run('policy.mjs', { tool_name: tool, tool_input: { file_path, content: 'x' }, cwd }));
+const hookRepo = realpathSync(makeScratch('harness-hookfile-'));
+sh(hookRepo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && mkdir -p hk src/hooks hooks/harness docs');
+sh(hookRepo, 'git worktree add -q -b wt wt && git submodule--helper 2>/dev/null; true');
+symlinkSync(join(hookRepo, '.git', 'hooks'), join(hookRepo, 'lnk'));
+const sep = realpathSync(makeScratch('harness-hookfile-sep-'));
+sh(sep, 'git init -q --separate-git-dir ../$(basename $PWD).gitdir w');
+trackScratch(`${sep}/../${sep.split('/').pop()}.gitdir`);
+const sepGit = join(dirname(sep), `${sep.split('/').pop()}.gitdir`);
+const hookDeny = [[join(hookRepo, '.git/hooks/pre-commit'), hookRepo], ['.git/hooks/pre-push', hookRepo], [join(hookRepo, '.git/sflow-hooks/pre-push'), hookRepo],
+  [join(hookRepo, '.git/worktrees/wt/hooks/pre-push'), hookRepo], [join(hookRepo, '.git/modules/sub/hooks/post-checkout'), hookRepo], [join(hookRepo, 'src/../.git/hooks/pre-commit'), hookRepo],
+  [join(hookRepo, '.git') + '//hooks/pre-commit', hookRepo], ['src/../.git/./hooks/x', hookRepo], [join(hookRepo, 'lnk/pre-commit'), hookRepo], [join(hookRepo, '.git/hooks'), hookRepo],
+  [join(hookRepo, '.git/sflow-hooks/previous-hooks-path'), hookRepo], ['../.git/hooks/pre-commit', join(hookRepo, 'wt')], [join(sepGit, 'hooks/pre-commit'), join(sep, 'w')], [join(sepGit, 'sflow-hooks/pre-push'), join(sep, 'w')]];
+for (const tool of ['Write', 'Edit', 'MultiEdit']) for (const [f, cwd] of hookDeny) assert.match(fileTool(tool, f, cwd), HOOK_FILE, `SID-162 must deny ${tool} ${f} (cwd ${cwd})`);
+const hookAllow = ['src/hooks/useX.ts', 'hooks/harness/x.mjs', 'docs/.git-hooks.md', '.github/hooks/x.yml', '.githooks/pre-commit', 'hk/pre-commit', 'a', 'wt/a', '.gitignore'];
+for (const f of hookAllow) assert.equal(fileTool('Write', join(hookRepo, f), hookRepo), '', `SID-162 must allow ${f}`);
+assert.equal(fileTool('Write', join(sep, 'w', 'src/x.ts'), join(sep, 'w')), '', 'SID-162: ordinary file in a separate-git-dir repo');
+sh(hookRepo, 'git config core.hooksPath hk'); // a configured hooks dir is protected too, relative to the work tree, from anywhere in the repo
+for (const [f, cwd] of [[join(hookRepo, 'hk/pre-commit'), hookRepo], ['hk/pre-push', hookRepo], ['../hk/x', join(hookRepo, 'src')], [join(hookRepo, 'hk/new/x'), hookRepo]])
+  assert.match(fileTool('Edit', f, cwd), HOOK_FILE, `SID-162 core.hooksPath must deny ${f}`);
+assert.equal(fileTool('Edit', join(hookRepo, 'src/hooks/useX.ts'), hookRepo), '', 'SID-162: core.hooksPath protects only that dir');
+sh(hookRepo, `git config core.hooksPath ${join(hookRepo, 'docs')}`);
+assert.match(fileTool('Write', join(hookRepo, 'docs/pre-push'), hookRepo), HOOK_FILE, 'SID-162: absolute core.hooksPath');
+sh(hookRepo, 'git config --unset core.hooksPath');
+assert.equal(fileTool('Write', join(hookRepo, 'hk/pre-commit'), hookRepo), '', 'SID-162: unset core.hooksPath, hk is an ordinary dir again');
+assert.equal(fileTool('Write', join(tmpdir(), 'not-a-repo-file.txt'), tmpdir()), '', 'SID-162: outside any repo nothing changes');
 
 // Run record: gate and stop outcomes are appended as JSON lines.
 const runs = readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
