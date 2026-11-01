@@ -625,8 +625,39 @@ export const SECRET_PATTERNS = [
   ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
   ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
 ];
-// Names of the patterns that match a line added in a unified diff.
+// Names of the patterns that match a line added in a unified or combined (--cc) diff. `+++` is a file header only between `diff ` and the first `@@`: inside a hunk it is
+// an added line starting with `++`, or an octopus merge's three-column prefix. A combined hunk opens with one `@` per parent plus one, and only a line with `+` in every
+// column is new in the merge. Any other line came from a parent, so that parent's own commit, or origin, already accounts for it.
 export function secretsInDiff(diff) {
-  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
+  let inHunk = false, prefix = '+';
+  const added = diff.split('\n').filter((l) => {
+    if (l.startsWith('diff ')) { inHunk = false; prefix = '+'; return false; }
+    if (l.startsWith('@@')) { inHunk = true; prefix = '+'.repeat(/^@+/.exec(l)[0].length - 1); return false; }
+    return l.startsWith(prefix) && (inHunk || !l.startsWith('+++'));
+  }).join('\n');
   return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
+}
+
+// SID-213: the push gate's scan of base..HEAD. Returns null when clean, else { result, detail, reason }: result 'secret' or 'error' for runs.jsonl, reason for the deny.
+// Any failure to read the range is an error, never "no secrets". The net diff sees what the final tree adds; the per-commit log sees what history carries to the remote even when a later commit removes it.
+// The flags stop repo config hiding added lines: color puts escape codes before the `+`, and an external diff or textconv driver can print anything.
+// log only: --full-history because a pathspec otherwise skips a side branch whose merge matches the other parent; --root because log.showroot=false hides a root commit's diff; --cc for what a merge itself adds.
+const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv'];
+const SCAN_PATHS = ['--', '.', ':(exclude)*.lock', ':(exclude)*.snap'];
+export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
+  const read = (...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args, ...SCAN_PATHS], { cwd: root, env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer }).toString();
+  let net, history;
+  try {
+    if (!base) throw new Error('no base commit to scan from');
+    net = secretsInDiff(read('diff', ...SCAN_FLAGS, `${base}..HEAD`));
+    history = secretsInDiff(read('log', '-p', '--cc', '--root', '--full-history', '--format=%H', ...SCAN_FLAGS, `${base}..HEAD`));
+  } catch (e) {
+    const first = (e.stderr?.toString().trim() || e.message).split('\n')[0];
+    const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.' : '';
+    return { result: 'error', detail: `secret scan: ${first}`, reason: `harness gate: could not read the diff for the secret scan (failing closed): ${first}${split}` };
+  }
+  const names = [...new Set([...net, ...history])].join(', ');
+  if (net.length) return { result: 'secret', detail: names, reason: `harness gate: committed text looks like a secret (${names}); remove it and rewrite the commit before pushing` };
+  if (history.length) return { result: 'secret', detail: names, reason: `harness gate: a commit in the pushed range adds text that looks like a secret (${names}), and it would reach the remote in history even though the final tree no longer has it. It must be removed by rewriting those commits (a human step).` };
+  return null;
 }

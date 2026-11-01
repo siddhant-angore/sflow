@@ -244,4 +244,26 @@ t('k12: the chained hooks dir can\'t be redirected by an agent: git config is ig
   assert.match(cli('check', '--repo', g).stdout, /NOT INSTALLED/);
 });
 
+t('k13: SID-213: a real push is refused when a commit in the range holds a removed secret or the scan fails; a first push and a later one scan from the same base', () => {
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git -c core.hooksPath=/dev/null commit -qm leak && git rm -q cfg.txt && git -c core.hooksPath=/dev/null commit -qm unleak');
+  const first = sh(d, 'git push origin feat/x');
+  assert.notEqual(first.status, 0); assert.match(first.stderr, /a commit in the pushed range adds text that looks like a secret \(AWS key\)/); assert.equal(remoteSha(d, 'feat/x'), null);
+  ok(d, 'git reset -q --hard HEAD~2 && echo b > b && git add b && git commit -qm b');
+  const clean = sh(d, 'git push origin feat/x'); assert.equal(clean.status, 0, clean.stderr);
+  const tip = remoteSha(d, 'feat/x');
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git -c core.hooksPath=/dev/null commit -qm leak && git rm -q cfg.txt && git -c core.hooksPath=/dev/null commit -qm unleak');
+  const later = sh(d, 'git push origin feat/x');
+  assert.notEqual(later.status, 0, 'a later push (before is not zeros) is refused too'); assert.match(later.stderr, /a commit in the pushed range/); assert.equal(remoteSha(d, 'feat/x'), tip);
+  ok(d, 'git reset -q --hard HEAD~2 && echo c > c && git add c && git commit -qm c');
+  const realGit = ok(d, 'command -v git'), bin = join(tmp, `shim${n}`); mkdirSync(bin);
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = log ] && { echo "fatal: shim refused log" >&2; exit 128; }; done\nexec "${realGit}" "$@"\n`); chmodSync(join(bin, 'git'), 0o755);
+  // The dispatcher directly: git puts its exec-path first on a hook's PATH, so a shim never runs under a real `git push`.
+  const broken = spawnSync(process.execPath, [DISPATCHER, 'pre-push', 'origin'], { cwd: d, encoding: 'utf8', env: { ...ENV, PATH: `${bin}:${process.env.PATH}` }, input: `refs/heads/feat/x ${ok(d, 'git rev-parse HEAD')} refs/heads/feat/x ${tip}\n` });
+  assert.notEqual(broken.status, 0); assert.match(broken.stderr, /could not read the diff for the secret scan \(failing closed\): fatal: shim refused log/);
+});
+
 console.log('git hooks tests ok');

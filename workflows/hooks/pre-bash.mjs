@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff, segments } from './lib.mjs';
+import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record, segments } from './lib.mjs';
 import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -79,8 +79,8 @@ try {
   const base = mergeBase ?? cfg.baseSha; // a sha, never a ref name: names can be shadowed by tags and branches. A present policy implies a verified baseSha, so there is no further fallback.
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
-  const secret = base ? secretHits(cfg.root, base) : [];
-  if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
+  const scan = pushSecretScan(cfg.root, base);
+  if (scan) { log(`${scan.result} 0 ${scan.detail}`); deny(scan.reason); process.exit(0); }
   for (const raw of cfg.gate) {
     const command = raw.replaceAll('{base}', base);
     const started = Date.now();
@@ -97,10 +97,4 @@ try {
   writeFileSync(join(dir, head), new Date().toISOString() + '\n');
 } catch (e) {
   deny(`harness hook error (failing closed): ${e.message}`);
-}
-
-function secretHits(root, base) {
-  let diff = '';
-  try { diff = execSync(`git --no-replace-objects -c core.fsmonitor=false diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
-  return secretsInDiff(diff);
 }
