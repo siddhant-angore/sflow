@@ -12,5 +12,6 @@ run('node', ['scripts/test-hooks.mjs']);
 run('node', ['scripts/test-eval-brake.mjs']);
 run('node', ['scripts/test-upstream.mjs']);
 run('node', ['scripts/test-vendor.mjs']);
+run('node', ['scripts/test-git-hooks.mjs']);
 run('node', ['scripts/check-routing.mjs']);
 console.log('\nall checks passed');
