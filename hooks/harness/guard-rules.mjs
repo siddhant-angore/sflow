@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { canon, clip, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, quotesAreData, rawSegments, segments, sortOut, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
+import { canon, clip, GIT_ARG, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, quotesAreData, rawSegments, segments, sortOut, stripRedirs, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
 const headRef = (r) => r === 'HEAD' || r === '@';
 // The protected branch a refspec pushes to (+ stripped, no colon means dst = src, HEAD and @ resolve to the current branch), or null. viaHead: the name came from the checkout, not from the text.
@@ -202,7 +202,26 @@ const noStatText = (seg) => {
 };
 // The line keeps the rule whole when it holds any prefix of the hook-skip flag (git takes abbreviations; SID-259), or a merge or rebase word that can't be classified.
 const isAbbrev = (word, flag) => { const name = word.split('=')[0]; return name.length >= 3 && flag.startsWith(name); };
-const keepsHookRule = (segs) => segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
+// CTO review 5730668319: gitSub compares each global option as written, so `--namespace""`, `-"C"` or `-\C` aren't seen to take a value, while git reads the next word as that value and `merge` can hide a real `git commit -n`.
+// The first word in git's global-option position, in any piece the guard reads, that isn't plain text and resolves to a dash-word; null when there is none. It reads pieces as written, because normalize() drops these words. Any word that names git counts, so a wrapper needs no list. The value of a plain option is not an option.
+const NOT_LITERAL = /["'\\$`]/, DASH_WORD = /^(?:\$?""|\$?''|\$?['"]|\\)*-/;
+const resolvesToDash = (w) => DASH_WORD.test(w) || canon(w).text.replace(/^'/, '').startsWith('-');
+function quotedGitOption(cmd, segs) {
+  for (const t of [cmd, ...(segs.payloads ?? [])]) for (const piece of rawSegments(t)) {
+    const w = toks(stripRedirs(piece));
+    for (let i = 0; i < w.length; i++) {
+      if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;
+      for (let j = i + 1; j < w.length; j++) {
+        if (NOT_LITERAL.test(w[j]) && resolvesToDash(w[j])) return w[j];
+        if (!w[j].startsWith('-')) break;
+        if (GIT_ARG.has(w[j])) j++;
+      }
+    }
+  }
+  return null;
+}
+const NO_QUOTED_GLOBAL = (w) => `the git global option ${clip(w, 80)} is quoted, escaped or an expansion, so the guard can't tell which word git reads as its value or as the subcommand; write git's global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them`;
+export const keepsHookRule = (segs, cmd) => quotedGitOption(cmd, segs) !== null || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
 
 export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
   const p = pushReason(raw, prot, branch);
@@ -982,7 +1001,9 @@ export function segmentReason(cmd, cfg, branch, segs = guardSegments(cmd)) {
   // SID-191 review B1: a payload gets the whole-line checks too (core.hooksPath, hidden config, an unclosed quote)
   for (const p of segs.payloads ?? []) { const why = lineReason(p); if (why) return { why, seg: p }; }
   if (segs.positional !== undefined) return { why: 'a bash -c / sh -c script that uses positional parameters ($1, $@, shift, ...) can run its arguments as a command; write the command into the script', seg: segs.positional };
-  const noStat = !keepsHookRule(segs);
+  const quoted = quotedGitOption(cmd, segs);
+  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };
+  const noStat = !keepsHookRule(segs, cmd);
   for (const seg of segs) {
     const why = reason(seg, cfg, branch, noStat) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
     if (why) return { why, seg };

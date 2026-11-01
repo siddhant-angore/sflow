@@ -130,7 +130,7 @@ const SID247_NEAR = [
   // CTO review 5730668319: the quoted-option rule reads global options only. The first three are the approved allowance, denied on e7d30ea and allowed since 704e88f.
   ['git --namespace merge commit -n -m x', 'deny', 'the unquoted control: git runs commit -n, and gitSub reads the same'],
   ['git -C . merge -n main', 'allow', 'a plain global option in front of the approved shape'], ['git --no-pager rebase -n main', 'allow', 'a plain global option in front of the approved shape'], ['git -c "core.pager=less -R" merge -n main', 'allow', 'a quoted value of a plain -c is not an option'],
-  ['git -C "some dir" status', 'allow', 'a quoted value of a plain -C is not an option'], ['git -C "-odd dir" status', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git log "-1"', 'allow', 'past the subcommand: not a global option'], ['git -c "core.pager=less -R" log "-1"', 'allow', 'past the subcommand: not a global option'], ['git status "-s"', 'allow', 'past the subcommand: not a global option'], ['git "" status', 'allow', 'an empty word does not start with a dash; git refuses it'],
+  ['git -C "some dir" status', 'allow', 'a quoted value of a plain -C is not an option'], ['git -C "-odd dir" status', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git -C "-odd dir" merge -n main', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git log "-1"', 'allow', 'past the subcommand: not a global option'], ['git -c "core.pager=less -R" log "-1"', 'allow', 'past the subcommand: not a global option'], ['git status "-s"', 'allow', 'past the subcommand: not a global option'], ['git "" status', 'allow', 'an empty word does not start with a dash; git refuses it'],
 ];
 // Today's verdict, allowed on e7d30ea and unchanged here: known gaps with their own issues. Do not read these as approved; they are pinned so a fix there is a visible test change.
 const SID247_PINS = [
@@ -183,6 +183,25 @@ const SID247_OPTION_WORDS = {
   merge: [/^(-[evq]*[mXsF]|--(message|file|strategy|strategy-option|into-name|cleanup))$/, /^(-[evq]*([mXsF]\S+|S\S*)?|--(message|file|strategy|strategy-option|into-name|cleanup)=\S*|--(no-)?(stat|summary|log|squash|commit|edit|ff|rerere-autoupdate|progress|allow-unrelated-histories|gpg-sign|autostash|overwrite-ignore|signoff)(=\S*)?|--(ff-only|verify-signatures|verbose|quiet|verify|abort|quit|continue))$/],
   rebase: [/^(-[qvfmi]*[sXC]|--(onto|whitespace|empty|strategy|strategy-option))$/, /^(-[qvfmi]*([sXC]\S+|[Sr]\S*)?|--(onto|whitespace|empty|strategy|strategy-option)=\S*|--(no-)?(keep-base|signoff|rerere-autoupdate|autosquash|update-refs|gpg-sign|autostash|rebase-merges|fork-point|reschedule-failed-exec|reapply-cherry-picks)(=\S*)?|--(verify|quiet|verbose|no-stat|stat|committer-date-is-author-date|reset-author-date|ignore-date|ignore-whitespace|force-rebase|no-ff|ff|continue|skip|abort|quit|edit-todo|show-current-patch|apply|merge|interactive|root))$/],
 };
+// CTO review 5730668319: the shared normalization hid quoted global options from this matcher, so it reads them off the command as written, with no guard or lib code. A quoted word with spaces is read again as a script.
+const SID247_GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
+const SID247_WORD = String.raw`(?:\$?"(?:\\[\s\S]|[^"\\])*"|\$?'[^']*'|\\[\s\S]|[^\s;&|()<>])+`;
+const sid247Bare = (w) => w.replace(/\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])/g, (_, a, b, e) => a ?? b?.replace(/\\([\s\S])/g, '$1') ?? e);
+const sid247PlainGlobals = (c) => {
+  const words = (c.replace(/\\\n/g, '').match(new RegExp(String.raw`\d*[<>]+&?\s*${SID247_WORD}|${SID247_WORD}`, 'g')) ?? []).filter((w) => !/^\d*[<>]/.test(w));
+  for (let i = 0; i < words.length; i++) {
+    const bare = sid247Bare(words[i]);
+    if (bare !== words[i] && /\s/.test(bare) && !sid247PlainGlobals(bare)) return false;
+    if (bare.split('/').pop() !== 'git') continue;
+    for (let j = i + 1; j < words.length; j++) {
+      const w = words[j], b = sid247Bare(w);
+      if (w.startsWith("$'") || (b.startsWith('-') && (w !== b || /[$`]/.test(w)))) return false;
+      if (!b.startsWith('-')) break;
+      if (SID247_GIT_VALUED.has(w)) j++;
+    }
+  }
+  return true;
+};
 const sid247OptionsOut = (s) => {
   const [, sub, ...args] = s.split(/\s+/), [valued, plain] = SID247_OPTION_WORDS[sub], out = [];
   let value = false, literal = false;
@@ -198,6 +217,7 @@ const sid247OptionsOut = (s) => {
   return ['git', sub, ...out].join(' ');
 };
 const sid247Approved = (c) => {
+  if (!sid247PlainGlobals(c)) return false;
   const segs =[...sid247Rules.guardSegments(c)], text = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""'), named = /^git\s+(merge|rebase)\s/;
   const prefixOf = (w, flag) => w.length >= 3 && flag.startsWith(w.split('=')[0]);
   if (segs.some((s) => s.split(/\s+/).some((w) => prefixOf(w, '--no-verify')))) return false;
@@ -221,7 +241,7 @@ const sid247Approved = (c) => {
   // The matcher takes the approved shape and nothing else.
   for (const c of ['git merge -n main', 'git rebase -n main', 'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge "-n" main', "bash -c 'git rebase -n main'", 'git merge -n main && git status', 'git merge -m msg -n feat', 'git merge -X ours -n main', 'git rebase --onto main -n feat']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
   for (const c of ['git commit -n -m x', 'git commit -nm x', 'git merge -nv main', 'git merge -vn', 'git rebase -in', 'git merge -n --no-verify main', 'git merge -n --no-verif main', 'git rebase -n --no-veri main', 'git am -n x.patch', 'git am --no-verify', 'git merge-file -n a b c', 'git merge-base -n 1 a b', 'git rebase -n -x make main', 'git rebase -n --exec=make main', 'git merge -n main && git commit -n -m x', 'git merge -n "$B"', 'git merge -Xours main', 'git status', 'git merge -- -n', 'git merge -- "-n"', 'git merge -m "-n" feat', "git merge -m '-n' feat", 'git merge -X -n main', 'git merge -X "-n" main', 'git merge -n -x main', 'git merge "-n" -x main', 'git merge -n main; git merge -x feat', 'git merge -n --unknown main', 'git merge --strat -n main', 'git rebase --onto -n feat', 'git merge -s -n', 'git merge -F -n', 'git merge -n -- -n', 'git merge -n main && git commit --no-verif -m x', ...SID247_QUOTED_ATTACKS, ...SID247_GEN_QUOTED]) if (sid247Approved(c)) wrong.push(`matcher must reject: ${c}`);
-  for (const c of ['git -C . merge -n main', 'git --no-pager rebase -n main', 'git -c "core.pager=less -R" merge -n main', 'git -C "some dir" merge -n main']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
+  for (const c of ['git -C . merge -n main', 'git --no-pager rebase -n main', 'git -c "core.pager=less -R" merge -n main', 'git -C "some dir" merge -n main', 'git -C "-odd dir" merge -n main']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
   // Each layer on its own: a quoted global option keeps the hook-skip rule whole even without the deny, and the deny says how to rewrite. Without a quoted option the rule stays loose.
   for (const c of SID247_QUOTED_ATTACKS) if (sid247Rules.keepsHookRule?.(sid247Rules.guardSegments(c), c) !== true) wrong.push(`a quoted global option must keep the hook-skip rule: ${c}`);
   for (const c of ['git merge -n main', 'git -C . merge -n main', 'git -c "core.pager=less -R" merge -n main']) if (sid247Rules.keepsHookRule?.(sid247Rules.guardSegments(c), c) !== false) wrong.push(`must not keep the hook-skip rule: ${c}`);

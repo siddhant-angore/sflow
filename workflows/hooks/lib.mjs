@@ -263,7 +263,7 @@ function unwrap(name, rest) {
   }
   return name === 'timeout' ? take(rest)[1] : rest;
 }
-export { WRAPPERS, take, unwrap };
+export { GIT_ARG, WRAPPERS, stripRedirs, take, unwrap };
 
 // Drop git's global options (everything starting with - before the subcommand, plus the argument of those that take one).
 function gitSub(rest) {
