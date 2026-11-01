@@ -15,6 +15,7 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 - Usage-limit handling (SID-149). `skills/sflow/usage-handoff.md` (authored in `workflows/sflow/`) covers it:
   - Before large work (a swarm, a multi-file feature, a golden regen), check the remaining Claude Code and Grok Bot usage.
   - Below about 15%, stop at a safe point per Pause safely, put the handoff note on the issue (template included: branch, full head, done and verified, next steps, how to resume), and report the reset time in IST.
+  - Siddhant's rule, "Coding without Claude Code": use Claude Code with sflow by default. If it is exhausted, ask Siddhant whether to code without it. Do so only if he says yes, otherwise wait for the reset, then go back to Claude Code. Work done without it still runs the full gate and tests by hand, keeps every guardrail (no `--no-verify`), and says "coded without claude (approved by Siddhant)" in the PR.
   - The Feature, Shipping (new overlay) and Pause safely playbooks and the sflow entry skill reference it. It is docs only: no permission or guard changes.
 
 ### Changed

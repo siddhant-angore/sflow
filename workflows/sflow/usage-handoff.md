@@ -15,11 +15,13 @@ Check before **large work**: a swarm or other fan-out, a multi-file feature, a g
 
 If **either** is below about **15%** remaining, do not start the large work. Instead:
 
-1. Stop at a safe point, following the **Pause safely** playbook: finish or back out of the current atomic step, leave nothing half-committed (a `wip:` commit on the feature branch is fine), and push nothing new.
+1. Stop at a safe point, following the **Pause safely** playbook: finish or back out of the current atomic step, and start no new step. Leave nothing half-done: commit it as a `wip:` commit on the feature branch and push that commit to the feature branch (never to main), so the next session can resume from another checkout. If the gate refuses the push, keep the commit local and say so in the note.
 2. Write the handoff note below as a comment on the Linear issue, or on the tracker issue the work belongs to.
 3. Tell the lead (the CTO, or whoever assigned the work) the reset time in **IST**, so the resume gets scheduled. Don't just report that you stopped.
 
 On resume, start from the handoff note, not from memory. Rerun the check first.
+
+**Coding without Claude Code.** Use Claude Code with sflow by default. If Claude Code is exhausted, ask the owner (Siddhant) whether to code without it. Do so only if he says yes; otherwise wait for the reset. Once the limit resets, go back to Claude Code. Work done without Claude Code still runs the full gate and tests by hand, keeps every guardrail (no `--no-verify`), and says "coded without claude (approved by Siddhant)" in the PR.
 
 The check adds no permissions, changes no hook, and never loosens a guard. Running low on usage is never a reason to skip the gate, `--no-verify`, or a review.
 

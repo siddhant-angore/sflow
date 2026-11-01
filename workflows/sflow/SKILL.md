@@ -38,6 +38,7 @@ The guard is always on, in every git repository: with no policy committed, `main
 ## Usage limits
 
 Before large work (a swarm, a multi-file feature, a golden regen), check the remaining Claude Code and Grok Bot usage. Below about 15%, stop at a safe point, put the handoff note on the issue, and report the reset time in IST. The check, threshold and template are in `usage-handoff.md` beside this file.
+If Claude Code is exhausted, code without it only when Siddhant says yes, otherwise wait for the reset (see "Coding without Claude Code" in `usage-handoff.md`).
 
 ## Where a failure lives
 
