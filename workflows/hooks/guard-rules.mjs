@@ -157,10 +157,57 @@ const replaceReason = (a) => {
 const NO_OPT_GLOB = 'an unquoted glob in a git <sub> argument can expand to a file named like an option (--exec=, --upload-pack=); quote it or spell the names out';
 const optGlob = (raw) => { const w = []; for (let [t, r] = take(raw); t !== null; [t, r] = take(r)) w.push(t); return w.slice(2).some((t) => /^[*?]/.test(t) || /[-!^]/.test(/^\[(\]?[^\]]*)\]/.exec(t)?.[1] ?? '')) ? NO_OPT_GLOB : null; };
 
-export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch) {
+// SID-247, a loosening approved by Siddhant via the CTO (Nov 1 2026, 6:10 PM IST): to git merge and git rebase, a bare -n is --no-stat and a glued -X value is not flags, so the hook-skip rule doesn't read them.
+// The options each command lists in git 2.47: anything else is unknown, including abbreviations, and --exec and -x on purpose (SID-260). In `short`, group 1 is a letter whose value is glued or is the next word, and S and r take only a glued one.
+const NO_STAT_OPTIONS = {
+  __proto__: null,
+  merge: {
+    short: /^-[evq]*(?:([mXsF])|[mXsF].+|S.*)?$/,
+    flags: new Set('--stat --no-stat --summary --no-summary --log --no-log --squash --no-squash --commit --no-commit --edit --no-edit --ff --no-ff --ff-only --rerere-autoupdate --no-rerere-autoupdate --verify-signatures --verbose --quiet --progress --no-progress --allow-unrelated-histories --no-allow-unrelated-histories --gpg-sign --no-gpg-sign --autostash --no-autostash --overwrite-ignore --no-overwrite-ignore --signoff --no-signoff --verify --abort --quit --continue'.split(' ')),
+    values: new Set('--message --file --strategy --strategy-option --into-name --cleanup'.split(' ')),
+  },
+  rebase: {
+    short: /^-[qvfmi]*(?:([sXC])|[sXC].+|[Sr].*)?$/,
+    flags: new Set('--keep-base --no-keep-base --verify --quiet --verbose --no-stat --stat --signoff --no-signoff --committer-date-is-author-date --reset-author-date --ignore-date --ignore-whitespace --force-rebase --no-ff --ff --continue --skip --abort --quit --edit-todo --show-current-patch --apply --merge --interactive --rerere-autoupdate --no-rerere-autoupdate --autosquash --no-autosquash --update-refs --no-update-refs --gpg-sign --no-gpg-sign --autostash --no-autostash --rebase-merges --no-rebase-merges --fork-point --no-fork-point --root --reschedule-failed-exec --no-reschedule-failed-exec --reapply-cherry-picks --no-reapply-cherry-picks'.split(' ')),
+    values: new Set('--onto --whitespace --empty --strategy --strategy-option'.split(' ')),
+  },
+};
+// Whether a word in option position is a known flag (false) or takes the next word as its value (true); null when git may read it some other way.
+const takesNextWord = (word, { short, flags, values }) => {
+  if (word.startsWith('--')) {
+    const name = word.split('=')[0];
+    if (!flags.has(name) && !values.has(name)) return null;
+    return word === name && values.has(name);
+  }
+  const m = short.exec(word);
+  return m ? Boolean(m[1]) : null;
+};
+// A segment with its bare -n and glued -X words taken out, where git reads them as options: before any --, and not as a value. Null when a word can't be classified.
+// A word that still holds a quote or escape is read up to it and takes no next word (-m"a b", or -"n", whose resolved form guardSegments also hands over).
+const noStatText = (seg) => {
+  const m = /^git\s+(\S+)\s+(.*)$/s.exec(seg), options = NO_STAT_OPTIONS[m?.[1]];
+  if (!options) return seg;
+  const words = m[2].split(/\s+/), kept = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w === '--') { kept.push(...words.slice(i)); break; }
+    if (w === '-n' || /^-X\S/.test(w)) continue;
+    kept.push(w);
+    if (!w.startsWith('-')) continue;
+    const head = w.split(/["'\\]/)[0], next = takesNextWord(head, options);
+    if (next === null) return null;
+    if (next && head === w && i + 1 < words.length) kept.push(words[++i]);
+  }
+  return `git ${m[1]} ${kept.join(' ')}`;
+};
+// The line keeps the rule whole when it holds any prefix of the hook-skip flag (git takes abbreviations; SID-259), or a merge or rebase word that can't be classified.
+const isAbbrev = (word, flag) => { const name = word.split('=')[0]; return name.length >= 3 && flag.startsWith(name); };
+const keepsHookRule = (segs) => segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
+
+export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
   const p = pushReason(raw, prot, branch);
   if (p) return p;
-  const seg = unquoted(raw);
+  const plain = unquoted(raw), seg = (noStat && noStatText(plain)) || plain;
   const rules = [
     [/^git\s+reset\b.*\s(--hard|--merge)\b/, 'git reset --hard/--merge destroys uncommitted work; commit to a WIP branch or use a fresh worktree; restore named files with git restore <path>'],
     [/^git\s+(checkout|restore|switch)\b.*(\s\.(\s|$)|--discard-changes|\s-f(\s|$)|\s--force(\s|$)|\s--worktree\s+\.)/, 'discarding the working tree is irreversible; restore named files'],
@@ -935,8 +982,9 @@ export function segmentReason(cmd, cfg, branch, segs = guardSegments(cmd)) {
   // SID-191 review B1: a payload gets the whole-line checks too (core.hooksPath, hidden config, an unclosed quote)
   for (const p of segs.payloads ?? []) { const why = lineReason(p); if (why) return { why, seg: p }; }
   if (segs.positional !== undefined) return { why: 'a bash -c / sh -c script that uses positional parameters ($1, $@, shift, ...) can run its arguments as a command; write the command into the script', seg: segs.positional };
+  const noStat = !keepsHookRule(segs);
   for (const seg of segs) {
-    const why = reason(seg, cfg, branch) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
+    const why = reason(seg, cfg, branch, noStat) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
     if (why) return { why, seg };
   }
   // SID-191 re-review: literal-only command words and arguments (on the line and each shell payload, not on split artifacts); reread builtins near a guarded word
