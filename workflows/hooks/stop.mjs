@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, git, gitDir, readEvent, record } from './lib.mjs';
+import { config, GATE_RECORD_DIR, git, gitDir, readEvent, record } from './lib.mjs';
 
 const MAX_ROUNDS = 3;
 const ev = readEvent();
@@ -21,7 +21,7 @@ try {
   if (ahead === 0) process.exit(0);
   const unmet = [];
   if (dirty) unmet.push('tracked changes are uncommitted; commit them in small, ordered units or say why they stay uncommitted');
-  if (cfg.gate.length && !existsSync(join(gitDir(cfg.root), 'harness-gate', head))) unmet.push('the gate in .harness.json has not passed for HEAD; push to run it');
+  if (cfg.gate.length && !existsSync(join(gitDir(cfg.root), GATE_RECORD_DIR, head))) unmet.push('the gate in .harness.json has not passed for HEAD; push to run it');
   unmet.push(...cfg.dod);
   if (!unmet.length) process.exit(0);
 

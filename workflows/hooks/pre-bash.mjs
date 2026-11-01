@@ -4,8 +4,8 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff, segments } from './lib.mjs';
-import { analyzeWrites, envReason, reason, retargets } from './guard-rules.mjs';
+import { canon, config, currentBranch, deny, GATE_RECORD_DIR, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record } from './lib.mjs';
+import { analyzeWrites, guardSegments, lineReason, retargets, segmentReason } from './guard-rules.mjs';
 
 const ev = readEvent();
 if (ev.tool_name !== 'Bash') process.exit(0);
@@ -16,8 +16,11 @@ try {
   // (nothing that was denied becomes allowed), now with the reason and who fixes it instead of a bare exception.
   if (cfg.broken) { deny(`harness hook error (failing closed): ${policyNote(cfg)}. Every shell command is blocked until then; ask a human to fix .harness.json on origin/${cfg.broken.base} (PR, merge) and run git fetch origin in this checkout.`); process.exit(0); }
   // Branch unknown (null) when there is no root, or the command retargets git at another repo or dir: the hook cwd's branch is not the one pushed, so a push must name its branch.
-  const branch = cfg.root && !retargets(cmd) ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
-  const env = envReason(cmd);
+  // SID-191: every rule also runs on the command with its shell quoting resolved (`g""h pr "merge"` -> `gh pr merge`, `ma\in` -> main), so
+  // quotes and backslashes can't split a guarded word. A quote, $( ) or backtick that never closes can't be read: fail closed.
+  const C = canon(cmd);
+  const branch = cfg.root && !retargets(cmd) && !retargets(C.text) ? currentBranch(cfg.root) : null; // no root: git can't read the repo (or there is none), so the guard still runs with strict defaults
+  const env = lineReason(cmd); // includes the unclosed-quote check (NO_OPEN)
   if (env) { deny(`harness guard: ${env}\n  ${policyNote(cfg)}`); process.exit(0); }
   // SID-66: no shell write to a policy file. Runs on the whole command (segments() splits inside quotes), whether or not a policy is committed.
   const w = analyzeWrites(cmd);
@@ -58,11 +61,9 @@ try {
       if (n) { const joined = join(dest, n); deny(`harness guard: ${policyDeny(joined)}\n  ("${dest}" is an existing directory, so this writes ${joined})\n  in: ${line}\n  ${policyNote(cfg)}`); process.exit(0); }
     }
   }
-  const segs = segments(cmd);
-  for (const seg of segs) {
-    const why = reason(seg, cfg, branch);
-    if (why) { deny(`harness guard: ${why}\n  in: ${seg}\n  ${policyNote(cfg)}`); process.exit(0); }
-  }
+  const segs = guardSegments(cmd);
+  const hit = segmentReason(cmd, cfg, branch, segs);
+  if (hit) { deny(`harness guard: ${hit.why}\n  in: ${hit.seg}\n  ${policyNote(cfg)}`); process.exit(0); }
   if (!cfg.root) process.exit(0); // nothing to gate without a repository
 
   const pushes = segs.some((s) => /^git\s+push\b|^gh\s+pr\s+(create|ready)\b/.test(s));
@@ -72,15 +73,15 @@ try {
   if (git(cfg.root, 'status', '--porcelain', '--untracked-files=no')) { deny('harness gate: tracked changes are uncommitted; commit them first so the gate checks what you push'); process.exit(0); }
   if (cfg.gate.some((c) => c.includes(PLACEHOLDER))) { deny(`harness gate: .harness.json still has the placeholder gate; set the project checks on ${cfg.source}`); process.exit(0); }
   const head = git(cfg.root, 'rev-parse', 'HEAD');
-  const dir = join(gitDir(cfg.root), 'harness-gate');
+  const dir = join(gitDir(cfg.root), GATE_RECORD_DIR);
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
-  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
+  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, '-c', 'core.commitGraph=false', 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
   const base = mergeBase ?? cfg.baseSha; // a sha, never a ref name: names can be shadowed by tags and branches. A present policy implies a verified baseSha, so there is no further fallback.
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
-  const secret = base ? secretHits(cfg.root, base) : [];
-  if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
+  const scan = pushSecretScan(cfg.root, base);
+  if (scan) { log(`${scan.result} 0 ${scan.detail}`); deny(scan.reason); process.exit(0); }
   for (const raw of cfg.gate) {
     const command = raw.replaceAll('{base}', base);
     const started = Date.now();
@@ -97,10 +98,4 @@ try {
   writeFileSync(join(dir, head), new Date().toISOString() + '\n');
 } catch (e) {
   deny(`harness hook error (failing closed): ${e.message}`);
-}
-
-function secretHits(root, base) {
-  let diff = '';
-  try { diff = execSync(`git --no-replace-objects -c core.fsmonitor=false diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
-  return secretsInDiff(diff);
 }

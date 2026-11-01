@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,8 +12,12 @@ export function readEvent() {
 }
 
 // Replace refs (refs/replace/) can swap any object git reads, including the commit and file the policy comes from, so they are off for every call.
+// Grafts (.git/info/grafts) rewrite parents the same way, and git 2.47 still honours them under --no-replace-objects, so only GIT_GRAFT_FILE turns them off.
+// A shallow boundary cuts parents the same way, and a shallow fetch makes one out of any local commit, so GIT_SHALLOW_FILE turns that off too: a read that needs a parent the clone really lacks fails.
 // core.fsmonitor=false: a configured fsmonitor hook script would otherwise run inside the hook on `git status`/`diff`.
-export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
+export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_SHALLOW_FILE: '/dev/null' };
+// <git dir>/<this>/<head> records that the gate passed for head. Versioned: a change that makes the gate stricter gets a new name, so a head that passed the weaker gate is checked again.
+export const GATE_RECORD_DIR = 'harness-gate-v2';
 export function git(root, ...args) {
   return execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
 }
@@ -603,8 +607,36 @@ export function segments(cmd) {
   return [...new Set([...qa, ...blind])];
 }
 
-export function deny(reason, hookEventName = 'PreToolUse') {
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: reason } }) + '\n');
+// SID-191 review item 8 and re-review B6: a deny must reach Claude Code whole, or not pretend to. An async stdout write of more than a pipe buffer
+// (64 KiB) was cut off by the process.exit(0) after it (invalid JSON, exit 0 = no decision). So the TOTAL reason is capped (each line, and all
+// lines together: DENY_TOTAL_MAX), which keeps the whole JSON far inside one pipe buffer, and the write is synchronous, retrying a full
+// non-blocking pipe. If the write still fails (EAGAIN gone on too long, EPIPE, anything), deny() does NOT write a second deny on top of a
+// partial one: it exits 2 with a short reason on stderr, which Claude Code treats as a block.
+export const DENY_LINE_MAX = 1500;
+export const DENY_TOTAL_MAX = 4000;
+export const clip = (t, max = DENY_LINE_MAX) => (t.length > max ? `${t.slice(0, max)}… [${t.length - max} more chars]` : t);
+export const clipReason = (reason) => String(reason).split('\n').map((l) => clip(l)).join('\n');
+// Keeps the start (what was denied) and the end (a gate failure's last lines are the error, the policy note is the last line) when the total is over max.
+export const clipMid = (t, max) => { if (t.length <= max) return t; const head = max >> 2, tail = max - head; return `${t.slice(0, head)}\n… [${t.length - max} chars cut] …\n${t.slice(-tail)}`; };
+const sleep1ms = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+// write is injectable so tests can make it throw EAGAIN a few times.
+export function emit(text, fd = 1, write = writeSync, wait = sleep1ms) {
+  const buf = Buffer.from(text);
+  for (let off = 0, tries = 0; off < buf.length;) {
+    try { off += write(fd, buf, off); tries = 0; } catch (e) { if (e.code !== 'EAGAIN' || ++tries > 10000) throw e; wait(); }
+  }
+}
+export const BLOCKED = 'harness guard: blocked (the deny message could not be written to stdout); run `git status` and ask the user';
+export function deny(reason, hookEventName = 'PreToolUse', write = emit) {
+  // the total is cut at DENY_TOTAL_MAX chars; control characters and non-ASCII grow when escaped, so shrink further until the whole JSON is small
+  const build = (max) => JSON.stringify({ hookSpecificOutput: { hookEventName, permissionDecision: 'deny', permissionDecisionReason: clipMid(clipReason(reason), max) } }) + '\n';
+  let json = build(DENY_TOTAL_MAX);
+  for (let max = DENY_TOTAL_MAX; Buffer.byteLength(json) > 3 * DENY_TOTAL_MAX && max > 100; max >>= 1) json = build(max);
+  try { write(json); } catch (e) {
+    // a partial JSON may already be on stdout: never add a second one. Exit 2 blocks, with the reason on stderr.
+    try { writeSync(2, `${BLOCKED} (${e.code ?? e.message})\n`); } catch {}
+    process.exit(2);
+  }
 }
 
 export function record(root, entry) {
@@ -613,6 +645,137 @@ export function record(root, entry) {
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, 'runs.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
   } catch {}
+}
+
+
+// SID-191: the command with each word's shell quoting resolved, the way the shell joins it: `g""h` -> gh, `"--for"ce` -> --force, `ma\in` -> main,
+// `$'\x67it'` -> git. A word that still holds a special character after unquoting is re-quoted in single quotes (so `-m "a b"` stays one word, and
+// quoted text stays data). A word with an expansion the shell would perform ($, a backtick, outside single quotes) is left exactly as written, so
+// the literal-argument rules still see it. Operators, comments and heredoc bodies are copied as they are. open: a quote is never closed.
+const SAFE_WORD = /^[\w@%+=:,./~^-]+$/;
+const ansi = (s) => s.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|[\s\S])/g, (_, e) => {
+  if (/^x/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^u/.test(e)) return String.fromCharCode(parseInt(e.slice(1), 16));
+  if (/^[0-7]/.test(e)) return String.fromCharCode(parseInt(e, 8) & 255);
+  return { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v' }[e] ?? e;
+});
+// End of the heredoc delimiter word that starts at j.
+const hereEnd = (s, j) => { let k = j; for (; k < s.length && !/[\s;&|()<>]/.test(s[k]); k++) { if (s[k] === '\\') k++; else if (s[k] === "'" || s[k] === '"') k = quoteEnd(s, k) - 1; } return k; };
+// Skip the heredoc bodies pending after the newline at i (index of the newline); returns the index after the last body line.
+const skipBodies = (s, i, pending) => {
+  let pos = i + 1;
+  for (const p of pending.splice(0)) for (;;) {
+    if (pos >= s.length) return s.length + 1; // never closed
+    const e = s.indexOf('\n', pos), end = e < 0 ? s.length : e, line = s.slice(pos, end);
+    pos = e < 0 ? s.length : e + 1;
+    if ((p.strip ? line.replace(/^\t+/, '') : line) === p.delim) break;
+  }
+  return pos;
+};
+// Index after the `)` that closes the $( opening at s[i] (quotes, nested $( ), backticks and heredocs inside are skipped); s.length + 1 if it never closes.
+function substEnd(s, i) {
+  let d = 1; const pending = [];
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === "'") { j = quoteEnd(s, j) - 1; }
+    else if (c === '"') { j = dqEnd(s, j) - 1; }
+    else if (c === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+    else if (c === '$' && s[j + 1] === '(') { j = substEnd(s, j + 1) - 1; }
+    else if (c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const strip = s[j + 2] === '-'; let k = j + 2 + strip; while (/[ \t]/.test(s[k] ?? '')) k++; const w = hereWord(s, k); if (w) pending.push({ delim: w[0], strip }); j = Math.max(k, hereEnd(s, k)) - 1; }
+    else if (c === '\n' && pending.length) { j = skipBodies(s, j, pending) - 1; }
+    else if (c === '(') d++;
+    else if (c === ')' && --d === 0) return j + 1;
+    if (j >= s.length) break;
+  }
+  return s.length + 1;
+}
+// Index after the `"` closing the double-quoted string opening at s[i] ($( ) and backticks inside are skipped whole); s.length + 1 if it never closes.
+function dqEnd(s, i) {
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') j++;
+    else if (s[j] === '"') return j + 1;
+    else if (s[j] === '$' && s[j + 1] === '(') j = substEnd(s, j + 1) - 1;
+    else if (s[j] === '`') { let k = j + 1; for (; k < s.length && s[k] !== '`'; k++) if (s[k] === '\\') k++; j = k; }
+  }
+  return s.length + 1;
+}
+export function canon(cmd) {
+  let out = '', open = false, i = 0;
+  const n = cmd.length, pending = [];
+  const isOp = (c) => /[\s;&|()<>]/.test(c);
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\' && cmd[i + 1] === '\n') { i += 2; continue; } // line continuation
+    if (c === '\n' && pending.length) { const e = skipBodies(cmd, i, pending); out += cmd.slice(i, Math.min(e, n)); i = Math.min(e, n); continue; } // heredoc bodies, raw
+    if (c === '#' && (out === '' || /[\s;&|()]$/.test(out))) { const e = cmd.indexOf('\n', i), end = e < 0 ? n : e; out += cmd.slice(i, end); i = end; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+      const strip = cmd[i + 2] === '-'; let j = i + 2 + strip;
+      while (/[ \t]/.test(cmd[j] ?? '')) j++;
+      const w = hereWord(cmd, j), e = hereEnd(cmd, j);
+      if (w) pending.push({ delim: w[0], strip });
+      out += cmd.slice(i, e); i = Math.max(e, i + 2); continue;
+    }
+    if (isOp(c)) { out += c; i++; continue; }
+    const start = i; let val = '', quoted = false, expands = false, joined = false; // one word
+    while (i < n && !isOp(cmd[i])) {
+      const ch = cmd[i];
+      if (ch === '\\') { if (cmd[i + 1] === '\n') { joined = true; i += 2; continue; } quoted = true; val += cmd[i + 1] ?? ''; i += 2; }
+      else if (ch === "'") { const e = cmd.indexOf("'", i + 1); quoted = true; if (e < 0) { open = true; i = n; } else { val += cmd.slice(i + 1, e); i = e + 1; } }
+      else if (ch === '$' && cmd[i + 1] === "'") { const e = quoteEnd(cmd, i); quoted = true; if (e > n) { open = true; i = n; } else { val += ansi(cmd.slice(i + 2, e - 1)); i = e; } }
+      else if (ch === '"' || (ch === '$' && cmd[i + 1] === '"')) {
+        if (ch === '$') i++;
+        const e = dqEnd(cmd, i); quoted = true;
+        if (e > n) { open = true; i = n; break; }
+        const body = cmd.slice(i + 1, e - 1);
+        if (/[$`]/.test(body.replace(/\\[\s\S]/g, ''))) expands = true;
+        val += body.replace(/\\([$`"\\\n])/g, (_, x) => (x === '\n' ? '' : x)); i = e;
+      }
+      else if (ch === '$' && cmd[i + 1] === '(') { expands = true; const e = substEnd(cmd, i + 1); if (e > n) { open = true; i = n; break; } val += cmd.slice(i, e); i = e; }
+      else if (ch === '`') { expands = true; let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; if (k >= n) { open = true; i = n; break; } val += cmd.slice(i, k + 1); i = k + 1; }
+      else { if (ch === '$') expands = true; val += ch; i++; }
+    }
+    // SID-191 review B2: a line continuation inside a word joins it (`c\<newline>ore.hooksPath` is core.hooksPath), so the word is rewritten too.
+    const raw = joined ? cmd.slice(start, i).replace(/\\\n/g, '') : cmd.slice(start, i);
+    out += !quoted || expands ? raw : val !== '' && SAFE_WORD.test(val) ? val : `'${val.replace(/'/g, `'\\''`)}'`;
+  }
+  if (pending.length) open = open; // an unterminated heredoc still runs (bash warns), so it does not count as open
+  return { text: out, open };
+}
+
+// SID-191: the simple commands of a line with their command substitutions left whole (segments() cuts `git checkout "$(x)"` down to
+// `git checkout "$`), so expansionReason can see that an argument is an expansion. Commands inside $( ), backticks and sh -c payloads
+// are added as their own entries. Normalized like segments().
+export function outerCommands(cmd, depth = 0) {
+  const out = [], n = cmd.length, pending = [];
+  let cur = '', i = 0;
+  const flush = () => { const s = normalize(cur); if (s) { out.push(s); if (depth < 8) for (const p of payload(s)) out.push(...outerCommands(p, depth + 1)); } cur = ''; };
+  while (i < n) {
+    const c = cmd[i];
+    if (c === '\\') { cur += cmd.slice(i, i + 2); i += 2; continue; }
+    if (c === "'") { const e = cmd.indexOf("'", i + 1), end = e < 0 ? n : e + 1; cur += cmd.slice(i, end); i = end; continue; }
+    if (c === '$' && cmd[i + 1] === "'") { const e = Math.min(quoteEnd(cmd, i), n); cur += cmd.slice(i, e); i = e; continue; }
+    if (c === '"') { const e = Math.min(dqEnd(cmd, i), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) for (const m of innerSubs(body)) out.push(...outerCommands(m, depth + 1)); continue; }
+    if (c === '$' && cmd[i + 1] === '(') { const e = Math.min(substEnd(cmd, i + 1), n); const body = cmd.slice(i, e); cur += body; i = e; if (depth < 8) out.push(...outerCommands(body.slice(2, -1), depth + 1)); continue; }
+    if (c === '`') { let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; const body = cmd.slice(i, k + 1); cur += body; i = k + 1; if (depth < 8) out.push(...outerCommands(body.slice(1, -1), depth + 1)); continue; }
+    if (c === '#' && (cur === '' || /\s$/.test(cur))) { const e = cmd.indexOf('\n', i); i = e < 0 ? n : e; continue; }
+    if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') { const strip = cmd[i + 2] === '-'; let k = i + 2 + strip; while (/[ \t]/.test(cmd[k] ?? '')) k++; const w = hereWord(cmd, k); if (w) pending.push({ delim: w[0], strip }); const e = hereEnd(cmd, k); cur += cmd.slice(i, e); i = Math.max(e, i + 2); continue; }
+    if (c === '\n' && pending.length) { flush(); i = Math.min(skipBodies(cmd, i, pending), n); continue; }
+    if (c === '\n' || c === ';' || c === '|' || c === '(' || c === ')' || c === '{' && /(^|\s)$/.test(cur) || (c === '&' && cmd[i + 1] !== '>' && cmd[i - 1] !== '>')) { flush(); i++; continue; }
+    cur += c; i++;
+  }
+  flush();
+  return out;
+}
+// The $( ) and backtick bodies inside a double-quoted string.
+function innerSubs(dq) {
+  const out = [];
+  for (let j = 1; j < dq.length - 1; j++) {
+    if (dq[j] === '\\') j++;
+    else if (dq[j] === '$' && dq[j + 1] === '(') { const e = substEnd(dq, j + 1); out.push(dq.slice(j + 2, e - 1)); j = e - 1; }
+    else if (dq[j] === '`') { let k = j + 1; for (; k < dq.length && dq[k] !== '`'; k++) if (dq[k] === '\\') k++; out.push(dq.slice(j + 1, k)); j = k; }
+  }
+  return out;
 }
 
 // Secret patterns for the push gate (pre-bash.mjs) and the git pre-commit hook (git-hook.mjs, SID-147): one list, so the two cannot drift.
@@ -625,8 +788,68 @@ export const SECRET_PATTERNS = [
   ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
   ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
 ];
-// Names of the patterns that match a line added in a unified diff.
-export function secretsInDiff(diff) {
-  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
-  return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
+// Names of the patterns that match a line added in a unified or combined (--cc) diff. `+++` is a file header only between `diff ` and the first `@@`: inside a hunk it is
+// an added line starting with `++`, or an octopus merge's three-column prefix. A combined hunk opens with one `@` per parent plus one, and only a line with `+` in every
+// column is new in the merge. Any other line came from a parent, so that parent's own commit, or origin, already accounts for it.
+const addedLines = (diff) => {
+  let inHunk = false, prefix = '+';
+  return diff.split('\n').filter((l) => {
+    if (l.startsWith('diff ')) { inHunk = false; prefix = '+'; return false; }
+    if (l.startsWith('@@')) { inHunk = true; prefix = '+'.repeat(/^@+/.exec(l)[0].length - 1); return false; }
+    return l.startsWith(prefix) && (inHunk || !l.startsWith('+++'));
+  });
+};
+const secretNames = (lines) => { const added = lines.join('\n'); return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n); };
+export const secretsInDiff = (diff) => secretNames(addedLines(diff));
+
+// The flags stop repo config hiding added lines: color puts escape codes before the `+`, an external diff or textconv driver can print anything, and -diff, binary, a binary diff driver or a NUL byte print
+// `Binary files differ` unless --text. Shared with the pre-commit scan, so the two cannot drift.
+// core.bigFileThreshold=1g is defence in depth no test can tell from --text on git 2.47: only the binary sniff reads the threshold and --text skips the sniff, --cc and diff-tree -c never read it, and a file a textconv read takes for binary is read raw by the --text read.
+// core.commitGraph=false: git trusts a graph file's parent column, so a hand-edited graph can cut commits out of the walk. GIT_SHALLOW_FILE=/dev/null also turns the graph off today, because git counts a repo with any shallow file as shallow; this does not lean on that.
+const SCAN_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.bigFileThreshold=1g', '-c', 'core.commitGraph=false'];
+const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '--text'];
+const SCAN_EXCLUDES = [':(exclude)*.lock', ':(exclude)*.snap'];
+const SCAN_PATHS = ['--', '.', ...SCAN_EXCLUDES];
+export const scanRead = (root, args, { maxBuffer = 256 << 20, flags = SCAN_FLAGS, paths = SCAN_PATHS } = {}) => execFileSync('git', [...SCAN_GLOBALS, ...args, ...flags, ...paths], { cwd: root, env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer }).toString();
+// A second read of the net diff, because 0.5.0 denied a token only a repo's textconv driver or external diff prints and --no-textconv alone would stop that. Each is that scan's 0.5.0 read plus --no-color, which can only show more,
+// so it runs no program 0.5.0 did not run: history is never read this way, and only the push read ever ran an external diff.
+export const STAGED_DRIVER_FLAGS = ['--no-color', '--no-ext-diff'];
+const PUSH_DRIVER_FLAGS = ['--no-color'];
+
+// SID-213: the push gate's scan of base..HEAD. Returns null when clean, else { result, detail, reason }: result 'secret' or 'error' for runs.jsonl, reason for the deny.
+// Any failure to read the range is an error, never "no secrets". The net diff sees what the final tree adds; the per-commit log sees what history carries to the remote even when a later commit removes it.
+// log only: --full-history because a pathspec otherwise skips a side branch whose merge matches the other parent; --root because log.showroot=false hides a root commit's diff; --cc for what a merge itself adds;
+// --no-show-signature because log.showSignature runs gpg.program.
+// --cc cannot be the whole read of a merge. It ignores --text, so it prints `Binary files differ` for a -diff or binary file; it cuts a line at a NUL byte, which the binary sniff misses past byte 8000; and from 64 parents it prints no line as new.
+// So every merge is also read against every parent: as in --cc, only a line added against all of them is new in the merge. Limited to the paths it changes against all of them, since a whole diff against a parent can carry that parent's history into the buffer.
+const MAX_MERGE_PARENTS = 63;
+const addedByMerges = (read, merges) => merges.flatMap(([merge, ...parents]) => {
+  const changed = read(['diff-tree', '-c', '--name-only', '-z', '--no-commit-id', merge], { flags: [], paths: [] }).split('\0').filter(Boolean);
+  if (!changed.length) return [];
+  // A name that is not UTF-8 decodes to U+FFFD and could not be passed back to git, so such a merge is read whole.
+  const paths = changed.some((p) => p.includes('\ufffd')) ? SCAN_PATHS : ['--', ...changed.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES];
+  const perParent = parents.map((p) => new Set(addedLines(read(['diff', `${p}..${merge}`], { paths }))));
+  return [...perParent[0]].filter((line) => perParent.every((added) => added.has(line)));
+});
+export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
+  const read = (args, opts) => scanRead(root, args, { maxBuffer, ...opts }), range = `${base}..HEAD`;
+  let net, history;
+  try {
+    if (!base) throw new Error('no base commit to scan from');
+    // No pathspec: the parent count of a merge that changes only excluded paths, or nothing, still counts.
+    const merges = read(['rev-list', '--merges', '--parents', range], { flags: [], paths: [] }).split('\n').filter(Boolean).map((l) => l.split(' '));
+    const wide = merges.find(([, ...parents]) => parents.length > MAX_MERGE_PARENTS);
+    if (wide) return { result: 'error', detail: `secret scan: merge ${wide[0].slice(0, 12)} has ${wide.length - 1} parents`, reason: `harness gate: a merge in the pushed range has ${wide.length - 1} parents (${wide[0]}), and the secret scan reads at most ${MAX_MERGE_PARENTS} (failing closed). Split the octopus into merges of at most ${MAX_MERGE_PARENTS} parents, then push again.` };
+    net = [...secretsInDiff(read(['diff', range])), ...secretsInDiff(read(['diff', range], { flags: PUSH_DRIVER_FLAGS }))];
+    const log = read(['log', '--no-show-signature', '-p', '--cc', '--root', '--full-history', '--format=%H', range]);
+    history = secretNames([...addedLines(log), ...addedByMerges(read, merges)]);
+  } catch (e) {
+    const first = (e.stderr?.toString().trim() || e.message).split('\n')[0];
+    const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.' : '';
+    return { result: 'error', detail: `secret scan: ${first}`, reason: `harness gate: could not read the diff for the secret scan (failing closed): ${first}${split}` };
+  }
+  const names = [...new Set([...net, ...history])].join(', ');
+  if (net.length) return { result: 'secret', detail: names, reason: `harness gate: committed text looks like a secret (${names}); remove it and rewrite the commit before pushing` };
+  if (history.length) return { result: 'secret', detail: names, reason: `harness gate: a commit in the pushed range adds text that looks like a secret (${names}), and it would reach the remote in history even though the final tree no longer has it. It must be removed by rewriting those commits (a human step).` };
+  return null;
 }

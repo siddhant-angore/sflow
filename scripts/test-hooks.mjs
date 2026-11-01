@@ -1,20 +1,22 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitWrites as newGitWrites, pathWithin, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
+import { GATE_RECORD_DIR, gitWrites as newGitWrites, pathWithin, pushSecretScan, secretsInDiff, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
-  const out = execFileSync('node', [join(hooks, hook)], { input: JSON.stringify(ev), cwd: ev.cwd }).toString().trim();
+  const out = execFileSync('node', [join(hooks, hook)], { input: JSON.stringify(ev), cwd: ev.cwd, timeout: 120_000 }).toString().trim();
   return out ? JSON.parse(out) : null;
 };
-const sh = (cwd, c) => execFileSync('sh', ['-c', c], { cwd, stdio: 'pipe' }).toString().trim();
+const sh = (cwd, c) => execFileSync('sh', ['-c', c], { cwd, stdio: 'pipe', timeout: 120_000, maxBuffer: 1 << 26 }).toString().trim();
+const TOKEN = 'AKIA' + 'ABCDEFGHIJKLMNOP'; // built at run time, so this file holds no secret-shaped text
 const reasonOf = (r) => r?.hookSpecificOutput?.permissionDecisionReason ?? '';
 const denied = (hook, ev) => run(hook, ev)?.hookSpecificOutput?.permissionDecision === 'deny';
 
@@ -25,6 +27,506 @@ writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
 const corpus = new Set(); // every command sent through bash(), reused by the regression check
 const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash', tool_input: { command }, cwd });
+
+// ===== SID-191 re-review 5726947374 (b2b5fd7): R32 =====
+// SFLOW_R32_ONLY=1 stops after this block (the fast loop used for mutation testing; npm run check never sets it).
+const r32Rules = newRules, r32Cfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const r32Denies = (c, b = 'feat/x') => Boolean(r32Rules.lineReason(c) || r32Rules.segmentReason(c, r32Cfg, b));
+const r32Why = (c, b = 'feat/x') => r32Rules.lineReason(c) ?? r32Rules.segmentReason(c, r32Cfg, b)?.why;
+const r32Counts = { deny: 0, allow: 0, collateral: 0 };
+const r32MustDeny = (list, what) => { for (const c of list) for (const b of ['feat/x', 'main']) assert.ok(r32Denies(c, b), `R32 ${what} must deny on ${b}: ${JSON.stringify(c)}`); r32Counts.deny += list.length; };
+const r32MustAllow = (list, what) => { for (const c of list) assert.ok(!r32Denies(c), `R32 ${what} must allow: ${JSON.stringify(c)} (${r32Why(c)})`); r32Counts.allow += list.length; };
+// B6: the deny must arrive whole or not at all.
+{
+  const libFile = join(hooks, 'lib.mjs'), lib = await import(pathToFileURL(libFile).href);
+  const dir = makeScratch('harness-r32-nb-'), nb = join(dir, 'nb.cjs'), evf = join(dir, 'ev.json');
+  writeFileSync(nb, 'process.stdout;\n'); // touching process.stdout makes the stdout pipe O_NONBLOCK, as a parent that set it would
+  const bigCmd = `gh pr merge 1 --body "${Array.from({ length: 3000 }, (_, k) => `line ${k} ${'x'.repeat(1400)}`).join('\n')}"`;
+  writeFileSync(evf, JSON.stringify({ tool_name: 'Bash', tool_input: { command: bigCmd }, cwd: repo }));
+  assert.ok(bigCmd.length > 4_000_000, 'R32-6: the command is about 4 MB');
+  const t0 = Date.now();
+  const r = spawnSync('sh', ['-c', `(node -r "${nb}" "${join(hooks, 'pre-bash.mjs')}" < "${evf}"; echo "exit=$?" >&2) | (sleep 1.5; cat)`], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  const code = Number(/exit=(\d+)/.exec(r.stderr)?.[1]);
+  if (code === 0) {
+    const j = JSON.parse(r.stdout); // never exit 0 with invalid JSON
+    assert.equal(j.hookSpecificOutput.permissionDecision, 'deny', 'R32-6: a 4 MB command denies');
+    assert.ok(r.stdout.length < 16384, `R32-6: the deny is small (${r.stdout.length} bytes), whatever the command size`);
+  } else assert.equal([code, r.stdout].join('|'), '2|', 'R32-6: a failed write exits 2 with nothing on stdout');
+  assert.ok(Date.now() - t0 < 15000, `R32-6: the test stays fast (${Date.now() - t0} ms)`);
+  // total cap, on the reason itself and on the escaped JSON (control characters grow 6x)
+  for (const reason of ['y'.repeat(3000), 'gh pr merge 1\n'.repeat(3000), `a\u0001`.repeat(20000), `${'\u0001'.repeat(1000)}\n`.repeat(10), 'é'.repeat(50000), 'x'.repeat(5_000_000)]) {
+    let got = ''; lib.deny(reason, 'PreToolUse', (t) => { got += t; });
+    assert.ok(got.length <= 3 * lib.DENY_TOTAL_MAX + 1, `R32-6: deny() output is capped (${got.length} bytes for a ${reason.length}-char reason)`);
+    assert.equal(JSON.parse(got).hookSpecificOutput.permissionDecision, 'deny');
+    if (reason === 'y'.repeat(3000)) assert.ok(got.length < lib.DENY_LINE_MAX + 200, `R32-6: one long line is cut at DENY_LINE_MAX (${got.length})`);
+    if (/^gh pr merge/.test(reason)) { const n = JSON.parse(got).hookSpecificOutput.permissionDecisionReason.length; assert.ok(n >= 3000 && n <= lib.DENY_TOTAL_MAX + 40, `R32-6: the reason is cut at about ${lib.DENY_TOTAL_MAX} chars in total, not per line (${n})`); }
+  }
+  // emit() retries EAGAIN: a writer that throws it a few times still delivers everything, in order, in short writes
+  let calls = 0, sink = '';
+  const flaky = (fd, buf, off) => { if (calls++ % 4 < 3) throw Object.assign(new Error('full'), { code: 'EAGAIN' }); const n = Math.min(5, buf.length - off); sink += buf.subarray(off, off + n).toString(); return n; };
+  lib.emit('hello world, flaky pipe\n', 1, flaky, () => {});
+  assert.equal(sink, 'hello world, flaky pipe\n', 'R32-6: emit() retries EAGAIN and finishes the write');
+  // ... but gives up (throws) after 10000 in a row, and on any other error
+  // the retry budget is per stalled write, not per call: 10005 stalls spread over a long write still finish
+  let stall = 0, got2 = 0; lib.emit('x'.repeat(10005), 1, (fd, buf, off) => { if (stall++ % 2 === 0) throw Object.assign(new Error('full'), { code: 'EAGAIN' }); got2++; return 1; }, () => {});
+  assert.equal(got2, 10005, 'R32-6: the EAGAIN counter resets after each successful write');
+  // bounded so a retry-forever emit() fails here instead of hanging: the loop is synchronous, SIGTERM can't stop it
+  let always = 0; assert.throws(() => lib.emit('x', 1, () => { if (++always > 20000) throw Object.assign(new Error('stop'), { code: 'ESTOP' }); throw Object.assign(new Error('full'), { code: 'EAGAIN' }); }, () => {}), { code: 'EAGAIN' });
+  assert.equal(always, 10001, 'R32-6: emit() retries a full pipe 10000 times, then throws');
+  let epipe = 0; assert.throws(() => lib.emit('x', 1, () => { epipe++; throw Object.assign(new Error('gone'), { code: 'EPIPE' }); }, () => {}), { code: 'EPIPE' });
+  assert.equal(epipe, 1, 'R32-6: emit() does not retry other errors');
+  // deny() after a partial write: no second deny, exit 2, reason on stderr
+  const partial = spawnSync(process.execPath, ['--input-type=module', '-e', `import { deny } from ${JSON.stringify(pathToFileURL(libFile).href)}; import { writeSync } from 'node:fs'; deny('first', 'PreToolUse', (t) => { writeSync(1, t.slice(0, 7)); throw Object.assign(new Error('full'), { code: 'EAGAIN' }); }); process.stdout.write('REACHED-AFTER-DENY');`], { encoding: 'utf8' });
+  assert.equal(partial.status, 2, 'R32-6: a failed deny write exits 2');
+  assert.equal(partial.stdout, '{"hookS', 'R32-6: nothing but the partial write is on stdout (no second deny, no allow)');
+  assert.match(partial.stderr, /blocked/, 'R32-6: the reason is on stderr');
+  console.log(`SID-191 R32-6: 4 MB command denied over a nonblocking pipe in ${Date.now() - t0} ms; deny() capped; emit() retry and failure paths tested`);
+}
+const r32Ours = ['set -o noglob; git status', 'IFS=, git status', `sh -c 'echo "$1"' _ x`]; // R32 cases the corpus sweep below must not count as collateral
+// Over-denial 1: harmless `set -o` options. noglob, braceexpand, posix and `set --` change how words are read and stay denied.
+r32MustAllow(['set -o pipefail; gh pr view 1 | cat', 'set -o pipefail && git push origin feat/x', 'set -euo pipefail; git status', 'set -o errexit -o nounset; git status', 'set +o noclobber; git status', 'set -o verbose; git log'], 'set -o whitelist');
+r32MustDeny(['set -o noglob; git status', 'set -o braceexpand; git status', 'set +o noglob; gh pr view 1', 'set -o posix; git status', 'set -o pipefail -o noglob; git status', 'set -- a b; git status', 'set -o; git status', 'set -o keyword; git status', 'set -o allexport -o noglob; npm test', 'set -o xtrace; npm test', 'set -o errtrace; git status', 'set -o functrace; git status', 'set -o allexport; git status'], 'set -o other options');
+// Over-denial 2: IFS is judged on assignment words. A mention in a message or an echo argument is data; a real assignment, or text a shell/redirect could read back, is not.
+r32MustAllow(['git commit -m "set IFS=, in parser"', 'echo "set IFS=, here"; git status', "git commit -m 'IFS=, is documented'", 'git tag -m "reset IFS= first" v1', 'git commit -m "fix (parser) IFS=x"', 'git tag -m "IFS=, note" v1', 'git commit -m "IFS=, note" && git status'], 'IFS mention');
+r32MustDeny(['IFS=, git status', 'IFS=, ; git status', 'IFS+=x; git status', 'export IFS=,; git status', 'declare -x IFS=, ; git status', 'local IFS=,; git status', 'FOO=1 IFS=, git status', "echo 'a IFS=, b' | sh; git status", 'git commit -m "$(IFS=, ; echo x)"', 'echo "x IFS=, y" > f.sh; git status', 'bash -c "IFS=,; git status"', 'eval "IFS=, git status"', 'echo "x IFS=, y" | tee f.sh; git status'], 'IFS assignment');
+// Over-denial 3: `$1` inside the single quotes of a -c payload (an awk program) or escaped is not a positional parameter. Real uses stay denied.
+r32MustAllow([`bash -c "awk '{print \\$1}' f; git status"`, `sh -c 'git log --oneline | awk "{print \\$1}"'`, `bash -c "awk '{print \\$1, \\$2}' f | sort; git log"`, `sh -c "cut -d' ' -f1 f | awk '{ s += \\$1 } END { print s }'; git status"`], 'awk $1 in a payload');
+r32MustDeny([`sh -c 'echo "$1"' _ x`, `bash -c 'echo $@; git status'`, `bash -c 'shift; git status'`, `bash -c "echo \\$1; git status"`, `bash -c "awk '{print \\$1}' f; echo \\$2; git status"`, `sh -c 'awk "{print $1}"; git status'`, `bash -c 'eval "$1"' _ 'gh pr merge 1'`, `bash -c "eval '\\$1'" _ 'gh pr merge 1'`, `sh -c '"$@"' _ gh pr merge 1`], 'real positional use');
+r32MustDeny([String.raw`bash -c "echo \"it's \$1\" 'x'; git status"`], 'apostrophe inside double quotes does not hide $1');
+// Through the hook as well (these join the corpus, so the regression check below runs them against every baseline)
+for (const c of ['set -o pipefail; gh pr view 1 | cat', 'git commit -m "set IFS=, in parser"', `bash -c "awk '{print \\$1}' f; git status"`]) assert.ok(!denied('pre-bash.mjs', bash(c)), `R32 over-denial fixed, must allow through the hook: ${c}`);
+for (const c of ['set -o noglob; git status', 'IFS=, git status', `sh -c 'echo "$1"' _ x`]) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 must still deny through the hook: ${c}`);
+// each rule on its own (the line-level layers can hide one of them)
+assert.equal(r32Rules.rereadReason('set -o pipefail; git status'), null);
+assert.ok(r32Rules.rereadReason('set -o noglob; git status'));
+assert.equal(r32Rules.rereadReason('git commit -m "set IFS=, in parser"'), null);
+assert.ok(r32Rules.rereadReason('IFS=, git status'));
+assert.ok(r32Rules.rereadReason("echo 'a IFS=, b' | sh; git status"));
+assert.ok(r32Rules.rereadReason('git commit -m "$(IFS=, ; echo x)"'), 'R32: a $( ) inside double quotes is script, not data');
+assert.equal(r32Rules.segmentReason(`bash -c "awk '{print \\$1}' f; git status"`, r32Cfg, 'feat/x'), null);
+assert.match(r32Rules.segmentReason(`bash -c 'echo $1'`, r32Cfg, 'feat/x')?.why ?? '', /positional parameters/);
+// Message: an unquoted glob or brace in a guarded command is still denied (accepted collateral), and the message now says to quote.
+const r32Glob = ['gh api repos/o/r/pulls?state=open', 'gh api repos/o/r/pulls --jq .[]', 'uv add pkg[extra]', 'git add *.mjs'];
+r32MustDeny(r32Glob, 'unquoted glob');
+r32Counts.collateral += r32Glob.length;
+for (const c of r32Glob) { const why = r32Why(c); assert.match(why, /spell the paths or words out/, c); assert.match(why, /quote the argument/, c); assert.match(why, /gh api 'repos\/o\/r\/pulls\?state=open', --jq '\.\[\]', uv add 'pkg\[extra\]'/, c); }
+r32MustAllow(["gh api 'repos/o/r/pulls?state=open'", "gh api repos/o/r/pulls --jq '.[]'", "uv add 'pkg[extra]'", "gh api 'repos/o/r/pulls?state=open' --jq '.[].number'"], 'quoted glob');
+// Opus final review: single-quoted text that the script reads back as code, and $'..' with an escaped quote, must not hide a positional parameter or an IFS assignment.
+// All of these were denied at b2b5fd7 and stay denied.
+r32MustDeny([
+  String.raw`bash -c ". /dev/stdin <<< '${'$'}{1#}'" _ 'gh pr merge 1'`, String.raw`bash -c "source <(echo '\${1#}')" _ 'gh pr merge 1'`, String.raw`bash -c "echo '\${1#}' | source /dev/stdin" _ 'gh pr merge 1'`,
+  String.raw`bash -c "trap '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "trap '\$1' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "PROMPT_COMMAND='\${1#}'; trap '' EXIT" _ 'gh pr merge 1'`,
+  String.raw`bash -c "x=\$'\\''; \${@}; y=''" _ gh pr merge 1`,
+  String.raw`x=$'\'' ; IFS=, ; c=gh,pr,merge,1 ; $c ; y=''`,
+  "trap ' IFS=,; c=gh,pr,merge,1; $c' EXIT", "perl -e 'system q{ IFS=,; c=gh,pr,merge,1; $c}'", `python3 -c 'os.system(" IFS=,; c=gh,pr,merge,1; $c")'`, `awk 'BEGIN{system(" IFS=,; c=gh,pr,merge,1; $c")}'`,
+  `node -e 'execSync(" IFS=,; c=gh,pr,merge,1; $c")'`, "env -S ' IFS=, c=gh,pr,merge,1 git status'",
+], 'opus review: re-read single-quoted text and $\'..\'');
+// each guard on its own
+assert.ok(r32Rules.rereadReason("trap ' IFS=,; git status' EXIT"), 'R32: trap re-reads quoted text, so an IFS inside it counts');
+assert.ok(r32Rules.rereadReason(String.raw`x=$'\'' ; IFS=, ; git status ; y=''`), "R32: $'..' falls back to the raw text");
+assert.match(r32Rules.segmentReason(String.raw`bash -c "trap '\${1#}' EXIT" _ x`, r32Cfg, 'feat/x')?.why ?? '', /positional parameters/, 'R32: a payload that can re-read single-quoted text is judged on the raw text');
+// the deny keeps the end of a long reason (a gate failure's last lines, the policy note), not only the start
+{
+  const lib = await import(pathToFileURL(join(hooks, 'lib.mjs')).href);
+  let got = ''; lib.deny(`${'first line\n'.repeat(900)}LAST-LINE-ERROR`, 'PreToolUse', (t) => { got += t; });
+  const why = JSON.parse(got).hookSpecificOutput.permissionDecisionReason;
+  assert.ok(why.startsWith('first line') && why.endsWith('LAST-LINE-ERROR') && why.length <= lib.DENY_TOTAL_MAX + 60, `R32-6: the cut keeps both ends (${why.length})`);
+}
+// Second opus review (/tmp/r32/opus2-result.md): findings 1-4, each denied at b2b5fd7 and allowed by the first fix. Plain payload text is never blanked unless it is the program of awk/gawk/sed/cut/grep/jq.
+const r32Op2 = [
+  // 1: a quoted or escaped reader name hides the re-read of single-quoted ${1#}
+  String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "t''rap '\${1#}' EXIT" _ 'gh pr merge 1'`, String.raw`bash -c "\trap '\${1#}' EXIT" _ 'gh pr merge 1'`,
+  String.raw`bash -c "\"trap\" '\$@' EXIT" _ gh pr merge 1`, String.raw`bash -c "\"source\" /dev/stdin <<< '\${1#}'" _ 'gh pr merge 1'`,
+  String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'git push origin main'`, String.raw`bash -c "\"trap\" '\${1#}' EXIT" _ 'echo x > .harness.json'`,
+  // 2: other places bash re-reads single-quoted text
+  String.raw`bash -c "PS4='\$(\${1#})'; set -x; :" _ 'gh pr merge 1'`, String.raw`bash -c "PS0='\$(\${1#})'; :" _ 'gh pr merge 1'`, String.raw`bash -c "a='b[\$(\${1#})]'; echo \$((a))" _ 'gh pr merge 1'`,
+  String.raw`bash -c "unset 'a[\$(\${1#})]'" _ 'gh pr merge 1'`, String.raw`bash -c "x='\$(\${1#})'; echo \"\${x@P}\"" _ 'gh pr merge 1'`,
+  "bash -c \"shopt -s expand_aliases; alias x='\\${1#}'\nx\" _ 'gh pr merge 1'", String.raw`bash -c "mapfile -C '\${1#}' -c1 a <<<x" _ 'gh pr merge 1'`,
+  // 3: options that run code (xtrace via PS4, errtrace/functrace via trap, allexport exports the next assignment)
+  "PS4='$(gh pr merge 1)'; set -o xtrace; true", "set -o errtrace; trap 'gh pr merge 1' ERR; false", "set -o functrace; trap 'gh pr merge 1' DEBUG; f(){ :; }; f", 'set -o allexport; GIT_SSH_COMMAND=/tmp/evil; git push origin feat/x',
+  'set -o allexport; BASH_ENV=/tmp/evil; git status', 'set -o allexport; GIT_EXTERNAL_DIFF=/tmp/evil; git diff', 'set -o allexport; GIT_PAGER=/tmp/evil; git log', 'set -o allexport; GIT_DIR=/tmp/other; git status',
+  // 4: an apostrophe in a comment, or nested quotes in "$( )", hid a real IFS assignment
+  "# it's\nIFS=,; c=1,--web; gh pr view $c # '", "git status # don't\nIFS=,; c=1,--web; gh pr view $c # '", 'echo "$(echo "a"; IFS=,; c=1,--web; gh pr view $c)"',
+];
+r32MustDeny(r32Op2, 'opus 2 findings 1-4');
+for (const c of r32Op2.filter((_, k) => k % 3 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 opus 2 must deny through the hook: ${JSON.stringify(c)}`);
+r32Ours.push(...r32Op2);
+// Third opus review: an alias that turns a data-program head into eval, IFS assigned in arithmetic inside quotes, and extra set flags/words after a safe `-o NAME`. All denied at b2b5fd7.
+const r32Op3 = [
+  String.raw`sh -c "alias awk=eval
+awk '\${1#}'" _ 'gh pr merge 1'`, String.raw`bash -c "shopt -s expand_aliases
+alias awk=eval
+awk '\${1#}'" _ 'gh pr merge 1'`, String.raw`sh -c "alias grep=eval
+grep 'shift; \$1'" _ x 'gh pr merge 1'`, String.raw`sh -c "alias sed=eval
+sed '\${@:2}'" _ x gh pr merge 1`, String.raw`sh -c 'alias jq=eval
+jq "\${1#}"' _ 'gh pr merge 1'`, String.raw`sh -c "alias awk=eval; awk '\${1#}'" _ 'gh pr merge 1'`,
+  'echo "$[ IFS=44 ]"; gh pr create --title x', 'echo $[ " IFS=7" ]; git status', 'x=a; echo "${x[ IFS=5]}"; git status', "test -v 'a[ IFS=4 ]'; git status",
+  'set -o pipefail -f; git status', 'set -o pipefail -k; git status', 'set -o pipefail -f pipefail; git status', 'set -o pipefail main; git push origin $1', 'set -o pipefail - gh pr merge 1; git status', 'set -o pipefail +B; git status', 'set -o errexit -B -o nounset; git status',
+  'set -o pipefail -H; git status', 'set -o pipefail -C -u; git status', 'set -o verbose x y; gh pr view "$2"', 'set -o pipefail -k; git push origin feat/x GIT_SSH_COMMAND=/tmp/evil', 'set -o pipefail -o pipefail -f; gh pr view 1',
+];
+r32MustDeny(r32Op3, 'opus 3');
+for (const c of r32Op3.filter((_, k) => k % 4 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `R32 opus 3 must deny through the hook: ${JSON.stringify(c)}`);
+r32Ours.push(...r32Op3);
+// each rule on its own
+for (const c of ['set -o pipefail -k; git status', 'set -o pipefail x; git status', 'set -o pipefail - a; git status', 'set -o pipefail -o noglob; git status']) assert.ok(r32Rules.rereadReason(c), `R32 set: every argument must be a safe -o pair: ${c}`);
+assert.equal(r32Rules.rereadReason('set -o errexit -o nounset; git status'), null);
+assert.match(r32Rules.positionalView(`alias awk=eval; awk '\${1#}'`), /\$\{1/, 'R32: an alias in the payload keeps the raw text');
+assert.match(r32Rules.positionalView(`shopt -s expand_aliases; awk '$1'`), /\$1/);
+assert.match(r32Rules.positionalView(`npm test; awk '$1'`), /\$1/, 'R32: a payload with a command that is neither a data program nor plain stays raw');
+assert.doesNotMatch(r32Rules.positionalView(`git status; awk '$1' f | sort`), /\$1/);
+for (const c of ['echo "$[ IFS=44 ]"; git status', 'echo $[ " IFS=7" ]; git status', 'echo "${x[ IFS=5]}"; git status', "test -v 'a[ IFS=4 ]'; git status"]) assert.ok(r32Rules.rereadReason(c), `R32 IFS: arithmetic expansion keeps the raw rule: ${c}`);
+// the narrow allows stay, each rule on its own
+r32MustAllow([`bash -c "awk '{print \\$1}' f | sort; sed 's/a/\\$1/' f; git status"`, `bash -c "grep -E 'x\\$' f | cut -d' ' -f1; jq '.[]' f"`], 'data-program single quotes');
+assert.equal(r32Rules.rereadReason('git status # it\'s'), null);
+assert.ok(r32Rules.rereadReason('echo "$(echo "a"; IFS=,; git status)"'), 'R32 opus 2 F4: nested quotes in "$( )" keep the raw rule');
+assert.ok(r32Rules.rereadReason("git status # don't\nIFS=,; git status # '"), 'R32 opus 2 F4: an apostrophe in a comment keeps the raw rule');
+assert.ok(r32Rules.rereadReason('echo "x IFS=, y" | eval; git status'), 'R32: an unknown or reading command keeps the raw rule');
+assert.ok(r32Rules.rereadReason('FOO="a IFS=, x" git status'), 'R32: a quoted assignment value is not on the data list');
+assert.ok(r32Rules.rereadReason('echo IFS=, ; git status'), 'R32: an unquoted IFS= argument keeps the raw rule');
+assert.ok(r32Rules.rereadReason('git -c core.pager="a IFS=, x" log'), 'R32: git -c is not a message command');
+assert.ok(r32Rules.rereadReason('git log --format="a IFS=, x"'), 'R32: a quoted word that is not a message value keeps the raw rule');
+assert.equal(r32Rules.rereadReason('gh pr create --title "set IFS=, here" --body "IFS=, too"'), null);
+// ifsMentionIsData, one gate at a time (each of these returns the raw rule's answer, which is a deny; the layers above would hide a missing gate)
+for (const c of [
+  String.raw`x=$'\'' ; IFS=, ; git status ; y='x'`, // litCommands misreads $'\'' as the end of the string
+  'echo "x; IFS=, ; git status', // unclosed double quote
+  'echo "$(IFS=, ; git status)"', // $( ) inside double quotes
+  'echo $(IFS=, ; git status)',
+  '"echo" "a IFS=, b"; git status', // a quoted command name is not on the list
+  'echo IFS+=x; git status', // += is an assignment too
+  'echo IFS=x; git status',
+  'gh pr create --label "a IFS=, b"', // a quoted word that is not a title/body
+  'git log --grep "a IFS=, b"', // not a message option
+  'git -c core.pager="a IFS=, b" log',
+  'git commit -m x --exec="a IFS=, b"',
+  String.raw`echo $'\'\'' ; IFS=, ; git status ; echo 'x'`, // litCommands ends $'..' at the first quote, so it would read the IFS as quoted
+  'echo "`IFS=, ; git status`"', // a backtick in double quotes
+  'unknowncmd "a IFS=, b"; git status', 'git status # a IFS=, b', 'git commit -m #x IFS=, y', // a comment keeps the raw rule (b2b5fd7 denied it; allowing it would be a DENY->allow)
+  'echo "a IFS=, b" | sh; git status', 'echo "a IFS=, b" > f; git status', 'trap "a IFS=, b" EXIT; git status', 'perl -e "a IFS=, b"; git status',
+]) assert.ok(r32Rules.rereadReason(c), `R32 IFS gate must keep the raw rule: ${JSON.stringify(c)}`);
+for (const c of ['git commit -m "a IFS=, b"', 'git tag -m "a IFS=, b" v1', 'echo "a IFS=, b"; git status', "printf '%s\\n' 'a IFS=, b'; git status", 'gh pr create --title "a IFS=, b" --body "c IFS=, d"', 'git notes add -m "a IFS=, b"; git status', 'ls "a IFS=, b"; git status'])
+  assert.equal(r32Rules.rereadReason(c), null, `R32 IFS mention in plain data stays allowed: ${c}`);
+// The IFS reason itself, for heads a later rule also denies (eval, read, ...): only the reason shows that the data gate kept the raw rule for them.
+for (const h of ['eval', 'read', 'mapfile', 'alias', 'shopt', 'source', 'sh', 'bash', 'trap', 'xargs', 'tee', 'python3']) assert.match(r32Rules.rereadReason(`${h} "a IFS=, b"; git status`) ?? '', /sets IFS/, `R32 IFS gate: ${h} is not a plain command, so its quoted text keeps the raw IFS rule`);
+// positionalView, one construct at a time: a payload is the raw text unless every command is plain and the quoted words belong to an awk/gawk/sed/cut/grep/jq program
+const pv = r32Rules.positionalView;
+// A command that runs or re-reads text is neither plain nor a data program: as a head its own quoted words stay, and one such command anywhere keeps the raw text of the whole payload.
+for (const h of ['sh', 'bash', 'dash', 'zsh', 'eval', 'source', '.', 'trap', 'exec', 'command', 'builtin', 'alias', 'env', 'xargs', 'python3', 'perl', 'node']) {
+  assert.match(pv(`${h} '$1'`), /\$1/, `R32 payload view must keep the raw $1 of a ${h} word`);
+  assert.match(pv(`${h} x; awk '$1' f`), /\$1/, `R32 payload view: ${h} next to a data program keeps the whole payload raw`);
+}
+for (const c of [
+  `"awk" '{print $1}'`, `awk '{print $1}' a\\ b`, `awk '{print $1}' f > out`, `awk '{print $1}' < f`, `(awk '{print $1}' f)`, `awk '{print $1}' $(echo f)`, `awk "$(x)" '{print $1}'`, 'awk `x` \'{print $1}\'',
+  `awk "a\\nb" '{print $1}'`, `echo 'x $1`, 'awk "a\\$1', `awk '{print $1}' f # c`, `awk '{print $1}' {a,b}`, `awk '{print $1}' (f)`, `awk '{print $1}' $'x'`, `echo '$1'`, `trap '$1' EXIT`, `x=1 awk '{print $1}'`, `env awk '{print $1}'`, `xargs awk '{print $1}'`, `echo $1; awk '{print $1}'`, `awk '{print $1}' "$1"`,
+]) assert.match(pv(c), /\$[1@]/, `R32 payload view must keep the raw $1: ${JSON.stringify(c)}`);
+for (const c of [`awk '{print $1}' f`, `gawk '{print $1, $2}' f | sort`, `sed 's/a/$1/' f`, `cut -d' ' -f1 f | awk '{ s += $1 } END { print s }'`, `grep -E 'x$' f`, `jq '.[$1]' f`, `git log --oneline | awk "{print \\$1}"`])
+  assert.doesNotMatch(pv(c), /\$[1@]/, `R32 payload view drops a data program's $1: ${c}`);
+// R32-END (cases of the other items are added above this line)
+if (process.env.SFLOW_R32_ONLY === '1') { console.log(`R32 only: ${JSON.stringify(r32Counts)}`); process.exit(0); }
+
+// SID-213: the push secret scan fails closed, reads every commit in the pushed range, and can't be blinded by repo config.
+// The cases collect their failures so one run names every broken behaviour.
+{
+  const realGit = sh(repo, 'command -v git'), head = (d) => sh(d, 'git rev-parse HEAD');
+  const NET = /committed text looks like a secret \(AWS key\)/, HISTORY = /a commit in the pushed range adds text that looks like a secret \(AWS key\)/, CLOSED = /could not read the diff for the secret scan \(failing closed\)/;
+  const scanRepo = (policy = { gate: ['test -f a'] }) => {
+    const d = makeScratch('harness-scan-');
+    sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
+    writeFileSync(join(d, '.harness.json'), JSON.stringify(policy));
+    sh(d, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
+    return d;
+  };
+  const addToken = (d, file = 's.txt') => sh(d, `echo "k=${TOKEN}" > ${file} && git add ${file} && git commit -qm add-${file}`);
+  const addRemove = (d) => { addToken(d); sh(d, 'git rm -q s.txt && git commit -qm remove-s'); };
+  const clean = (d, file = 'c') => sh(d, `echo ${file} > ${file} && git add ${file} && git commit -qm ${file}`);
+  const gitDirOf = (d) => sh(d, 'git rev-parse --absolute-git-dir');
+  const gateRuns = (d, sha) => { const f = join(gitDirOf(d), 'harness', 'runs.jsonl'); return existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.kind === 'gate' && r.head === sha.slice(0, 12)) : []; };
+  const push = (d, env = {}) => {
+    const out = execFileSync('node', [join(hooks, 'pre-bash.mjs')], { cwd: d, env: { ...process.env, ...env }, timeout: 120_000, input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push origin feat/x' }, cwd: d }) }).toString().trim();
+    const sha = head(d);
+    return { why: reasonOf(out ? JSON.parse(out) : null), recorded: existsSync(join(gitDirOf(d), GATE_RECORD_DIR, sha)), runs: gateRuns(d, sha) };
+  };
+  const refused = (r, why, result) => {
+    assert.match(r.why, why);
+    assert.ok(!r.recorded, 'no gate record');
+    assert.ok(r.runs.some((x) => x.result === result), `runs.jsonl has result ${result}: ${JSON.stringify(r.runs)}`);
+    assert.ok(!r.runs.some((x) => x.result === 'pass'), 'runs.jsonl has no pass for this head');
+  };
+  const passed = (r) => { assert.equal(r.why, ''); assert.ok(r.recorded, 'gate record written'); };
+  const shim = (sub) => {
+    const dir = makeScratch('harness-shim-');
+    writeFileSync(join(dir, 'git'), `#!/bin/sh\nskip=\nfor a in "$@"; do\n  if [ -n "$skip" ]; then skip=; continue; fi\n  case "$a" in -c|-C) skip=1; continue;; -*) continue;; esac\n  if [ "$a" = "${sub}" ]; then echo "fatal: shim refused ${sub}" >&2; exit 128; fi\n  break\ndone\nexec "${realGit}" "$@"\n`);
+    chmodSync(join(dir, 'git'), 0o755);
+    return { PATH: `${dir}:${process.env.PATH}` };
+  };
+  const blinders = {
+    'color.ui=always': (d) => sh(d, 'git config color.ui always'),
+    'color.diff=always': (d) => sh(d, 'git config color.diff always'),
+    'diff.external': (d) => { const x = join(gitDirOf(d), 'silent-diff'); writeFileSync(x, '#!/bin/sh\nexit 0\n'); chmodSync(x, 0o755); sh(d, `git config diff.external "${x}"`); },
+    'textconv': (d) => { const x = join(gitDirOf(d), 'silent-conv'); writeFileSync(x, '#!/bin/sh\necho clean\n'); chmodSync(x, 0o755); writeFileSync(join(d, '.gitattributes'), '*.txt diff=hide\n'); sh(d, `git config diff.hide.textconv "${x}" && git add .gitattributes && git commit -qm attrs`); },
+    'core.bigFileThreshold=10': (d) => sh(d, 'git config core.bigFileThreshold 10'),
+    'core.attributesFile * -diff': (d) => { const x = join(gitDirOf(d), 'attrs'); writeFileSync(x, '* -diff\n'); sh(d, `git config core.attributesFile "${x}"`); },
+    'core.attributesFile diff=bin with diff.bin.binary': (d) => { const x = join(gitDirOf(d), 'attrs'); writeFileSync(x, '* diff=bin\n'); sh(d, `git config core.attributesFile "${x}" && git config diff.bin.binary true`); },
+    'committed .gitattributes -diff': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); },
+    'committed .gitattributes binary': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt binary\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); },
+    '.git/info/attributes -diff': (d) => writeFileSync(join(gitDirOf(d), 'info', 'attributes'), '* -diff\n'),
+  };
+  const nulToken = `printf 'k=${TOKEN}\\000\\n'`;
+  const bigBinary = (d) => writeFileSync(join(d, 'big.bin'), Buffer.alloc(1 << 20, 'ab\0\n'));
+  const logWithoutGraftOverride = (d, range) => sh(d, `env -u GIT_GRAFT_FILE git log -p --cc --root --full-history --format=%H ${range}`);
+  const oldRecord = (d) => { const dir = join(gitDirOf(d), 'harness-gate'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, head(d)), 'x\n'); }; // 0.5.0's folder: a head recorded there passed the weaker scan
+  const stopReason = (d) => run('stop.mjs', { cwd: d })?.reason ?? '';
+  const side = (d, name) => sh(d, `git checkout -q -b ${name} && echo ${name} > ${name} && git add ${name} && git commit -qm ${name} && git checkout -q feat/x`);
+  const dropLast = (d, file) => sh(d, `sed -i '$d' ${file} && git add ${file} && git commit -qm remove-last-line`);
+  const evilMerge = (d, write = `echo "k=${TOKEN}"`) => { side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${write} > merged.txt && git add merged.txt && git commit -qm evil`); assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit'); sh(d, 'git rm -q merged.txt && git commit -qm remove'); };
+  const lateNulToken = `{ for i in $(seq 120); do echo ${'p'.repeat(80)}; done; printf 'x\\000k=${TOKEN}\\n'; }`;
+  const changedAgainstAllParents = (d, ref, name) => sh(d, `git diff-tree -c --name-only -z --no-commit-id ${ref}`).split('\0').includes(name);
+  const octopus = (d, n, content) => {
+    const parent = head(d), tree = sh(d, 'git rev-parse HEAD^{tree}');
+    const parents = sh(d, `for i in $(seq ${n}); do git commit-tree ${tree} -p ${parent} -m p$i; done`).split('\n');
+    const merged = content ? sh(d, `blob=$(printf '%s\\n' '${content}' | git hash-object -w --stdin) && git update-index --add --cacheinfo 100644,$blob,merged.txt && git write-tree && git reset -q`) : tree;
+    sh(d, `git reset -q --hard $(git commit-tree ${merged} ${parents.map((p) => `-p ${p}`).join(' ')} -m octopus)`);
+    assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, n + 1, `${n} parents`);
+  };
+  const refusedWide = (d, n = 64) => { const r = push(d); refused(r, new RegExp(`a merge in the pushed range has ${n} parents`), 'error'); assert.match(r.why, /failing closed/); assert.match(r.why, /split/i); };
+  const b64 = (text) => Buffer.from(text).toString('base64');
+  const script = (d, name, body) => { const x = join(gitDirOf(d), name); writeFileSync(x, `#!/bin/sh\n${body}\n`); chmodSync(x, 0o755); return x; };
+  const textconvFile = (d, driver = 'base64 -d') => { writeFileSync(join(d, '.gitattributes'), '*.b64 diff=z\n'); writeFileSync(join(d, 'k.b64'), `${b64(`k=${TOKEN}\n`)}\n`); sh(d, `git config diff.z.textconv '${driver}' && git add .gitattributes k.b64 && git commit -qm encoded`); };
+  // Git trusts a graph file's parent column: only `git commit-graph verify` reads the checksum.
+  const poisonGraph = (d, parents, generations = {}) => {
+    sh(d, 'git -c commitGraph.generationVersion=1 commit-graph write --reachable --no-progress');
+    const f = join(gitDirOf(d), 'objects', 'info', 'commit-graph'), b = readFileSync(f);
+    const chunk = (id) => { for (let i = 8; ; i += 12) if (b.toString('latin1', i, i + 4) === id) return Number(b.readBigUInt64BE(i + 4)); };
+    const oids = chunk('OIDL'), count = b.readUInt32BE(chunk('OIDF') + 255 * 4);
+    const pos = (sha) => { for (let i = 0; i < count; i++) if (b.toString('hex', oids + 20 * i, oids + 20 * i + 20) === sha) return i; throw new Error(`${sha} not in the graph`); };
+    const row = (sha) => chunk('CDAT') + 36 * pos(sha);
+    for (const [commit, parent] of parents) b.writeUInt32BE(pos(parent), row(commit) + 20);
+    for (const [sha, gen] of Object.entries(generations)) b.writeUInt32BE(gen << 2, row(sha) + 28);
+    rmSync(f, { force: true }); writeFileSync(f, b);
+  };
+  const fakeGpg = (d) => {
+    const marker = join(gitDirOf(d), 'gpg-ran');
+    return { marker, program: script(d, 'fake-gpg', `case "$*" in *--verify*) : > "${marker}";; esac\ncase "$*" in *-bsau*) echo '[GNUPG:] SIG_CREATED ' >&2; printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n';; esac\nexit 0`) };
+  };
+  const diffOffTxt = (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); };
+
+  const cases = {
+    'a failing git diff denies, records error, no pass, no gate record': () => { const d = scanRepo(); clean(d); const r = push(d, shim('diff')); refused(r, CLOSED, 'error'); assert.match(r.why, /fatal: shim refused diff/); passed(push(d)); },
+    'a failing git log denies, records error, no pass, no gate record': () => { const d = scanRepo(); clean(d); const r = push(d, shim('log')); refused(r, CLOSED, 'error'); assert.match(r.why, /fatal: shim refused log/); passed(push(d)); },
+    'a scan error is not a split-the-push message': () => { const d = scanRepo(); clean(d); const why = push(d, shim('diff')).why; assert.match(why, CLOSED); assert.doesNotMatch(why, /split/i); },
+    'a bad base object fails closed': () => { const d = scanRepo(); clean(d); const v = pushSecretScan(d, 'f'.repeat(40)); assert.equal(v.result, 'error'); assert.match(v.reason, CLOSED); assert.doesNotMatch(v.reason, /split/i); },
+    'net diff over maxBuffer says split the push': () => { const d = scanRepo(); clean(d); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 10); assert.equal(v.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    'history log over maxBuffer says split the push': () => { const d = scanRepo(); sh(d, 'echo x > t && git add t && git commit -qm t && git rm -q t && git commit -qm rm'); assert.equal(sh(d, 'git diff origin/main..HEAD'), '', 'empty net diff'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 20); assert.equal(v.result, 'error'); assert.match(v.reason, /split the push into smaller pushes/); },
+    'a generous limit does not overflow': () => { const d = scanRepo(); clean(d); assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 20), null); },
+    'a null or empty base fails closed': () => { const d = scanRepo(); addToken(d); for (const b of [null, undefined, '']) { const v = pushSecretScan(d, b); assert.equal(v?.result, 'error', `base ${b}`); assert.match(v.reason, CLOSED); } },
+    ...Object.fromEntries(Object.entries(blinders).flatMap(([n, set]) => [
+      [`${n} does not hide a secret in the tree`, () => { const d = scanRepo(); set(d); addToken(d); refused(push(d), NET, 'secret'); }],
+      [`${n} does not hide a secret only in history`, () => { const d = scanRepo(); set(d); addRemove(d); refused(push(d), HISTORY, 'secret'); }],
+      [`${n} does not hide a secret a merge adds, removed later`, () => { const d = scanRepo(); set(d); evilMerge(d); refused(push(d), HISTORY, 'secret'); }],
+    ])),
+    'a NUL byte in the file does not hide a secret in the tree': () => { const d = scanRepo(); sh(d, `${nulToken} > s.txt && git add s.txt && git commit -qm nul`); assert.equal(sh(d, 'git diff --numstat origin/main..HEAD').split('\t')[0], '-', 'git takes the file for binary'); refused(push(d), NET, 'secret'); },
+    'a NUL byte in the file does not hide a secret only in history': () => { const d = scanRepo(); sh(d, `${nulToken} > s.txt && git add s.txt && git commit -qm nul && git rm -q s.txt && git commit -qm rm`); refused(push(d), HISTORY, 'secret'); },
+    'a NUL byte in the file does not hide a secret a merge adds, removed later': () => { const d = scanRepo(); evilMerge(d, nulToken); refused(push(d), HISTORY, 'secret'); },
+    'an octopus merge adding a secret to a -diff file, removed later, is denied': () => { const d = scanRepo(); diffOffTxt(d); side(d, 'o1'); side(d, 'o2'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 o2 && echo "k=${TOKEN}" > merged.txt && git add merged.txt && git commit -qm evil && git rm -q merged.txt && git commit -qm remove`); refused(push(d), HISTORY, 'secret'); },
+    'a merge editing a -diff file on both sides, secret in the resolution, is denied': () => { const d = scanRepo(); diffOffTxt(d); sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q -b o1 && printf '1\\no\\n' > f.txt && git add f.txt && git commit -qm o && git checkout -q feat/x && printf 'x\\n1\\n' > f.txt && git add f.txt && git commit -qm x; git merge -q --no-ff --no-commit o1; printf 'x\\n1\\no\\nk=${TOKEN}\\n' > f.txt; git add f.txt && git commit -qm evil`); dropLast(d, 'f.txt'); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: merging origin main into a -diff file keeps its token line without denying': () => {
+      const d = scanRepo();
+      diffOffTxt(d);
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x && printf '1\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm tok && git push -q origin main`);
+      sh(d, `git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nk=${TOKEN}\\n' > f.txt; git add f.txt && git commit -qm merge-main`);
+      assert.match(sh(d, 'git log -1 --cc --text --format='), /^Binary files differ$/m, 'the case --cc cannot read');
+      passed(push(d));
+    },
+    'lock-in: a clean merge adding a -diff file passes': () => { const d = scanRepo(); diffOffTxt(d); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo clean > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
+    'a binary in the net diff over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    'a binary only in history over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big && git rm -q big.bin && git commit -qm rm'); assert.equal(sh(d, 'git diff origin/main..HEAD'), '', 'empty net diff'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    // The merge changes big.bin against both parents. Against feat/x that is the whole file, so only the per-parent read can overflow.
+    'a merge of origin main whose per-parent read is over maxBuffer denies and says split the push': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      diffOffTxt(d);
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x`);
+      bigBinary(d);
+      sh(d, `printf '1\\nm\\n' > f.txt && git add big.bin f.txt && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nm\\nresolved\\n' > f.txt; printf 'changed\\n' >> big.bin; git add f.txt big.bin && git commit -qm merge-main`);
+      const base = sh(d, 'git rev-parse origin/main');
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'big.bin'), 'the merge changes big.bin against every parent');
+      assert.ok(sh(d, `git log -p --cc --text --full-history --format=%H ${base}..HEAD`).length < limit, 'the log itself fits, so only the per-parent read can overflow');
+      const v = pushSecretScan(d, base, limit);
+      assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/);
+    },
+    'lock-in: merging origin main with a big file the merge leaves alone does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, `git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; echo resolved > m.txt; git add m.txt && git commit -qm merge-main`);
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
+    'lock-in: a plain merge of origin main with a big file reads no path and does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, 'git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat && git merge -q --no-ff -m merge-main origin/main');
+      assert.ok(!sh(d, 'git diff-tree -c --name-only --no-commit-id HEAD'), 'the merge changes no path against every parent');
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
+    'a NUL before the token, past byte 8000, does not hide a secret a merge adds, removed later': () => {
+      const d = scanRepo();
+      evilMerge(d, lateNulToken);
+      const cc = sh(d, 'git log -1 -p --cc --format= HEAD~1');
+      assert.doesNotMatch(cc, /^Binary files /m, 'git takes the file for text');
+      assert.deepEqual(secretsInDiff(cc), [], '--cc cuts the line at the NUL');
+      assert.ok(changedAgainstAllParents(d, 'HEAD~1', 'merged.txt'), 'the path list names the file');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a merge adding a secret to an awkwardly named file, removed later, is denied': () => {
+      for (const name of ['m[x].txt', 'a\\012b.txt', 'f\\377.txt', 'sp ace/*.txt', ':(top)x.txt']) {
+        const d = scanRepo();
+        side(d, 'o1'); clean(d);
+        sh(d, `n=$(printf '${name}') && git merge -q --no-ff --no-commit o1 && mkdir -p "$(dirname "$n")" && ${lateNulToken} > "$n" && git add -- ":(literal)$n" && git commit -qm evil && git rm -q -- ":(literal)$n" && git commit -qm remove`);
+        refused(push(d), HISTORY, 'secret');
+      }
+    },
+    'lock-in: a merge adding a token to a *.lock or *.snap file stays out of the scan': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${lateNulToken} > x.lock && ${lateNulToken} > y.snap && git add x.lock y.snap && git commit -qm evil`); passed(push(d)); },
+    'lock-in: a clean evil-shaped merge is allowed': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo fine > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
+    ...Object.fromEntries([64, 65].map((n) => [`a ${n}-parent octopus adding a secret in a new file, removed later, is denied`, () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      octopus(d, n, `k=${TOKEN}`);
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'merged.txt'), 'the path list names the file');
+      sh(d, 'git rm -q merged.txt && git commit -qm remove');
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], '--cc has no all-plus column at this width');
+      const r = push(d);
+      assert.ok(r.why, 'denied'); assert.ok(!r.recorded, 'no gate record');
+    }])),
+    'a 64-parent merge with no secret is denied and says to split it': () => { const d = scanRepo(); octopus(d, 64, 'fine'); refusedWide(d); },
+    'a 64-parent merge equal to all its parents is denied too': () => { const d = scanRepo(); octopus(d, 64); refusedWide(d); },
+    'a 63-parent octopus adding a secret, removed later, is denied': () => { const d = scanRepo(); octopus(d, 63, `k=${TOKEN}`); sh(d, 'git rm -q merged.txt && git commit -qm remove'); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: a clean 63-parent octopus is allowed': () => { const d = scanRepo(); octopus(d, 63, 'fine'); passed(push(d)); },
+    'a shallow boundary does not hide a token in the commit behind it, before or after unshallowing': () => {
+      const d = scanRepo(), mirror = join(makeScratch('harness-mirror-'), 'm.git');
+      addRemove(d);
+      sh(d, `git clone -q --no-local --mirror . "${mirror}" && git fetch -q --depth=1 "file://$PWD" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'true', 'the head is a shallow boundary');
+      assert.deepEqual(secretsInDiff(sh(d, 'git log -p --cc --format= HEAD')), [], 'the boundary hides the token from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+      sh(d, `git fetch -q --unshallow "${mirror}" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'false', 'unshallowed');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a genuinely shallow clone whose range reaches the boundary fails closed': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      addRemove(d); sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch feat/x "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git fetch -q --depth=1 origin main:refs/remotes/origin/main');
+      clean(clone, 'more');
+      refused(push(clone), CLOSED, 'error');
+    },
+    'a genuinely shallow clone with commits above the base still scans them': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch main "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git checkout -q -b feat/x');
+      clean(clone, 'more');
+      passed(push(clone));
+      addToken(clone);
+      refused(push(clone), NET, 'secret');
+    },
+    'gate commands run with the shallow file off': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); passed(push(d)); },
+    'log.showSignature does not run gpg.program during the scan': () => {
+      const d = scanRepo(), { marker, program } = fakeGpg(d);
+      sh(d, `echo c > c && git add c && git -c gpg.program="${program}" commit -S -qm signed && git config gpg.program "${program}" && git config log.showSignature true`);
+      assert.match(sh(d, 'git cat-file commit HEAD'), /^gpgsig /m, 'a signed commit');
+      sh(d, 'git log -1');
+      assert.ok(existsSync(marker), 'a plain git log runs the program');
+      rmSync(marker);
+      passed(push(d));
+      assert.ok(!existsSync(marker), 'the scan did not run it');
+    },
+    // Tips come from the object itself, so the graph lies about a commit below them.
+    'a commit-graph with rewritten parents does not hide a token commit': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      addRemove(d); clean(d);
+      poisonGraph(d, [[sh(d, 'git rev-parse HEAD~1'), base]]);
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], 'the graph hides the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a commit-graph giving a false merge-base does not change the base': () => {
+      const d = scanRepo({ gate: ['echo base={base}'] }), base = sh(d, 'git rev-parse origin/main'), older = sh(d, 'git rev-parse origin/main~1');
+      clean(d, 'one'); const one = head(d); clean(d, 'two'); const two = head(d); clean(d, 'three');
+      poisonGraph(d, [[one, older], [older, two]], { [base]: 20, [older]: 19 });
+      assert.notEqual(sh(d, `git merge-base HEAD ${base} || echo none`), base, 'the graph gives a false merge-base, or none');
+      const r = push(d); passed(r);
+      assert.ok(r.runs.some((x) => x.command === `echo base=${base}`), `base is ${base}: ${JSON.stringify(r.runs)}`);
+    },
+    'textconv output is scanned in the tree': () => { const d = scanRepo(); textconvFile(d); assert.deepEqual(secretsInDiff(sh(d, 'git diff --no-textconv origin/main..HEAD')), [], 'the raw file holds no token'); refused(push(d), NET, 'secret'); },
+    'color.ui=always does not hide textconv output': () => { const d = scanRepo(); sh(d, 'git config color.ui always'); textconvFile(d); refused(push(d), NET, 'secret'); },
+    'a failing textconv driver fails closed': () => { const d = scanRepo(); textconvFile(d, 'false'); refused(push(d), CLOSED, 'error'); },
+    'history is not read with textconv: a driver for a file only in history does not run': () => {
+      const d = scanRepo(), ran = join(gitDirOf(d), 'conv-ran');
+      textconvFile(d, script(d, 'conv', `: > "${ran}"\nexec base64 -d "$1"`));
+      sh(d, 'git rm -q k.b64 && git commit -qm remove');
+      passed(push(d));
+      assert.ok(!existsSync(ran), 'the driver did not run');
+    },
+    'a diff.external printing a token still denies the push, as on main': () => { const d = scanRepo(); clean(d); const x = script(d, 'loud-diff', `echo '+k=${TOKEN}'`); sh(d, `git config diff.external "${x}"`); refused(push(d), NET, 'secret'); },
+    'lock-in: a binary under the limit passes the scan': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 23), null); },
+    'a .git/info/grafts cycle over two token commits is denied': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      sh(d, `echo "k=${TOKEN}" > s.txt && git add s.txt && git commit -qm t1 && git commit -q --allow-empty -m t2 && git rm -q s.txt && git commit -qm rm`);
+      const t1 = sh(d, 'git rev-parse HEAD~2'), t2 = sh(d, 'git rev-parse HEAD~1');
+      writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${t1} ${t2}\n${t2} ${t1}\n`);
+      assert.deepEqual(secretsInDiff(logWithoutGraftOverride(d, `${base}..HEAD`)), [], 'the grafts hide the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a graft cutting the token commits out of the walk is denied': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      addRemove(d);
+      writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${head(d)} ${base}\n`);
+      assert.deepEqual(secretsInDiff(logWithoutGraftOverride(d, `${base}..HEAD`)), [], 'the graft hides the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'gate commands run with grafts off and the real merge-base': () => { const d = scanRepo({ gate: ['test "$GIT_GRAFT_FILE" = /dev/null', 'test "$GIT_NO_REPLACE_OBJECTS" = 1', 'echo base={base}'] }), mb = head(d); clean(d); const real = head(d); clean(d, 'second'); writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${real} ${sh(d, 'git rev-parse origin/main~1')}\n`); const r = push(d); passed(r); assert.ok(r.runs.some((x) => x.command === `echo base=${mb}`), `base is ${mb}: ${JSON.stringify(r.runs)}`); },
+    'an old-style record does not skip the scan': () => { const d = scanRepo(); addToken(d); oldRecord(d); refused(push(d), NET, 'secret'); },
+    'an old-style record does not skip the scan of history': () => { const d = scanRepo(); addRemove(d); oldRecord(d); refused(push(d), HISTORY, 'secret'); },
+    'an old-style record does not skip the gate commands': () => { const d = scanRepo({ gate: ['false'] }); clean(d); oldRecord(d); const r = push(d); assert.match(r.why, /harness gate failed: `false`/); assert.ok(!r.recorded, 'no new record'); },
+    'a clean head with an old-style record re-runs the gate once, then the new record skips it': () => { const d = scanRepo(); clean(d); oldRecord(d); const r = push(d); passed(r); assert.equal(r.runs.filter((x) => x.result === 'pass').length, 1, 'the gate ran'); assert.equal(push(d).runs.filter((x) => x.result === 'pass').length, 1, 'recorded head skips the gate'); },
+    'Stop does not take an old-style record for a passed gate': () => { const d = scanRepo(); clean(d); oldRecord(d); assert.match(stopReason(d), /the gate in \.harness\.json has not passed for HEAD/); },
+    'Stop takes the new record for a passed gate': () => { const d = scanRepo(); clean(d); passed(push(d)); assert.doesNotMatch(stopReason(d), /has not passed for HEAD/); },
+    'first push: token added then removed is denied': () => { const d = scanRepo(); addRemove(d); const r = push(d); refused(r, HISTORY, 'secret'); assert.match(r.why, /rewriting those commits \(a human step\)/); assert.doesNotMatch(r.why, /--no-verify|core\.hooksPath|bypass/); },
+    'rewritten branch: new range holding add and remove is denied': () => { const d = scanRepo(); clean(d, 'first'); passed(push(d)); sh(d, 'git push -q origin feat/x && git reset -q --hard HEAD~1'); clean(d, 'second'); addRemove(d); refused(push(d), HISTORY, 'secret'); },
+    'evil merge adding a new file, removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && echo "k=${TOKEN}" > merged.txt && git add merged.txt && git commit -qm evil && git rm -q merged.txt && git commit -qm remove`); refused(push(d), HISTORY, 'secret'); },
+    'evil merge editing a file, line removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && echo "k=${TOKEN}" >> a && git add a && git commit -qm evil`); dropLast(d, 'a'); refused(push(d), HISTORY, 'secret'); },
+    'octopus evil merge, line removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); side(d, 'o2'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 o2 && echo "k=${TOKEN}" >> a && git add a && git commit -qm evil`); assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 4, 'three parents'); dropLast(d, 'a'); refused(push(d), HISTORY, 'secret'); },
+    'a side branch whose merge leaves the tree unchanged is still read': () => { const d = scanRepo(); sh(d, 'git checkout -q -b leak'); addRemove(d); sh(d, 'git checkout -q feat/x'); clean(d); sh(d, 'git merge -q --no-ff -m merge-leak leak'); refused(push(d), HISTORY, 'secret'); },
+    'log.showroot=false does not hide a root commit in the range': () => { const d = scanRepo(); sh(d, `git config log.showroot false && git checkout -q --orphan feat/y && git rm -qrf . && echo "k=${TOKEN}" > s.txt && git add s.txt && git commit -qm root && git rm -q s.txt && echo a > a && git add a && git commit -qm clean && git branch -qf feat/x && git checkout -q feat/x`); refused(push(d), HISTORY, 'secret'); },
+    'an added line starting with ++ is read, not taken for a header': () => { const d = scanRepo(); sh(d, `echo "++k=${TOKEN}" > p.txt && git add p.txt && git commit -qm plus`); refused(push(d), NET, 'secret'); },
+    'an added ++ line only in history is read': () => { const d = scanRepo(); sh(d, `echo "++k=${TOKEN}" > p.txt && git add p.txt && git commit -qm plus && git rm -q p.txt && git commit -qm rm`); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: a secret in the tree keeps the net message': () => { const d = scanRepo(); addToken(d); refused(push(d), NET, 'secret'); },
+    'lock-in: base is the merge-base with origin main on first and later pushes': () => {
+      const d = scanRepo({ gate: ['echo base={base}'] }), mb = head(d);
+      sh(d, 'git checkout -q main && echo m > m && git add m && git commit -qm m && git push -q origin main && git checkout -q feat/x');
+      assert.notEqual(sh(d, 'git rev-parse origin/main'), mb, 'origin main moved past the branch point');
+      clean(d, 'one'); passed(push(d)); assert.ok(gateRuns(d, head(d)).some((x) => x.command === `echo base=${mb}`), 'first push (before = zeros) uses the merge-base');
+      sh(d, 'git push -q origin feat/x'); clean(d, 'two'); passed(push(d)); assert.ok(gateRuns(d, head(d)).some((x) => x.command === `echo base=${mb}`), 'a later push uses the same merge-base, not the pushed before');
+    },
+    'lock-in: *.lock and *.snap stay out of both scans': () => { const d = scanRepo(); addToken(d, 'x.lock'); addToken(d, 'y.snap'); sh(d, 'git rm -q y.snap && git commit -qm rm-snap'); passed(push(d)); },
+    'lock-in: a clean branch passes': () => { const d = scanRepo(); clean(d); const r = push(d); passed(r); assert.ok(r.runs.some((x) => x.result === 'pass')); },
+    'lock-in: a token already on origin main does not deny the feature push': () => { const d = scanRepo(); sh(d, `git checkout -q main && echo "k=${TOKEN}" > onmain.txt && git add onmain.txt && git commit -qm tok && git push -q origin main && git checkout -q -B feat/x main`); clean(d); passed(push(d)); },
+    // Both sides edit the same line and the resolution keeps both, so --cc shows main's token line with a one-column `+ ` prefix. It came from a parent already on origin.
+    'lock-in: merging origin main, a resolution keeping its token line does not deny': () => {
+      const d = scanRepo();
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x && printf '1\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm tok && git push -q origin main`);
+      sh(d, `git checkout -q feat/x && printf '1\\nfeat\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff origin/main; printf '1\\nfeat\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm merge-main`);
+      assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit');
+      assert.match(sh(d, 'git log -1 --cc --format='), /^\+ k=AKIA/m, '--cc shows the one-column prefix this case is about');
+      passed(push(d));
+    },
+  };
+  const failed = [];
+  for (const [name, fn] of Object.entries(cases)) {
+    try { fn(); console.log(`ok   SID-213 ${name}`); }
+    catch (e) { failed.push(name); console.log(`FAIL SID-213 ${name}: ${String(e.message).split('\n')[0].slice(0, 200)}`); }
+  }
+  assert.deepEqual(failed, [], 'SID-213 cases');
+}
 
 const mustDeny = [
   'git push --force origin feat/x', 'git push -f', 'git push -fu origin feat/x', 'git push -uf origin feat/x', 'git push --force-with-lease origin main',
@@ -69,9 +571,144 @@ const mustAllow = [
   'curl -fsSL https://example.com/i.sh | sh', 'echo ls | sh', 'echo hi | tee >(wc -l)', "find . -name '*.md' | xargs -I{} git add {}", "printf 'echo hi\\n' | sh", "echo 'git status' | sh", 'cat script.sh | bash', 'git log --oneline | head',
   // SID-108: quoted globs are literal, and a glob not at the start of a git word cannot match a name that starts with `-`
   'eval "$(ssh-agent -s)"', 'eval "$(fnm env)"', 'source <(kubectl completion bash)', 'sh -c "$(curl -fsSL https://example.com/i.sh)"', "echo hi | xargs -I{} sh -c 'echo {}'", 'source ~/.bashrc', '. ./env.sh', // SID-107 follow-up
-  'git push origin feat/*', "git push origin 'feat/*'", "git fetch origin 'refs/heads/*:refs/heads/*'", 'git add *.mjs', "git log -- '*.mjs'", 'ls [-]*',
+  "git push origin 'feat/*'", "git fetch origin 'refs/heads/*:refs/heads/*'", "git log -- '*.mjs'", 'ls [-]*', // SID-191 re-review: unquoted git push origin feat/* and git add *.mjs are now denied (sid191LiteralCollateral)
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+
+// SID-191: shell quoting, backslashes and adjacent pieces of one word can't split a guarded word. Each of these was allowed on main 91c6b08.
+const sid191Cfg = { protectedBranches: ['main', 'master'], allowMerge: false };
+const guardDenies = (c, b = 'feat/x') => Boolean(newRules.lineReason(c) || newRules.segmentReason(c, sid191Cfg, b));
+const sid191 = ['gh pr "merge" 1', 'g""h pr merge 1', 'git push "--for"ce origin feat/x', 'git push origin "ma"in', 'git push origin ma\\in', 'git commit --no-"verify" -m x', 'git reset --"hard" HEAD~1', 'git -c "core.hooks"Path=/tmp/planted commit -m x'];
+for (const c of sid191) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 must deny: ${c}`);
+const sid191More = [
+  "$'\\x67it' push origin main", "git push origin $'ma\\151n'", "g\\h pr merge 1", "'gh' 'pr' 'merge' 1", 'git re"set" --ha\'rd\'', 'git -c core."hooksPath"=/tmp/p commit -m x', "git -c 'core.hooksPath=/tmp/p' commit -m x",
+  'echo "$(g""h pr merge 1)"', "sh -c 'g\"\"h pr merge 1'", "bash -c 'git push origin \"ma\"in'", 'echo \'g""h pr merge 1\' | sh', 'git br""anch -D x', 'git cl"ean" -fd', 'git stash "drop"', 'gh api -X "PUT" repos/o/r/pulls/1/merge', 'n""pm publish',
+  'git "push" origin HEAD:"main"', 'git push origin +"feat/x"', 'git push "--mirror"', 'git update-ref --"stdin"', 'git config core."bare" true', 'HU""SKY=0 git commit -m x', 'git commit -"n" -m x',
+  // fail closed: what can't be read where it could change a guarded command
+  "echo 'unclosed", 'echo "unclosed', 'echo $(unclosed', 'echo `unclosed', 'X=--hard; git reset $X', 'X=main; git push origin $X', 'C="git push -f"; $C', 'export M=merge; gh pr $M 1',
+  'git reset "$X"', 'git reset $X', 'git $SUB -f', '$G push -f', '${G} reset --hard', '$(which git) push -f origin feat/x', 'gh pr $X 1', 'gh $X merge 1', 'gh api $M repos/o/r', 'gh api repos/$R/pulls', 'git branch $F x', 'git clean $F', 'git checkout $X', 'git stash $X',
+  'git -c "$K"=x status', 'git -c core.$K=x status', 'git --config-env=$K status', 'GIT_CONFIG_PARAMETERS="$X" git status', 'GIT_CONFIG_KEY_0=$K GIT_CONFIG_VALUE_0=x GIT_CONFIG_COUNT=1 git status', 'eval $X', 'eval "$CMD"', 'git commit $FLAGS -m x',
+  'git checkout "$(echo .)"', 'git checkout `echo .`', 'echo "$(git reset "$X")"', 'git checkout -b $Y', 'git -c core.hooksPath=$X commit -m x',
+  '$CMD push', '$CMD push origin feat/x', '${G} commit -m x', '$GH pr merge 1', '$GH repo edit', '$X publish', '$A $B', '"$CMD" reset', 'gh workflow $X ci.yml', 'gh repo $X o/r',
+];
+for (const c of sid191More) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 must deny on ${b}: ${c}`);
+const sid191Allow = [
+  'git commit -m "$MSG"', 'git commit -m "fix: $X"', 'git log --format="%H $X"', 'gh pr create --title "$T" --body "$B"', 'gh pr create --fill --base "$BASE"', 'git add "$F"', 'git -C "$DIR" status', 'git diff $BASE...HEAD', 'git log $BASE..HEAD --oneline',
+  'git rev-parse $X', 'gh pr view $N', 'gh api "repos/$R/pulls"', 'gh issue comment 3 --body "$(cat notes.md)"', 'eval "$(ssh-agent -s)"', 'echo "it\'s"', "echo 'a \"b\" c'", 'npm run "test"', 'git push -u origin "feat/x"', "git push -u origin 'feat/x'",
+  'git commit -m "$(cat <<\'EOF\'\nfix: handle "quoted" it\'s (x)\nEOF\n)"', 'gh pr create --title "x" --body "$(cat <<\'EOF\'\n## Summary\n- a "b" (c)\nEOF\n)"', 'cat <<EOF > notes.md\nit\'s "x\nEOF', 'echo $HOME', 'cd "$(git rev-parse --show-toplevel)" && git status',
+  'X=$(git rev-parse HEAD) && echo "$X"', 'for f in *.md; do echo "$f"; done', 'git commit -m "a \\"quoted\\" word"', 'echo \\"hi\\"', 'git status # it\'s fine',
+];
+// The price of failing closed (collateral, measured against main 91c6b08, which allows every one): an expansion in a git argument that a probe
+// shows could be a denied value, and a message that is exactly a flag. Write the value out literally instead.
+const sid191Collateral = ['git checkout $BRANCH', 'git checkout "$BRANCH"', 'git switch "$BRANCH"', 'git restore "$F"', 'git restore --staged "$F"', 'git reset $SHA', 'git reset --soft "$SHA"', 'git merge $B', 'git branch -d $B',
+  'git fetch origin "$BRANCH"', 'git pull origin "$BRANCH"', 'gh api repos/$R/pulls', 'git commit -m "--no-verify"', 'git commit -m "-n"', 'git reset "$(git merge-base HEAD origin/main)"', 'git checkout "$(git rev-parse --abbrev-ref HEAD)"', "echo it's",
+  'git config user.name "$NAME"'] // since #24 a `-e` anywhere in git config opens the editor, and a quoted "$NAME" could be -e;
+for (const c of sid191Collateral) assert.ok(guardDenies(c), `SID-191 collateral (documented, fails closed): ${c}`);
+const sid191Kept = ['git switch -c "$BRANCH"', 'git checkout -b "$BRANCH"', 'git merge --ff-only "origin/$B"', 'git rebase "origin/$BASE"', 'gh pr checkout $N', 'gh run view $RUN --log', 'git cherry-pick "$SHA"', 'git worktree add "../wt-$N" -b "$B"', 'git stash push -m "$MSG"', 'git clone "$URL"', 'gh pr edit $N --add-label "$L"', 'git branch --merged | grep -v main | xargs git branch -d', 'echo $HOME', 'cd "$D" && ls']; // SID-191 re-review: expansion command words moved to sid191LiteralCollateral
+for (const c of sid191Kept) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+for (const c of sid191Allow) assert.ok(!guardDenies(c), `SID-191 must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+// Generated quote-split suite: every word of each guarded command, split in the middle (or wholly wrapped) by each quoting style, stays denied.
+const SPLIT_BODIES = ['git push --force origin feat/x', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard HEAD~1', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear',
+  'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish', 'git -c core.hooksPath=/tmp/p commit -m x', 'git update-ref --stdin', 'git config core.bare true', 'HUSKY=0 git commit -m x', 'git filter-branch --all'];
+const STYLES = [(a, b) => `"${a}"${b}`, (a, b) => `${a}"${b}"`, (a, b) => `'${a}'${b}`, (a, b) => `${a}'${b}'`, (a, b) => `${a}\\${b}`, (a, b) => `${a}""${b}`, (a, b) => `${a}''${b}`, (a, b) => `$'${a}'${b}`, (a, b) => `"${a}"'${b}'`, (a, b) => `"${a}${b}"`, (a, b) => `'${a}${b}'`];
+const splitVariants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  ws.forEach((w, k) => {
+    if (w.length < 2) return;
+    const m = Math.ceil(w.length / 2);
+    for (const st of STYLES) splitVariants.push([...ws.slice(0, k), st(w.slice(0, m), w.slice(m)), ...ws.slice(k + 1)].join(' '));
+  });
+}
+for (const c of splitVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 quote-split variant must deny on ${b}: ${c}`);
+for (const c of splitVariants.filter((_, k) => k % 37 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 quote-split variant must deny through the hook: ${c}`);
+console.log(`SID-191: ${sid191.length} reported + ${sid191More.length} more must-deny, ${sid191Allow.length} must-allow, ${splitVariants.length} generated quote-split variants x 2 branches denied`);
+// SID-191 review (B1-B5 on b3b69f9): the reported forms, then generated variants of every SPLIT_BODIES command. Each was allowed on b3b69f9.
+const sid191Review = [
+  "bash -c 'gh pr '\\''merge'\\'' 1'", "bash -c 'git reset '\\''--hard'\\'' HEAD~1'", "bash -c 'git push origin '\\'''\\''main'", "bash -c 'git commit '\\''--no-verify'\\'' -m x'",
+  "bash -c 'git -c c\"ore.hooksPath=/tmp/h\" commit -m x'", "bash -c 'git -c \\c\\o\\r\\e\\.\\h\\o\\o\\k\\s\\P\\a\\t\\h\\=/tmp/h commit -m x'", // B1
+  'git -c c\\\nore.hooksPath=/tmp/h commit -m x', 'git -c core.hooks\\\nPath=/tmp/h commit -m x', // B2
+  'gh pr {merge,1}', 'git reset {--hard,HEAD~1}', 'git commit {--no-verify,-m} x', 'git {push,origin} main', 'git push origin {main,feat}', 'g{h,} pr merge 1', // B3
+  'touch -- --hard && git reset --har? HEAD~1', 'touch merge; gh pr m?rge 1', 'touch main && git push origin ma?n', 'git push origin m[a]in', 'git reset -[-]hard', 'git commit -[-]no-verify', 'gh api -X P[U]T repos/o/r/pulls/1/merge', 'g?t push origin main', // B4
+  'npm ${X:-publish}', 'npm "$(printf %s publish)"', 'npm `echo publish`', 'pnpm $X', 'yarn ${C}', 'p(){ "$@"; }; p gh pr merge 1', 'p(){ "$@"; }; p git push origin main', 'function p { $@; }; p git reset --hard', "bash -c 'eval \"$1\"' _ 'gh pr merge 1'", "sh -c '$1 $2 $3 $4' _ git push origin main", "bash -c '\"$@\"' _ git reset --hard", // B5
+  "eval 'gh pr '\\''merge'\\'' 1'", "eval 'git -c c\"ore.hooksPath=/tmp/h\" commit -m x'", "env bash -c 'gh pr '\\''merge'\\'' 1'", "timeout 5 sh -c 'git reset '\\''--hard'\\''", "nice -n 5 bash -c 'git -c c\"ore.hooksPath=/tmp/h\" commit'", // B1 through eval and wrappers
+  'git -c "core.hooks\\\nPath=/tmp/p" commit -m x', // a backslash-newline inside double quotes joins the word (pins canon's double-quote escape handling)
+  Array(10).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), // nested past PAYLOAD_DEPTH: fails closed
+];
+for (const c of sid191Review) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review must deny on ${b}: ${c}`);
+for (const c of sid191Review.filter((_, k) => k % 4 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review must deny through the hook: ${c}`);
+const sid191ReviewAllow = ['ls *.md', 'echo {a,b}', "git commit -m 'fix {a,b}'", 'git commit -m "x {a,b} *"', "git log --format='{%H}'", 'gh pr view 1', 'npm test', 'npm run build', 'npm "test"',
+  "bash -c 'npm test'", 'f(){ echo "$@"; }; f a b', "bash -c 'git status'", Array(3).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), 'eval "$(ssh-agent -s)"'];
+for (const c of sid191ReviewAllow) assert.ok(!guardDenies(c), `SID-191 review must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+const sqr = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+const GLOB_WORDS = new Set(['push', 'reset', 'clean', 'branch', 'stash', 'commit', 'checkout', 'config', 'update-ref', 'filter-branch', 'pr', 'api', 'merge', 'publish', 'PUT', 'main', '--force', '--hard', '--no-verify', '--mirror', '--stdin', '-D', 'clear']);
+const reviewVariants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  reviewVariants.push(`bash -c ${sqr(body)}`, `sh -c 'eval "$1"' _ ${sqr(body)}`, `bash -c '"$@"' _ ${body}`, `p(){ "$@"; }; p ${body}`, `bash -c ${sqr(`bash -c ${sqr(body)}`)}`);
+  ws.forEach((w, k) => {
+    const at = (x) => [...ws.slice(0, k), x, ...ws.slice(k + 1)].join(' ');
+    reviewVariants.push(`bash -c ${sqr(at(`'${w}'`))}`, `bash -c ${sqr(at(`\\${w}`))}`, at(`{${w},${w}}`)); // B1 quoting inside a payload, B3 braces
+    if (w.length >= 2) { const m = Math.ceil(w.length / 2); reviewVariants.push(at(`${w.slice(0, m)}\\\n${w.slice(m)}`)); } // B2 continuation inside the word
+    if (GLOB_WORDS.has(w)) reviewVariants.push(at(`${w.slice(0, -1)}?`), at(`${w.slice(0, 1)}[${w[1]}]${w.slice(2)}`), at(`${w.slice(0, 2)}*`)); // B4
+  });
+}
+for (const c of reviewVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review variant must deny on ${b}: ${c}`);
+for (const c of reviewVariants.filter((_, k) => k % 41 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review variant must deny through the hook: ${c}`);
+console.log(`SID-191 review: ${sid191Review.length} must-deny, ${sid191ReviewAllow.length} must-allow, ${reviewVariants.length} generated variants x 2 branches denied`);
+// SID-191 review item 8: a deny bigger than a pipe buffer must still arrive whole (was 65,536 bytes of invalid JSON and exit 0 on main).
+{
+  const slowPipe = (hookFile, ev) => { const f = join(makeScratch('harness-bigdeny-'), 'ev.json'); writeFileSync(f, JSON.stringify(ev)); return execFileSync('sh', ['-c', `node "${join(hooks, hookFile)}" < "${f}" | (sleep 0.3; cat)`], { cwd: ev.cwd, maxBuffer: 1 << 26 }).toString(); };
+  const nest = (n) => Array(n).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'gh pr merge 1');
+  for (const c of [`gh pr merge 1 --body ${'a'.repeat(70000)}`, `git push origin main ${'x'.repeat(200000)}`, nest(13)]) {
+    const out = slowPipe('pre-bash.mjs', bash(c));
+    assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, 'deny', `item 8: a ${c.length}-char command must deny with whole JSON over a slow pipe`);
+    assert.ok(out.length < 8192, `item 8: the deny echoes a capped command (${out.length} bytes)`);
+  }
+  // emit() itself writes everything synchronously, however big
+  const emitOut = execFileSync('sh', ['-c', `node --input-type=module -e 'import { emit } from "${join(hooks, 'lib.mjs')}"; emit(JSON.stringify({ x: "x".repeat(300000) }) + "\\n"); process.exit(0)' | (sleep 0.3; cat)`], { maxBuffer: 1 << 26 }).toString();
+  assert.equal(JSON.parse(emitOut).x.length, 300000, 'item 8: emit() delivers 300 KB whole before exit');
+  console.log('SID-191 item 8: 3 commands over 64 KiB deny with whole JSON; emit() delivers 300 KB');
+}
+
+// SID-191 re-review (5726655377 on f8c5388): literal-only guarded contexts. Every repro of items 1-7 must deny.
+const sid191Rev2 = ["git -c core.hooks{P..P}ath=/tmp/h commit -m x", "git -c core.hooksP?th=h commit -m x", "git -c include.p{a..a}th=/tmp/c status", "git -ccore.hooksP?th=h commit -m x", "git --config-env=core.hooksP?th=V commit -m x", "git -c core.hooks[P]ath=h commit -m x", "gh pr {m..m..1}erge 1", "git reset --{h..h..1}ard HEAD~1", "{g..g}it reset --hard HEAD~1", "g{h..h} pr merge 1", "{n..n}pm publish", "{{gh,},} pr merge 1", "gh pr m[[:alpha:]]rge 1", "git reset --ha[[:lower:]]d HEAD~1", "git push origin ma[[:alpha:]]n", "touch feat:main; git push origin feat:ma?n", "git push origin refs/heads/ma?n", "git push origin feat:refs/heads/m?in", "git clean -[f]dx", "/usr/local/bin/g? pr merge 1", "shopt -s extglob\ngh pr @(merge) 1", "shopt -s nocaseglob\ngh pr MERG? 1", "bash -c 'p(){ \"$@\"; }; p gh pr merge 1'", "bash -c 'shift; \"$@\"' _ x gh pr merge 1", "bash -c '\"${@:2}\"' _ x gh pr merge 1", "bash -c 'IFS=,; $1' _ gh,pr,merge,1", "p(){ \"${@}\"; }; p gh pr merge 1", "p(){ \"${@:1}\"; }; p gh pr merge 1", "set -- gh pr merge 1; \"$@\"", "X=gh,pr,merge,1; IFS=,; $X", "read -r X <<<\"gh pr merge 1\"; $X", "printf -v X 'gh pr merge 1'; $X", "mapfile -t X < <(echo gh); \"${X[@]}\" pr merge 1", "shopt -s expand_aliases\nalias p=\"gh pr merge\"\np 1", "npm --silent ${X:-publish}"];
+for (const c of sid191Rev2) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 re-review must deny on ${b}: ${JSON.stringify(c)}`);
+for (const c of sid191Rev2.filter((_, k) => k % 5 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 re-review must deny through the hook: ${JSON.stringify(c)}`);
+// Accepted over-denials: a glob or brace in a guarded command, positional parameters in a -c script. The message says to spell it out.
+const sid191LiteralCollateral = ['git add *', 'git add *.mjs', 'git add src/*.mjs docs/*.md', 'cargo test -- *', 'git add src/{a,b}.ts', 'npm test -- *', "sh -c 'echo \"$1\"' _ hi", '$EDITOR notes.md', '$PYTHON tool/x.py', '"$SHELL" -lc true', '$CMD status', '$CMD', 'git push origin feat/*', 'git log | while read l; do echo "$l"; done', '"$HOME/bin/tool" status', 'git checkout -b feat/$NAME'];
+for (const c of sid191LiteralCollateral) assert.ok(guardDenies(c), `SID-191 literal-only collateral (documented): ${c}`);
+for (const c of sid191LiteralCollateral.slice(0, 6)) assert.match(newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why ?? '', /spell the paths or words out/, `SID-191: the glob/brace deny says to spell it out: ${c}`);
+const sid191LiteralAllow = ['git log -g HEAD@{1}', "git log --format='{%H}'", 'git log --format={%H}', 'echo {a,b} *', 'ls src/*.ts | wc -l', 'for f in *.md; do git add "$f"; done', '[ -f x ] && git status', '[[ -n "$X" ]] && git status', 'git status # *x* {a,b}', 'eval "$(ssh-agent -s)"',
+  'git commit -m "$(cat <<\'EOF\'\n* bullet {a,b} [x]\nEOF\n)"', 'git commit -m "fix: *.md and {a,b}"', 'f(){ echo "$@"; }; f a b', 'X=1 git status', 'env -u X git status', 'timeout 5 git fetch origin', 'cd "$(git rev-parse --show-toplevel)" && git status', 'read -r X < f; echo "$X"', 'shopt -s nullglob; ls *.md'];
+for (const c of sid191LiteralAllow) assert.ok(!guardDenies(c), `SID-191 literal-only must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+// Generated: each SPLIT_BODIES word built by a step sequence, a POSIX class, a nested brace, and each body after a word-reading line or as a positional -c script.
+const rev2Variants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  ws.forEach((w, k) => {
+    if (!/^[A-Za-z-]/.test(w) || w.length < 2) return;
+    const at = (x) => [...ws.slice(0, k), x, ...ws.slice(k + 1)].join(' ');
+    const ch = w[1];
+    rev2Variants.push(at(`${w[0]}{${ch}..${ch}..1}${w.slice(2)}`), at(`${w[0]}{{${ch},},}${w.slice(2)}`));
+    if (/[a-z]/.test(ch)) rev2Variants.push(at(`${w[0]}[[:lower:]]${w.slice(2)}`), at(`${w[0]}[[:alpha:]]${w.slice(2)}`));
+    if (/[A-Z]/.test(ch)) rev2Variants.push(at(`${w[0]}[[:upper:]]${w.slice(2)}`));
+  });
+  for (const pre of ['shopt -s extglob\n', 'shopt -s nocaseglob; ', 'IFS=,; ', 'set -- x; ', 'read -r Y < /dev/null; ', 'printf -v Y x; ', 'mapfile -t Y < /dev/null; ', 'alias q=true; ', 'eval true; ']) rev2Variants.push(pre + body);
+  rev2Variants.push(`bash -c 'shift; "$@"' _ x ${body}`, `bash -c '"\${@:2}"' _ x ${body}`, `sh -c '$*' _ ${body}`, `bash -c 'p(){ "$@"; }; p ${body.replace(/'/g, '')}'`, `p(){ "\${@}"; }; p ${body}`, `set -- ${body}; "$@"`);
+}
+for (const c of rev2Variants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 re-review variant must deny on ${b}: ${JSON.stringify(c)}`);
+// each literal-only and reread rule on its own (the line-level layers above can hide one of them)
+const litDeny = ['FOO=1 git add src/x?.ts', 'nice -n5 git add src/x?.ts', 'env -u X git add src/{a,b}.ts', '"`printf gh`" pr merge 1', 'bash -c \'git add src/x?.ts\''];
+for (const c of litDeny) assert.ok(newRules.literalReason(c) || newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why?.includes('spell the paths'), `literal-only must deny: ${JSON.stringify(c)}`);
+for (const c of ['FOO=1 git add src/x?.ts', 'nice -n5 git add src/x?.ts', '"`printf gh`" pr merge 1']) assert.ok(newRules.literalReason(c), `literalReason must deny: ${JSON.stringify(c)}`);
+assert.ok(/spell the paths/.test(newRules.segmentReason("bash -c 'git add src/x?.ts'", sid191Cfg, 'feat/x')?.why ?? ''), 'a bash -c payload gets the literal-only argument rule');
+for (const c of ["cat <<'E'\n$X arg\nE", 'cat <<E\n$X arg\nE', "git commit -F - <<'E'\n$X *\nE"]) assert.equal(newRules.literalReason(c), null, `a heredoc body is not a command: ${JSON.stringify(c)}`);
+for (const c of ['IFS=: git status', 'eval x; git status', 'set -- a b; git status', 'set -o noglob; git status', 'printf -v X gh; git status', 'declare -n r=x; git status', 'read -r x; git status', 'mapfile a; git status'])
+  assert.ok(newRules.rereadReason(c), `rereadReason must deny: ${JSON.stringify(c)}`);
+for (const c of ['IFS=: ls', 'eval "$(fnm env)"', 'set -e; ls', 'printf "%s" x', 'read -r x']) assert.equal(newRules.rereadReason(c), null, `rereadReason leaves lines without a guarded word: ${JSON.stringify(c)}`);
+assert.ok(newRules.segmentReason("bash -c 'shift; echo hi' _ x", sid191Cfg, 'feat/x')?.why?.includes('positional'), 'shift in a bash -c payload is positional use');
+console.log(`SID-191 re-review: ${sid191Rev2.length} repros must-deny, ${sid191LiteralCollateral.length} documented collateral, ${sid191LiteralAllow.length} must-allow, ${rev2Variants.length} generated variants x 2 branches denied`);
 
 for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref|--stdin|^git push/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
@@ -290,7 +927,7 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git add -A && git commit -m x &&
 sh(repo, 'echo b > b && git add b && git commit -qm b');
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/x')), null, 'passing gate allows');
 const gitdir = sh(repo, 'git rev-parse --absolute-git-dir');
-assert.ok(existsSync(join(gitdir, 'harness-gate', sh(repo, 'git rev-parse HEAD'))), 'gate records HEAD');
+assert.ok(existsSync(join(gitdir, GATE_RECORD_DIR, sh(repo, 'git rev-parse HEAD'))), 'gate records HEAD');
 assert.match(readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8'), /"kind":"gate".*"result":"pass".*test -f a/);
 assert.equal(run('pre-bash.mjs', bash('gh pr create --fill')), null, 'recorded HEAD skips the gate');
 assert.equal(run('pre-bash.mjs', bash('git status')), null, 'gate ignores non-push commands');
@@ -308,9 +945,10 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin feat/x'))), /pla
 setPolicy({ gate: ['head -c 2000000 /dev/zero | tr "\\0" x'] });
 sh(repo, 'echo e > e && git add e && git commit -qm e');
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/x')), null, 'large gate output is not a failure');
-sh(repo, 'echo "key = AKIAABCDEFGHIJKLMNOP" > s.txt && git add s.txt && git commit -qm s');
+sh(repo, `echo "key = ${TOKEN}" > s.txt && git add s.txt && git commit -qm s`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin feat/x'))), /AWS key/);
-sh(repo, 'git rm -q s.txt && git commit -qm rm');
+// SID-213: the scan now reads every commit in the range, so a later `git rm` no longer clears this branch. Later steps keep pushing feat/x, so the harness's own git drops the commit instead.
+sh(repo, 'git reset -q --hard HEAD~1');
 
 // Fail closed: a malformed policy on origin denies instead of crashing open.
 sh(repo, "git checkout -q main && printf '{bad' > .harness.json && git commit -qam bad && git push -q origin main && git checkout -q feat/x");
@@ -322,7 +960,7 @@ setPolicy({ gate: ['test -f a'] });
 const wt = trackScratch(join(repo, '..', 'wt-' + Date.now()));
 sh(repo, `git worktree add -q -b feat/wt "${wt}" main && cd "${wt}" && echo w > w && git add w && git commit -qm w`);
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/wt', wt)), null, 'gate passes in a worktree');
-assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), 'harness-gate', sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
+assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), GATE_RECORD_DIR, sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
 
 // Stop: silent with nothing ahead; blocks once per state; never loops; silent outside the harness.
 sh(repo, 'git checkout -q main');
@@ -1090,11 +1728,11 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Four baselines (the fourth, 5c959d2, is main before SID-155): main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65) and 086c230 (the base this PR started from). Nothing any of them denies may become allowed, except the allowlist.
+// Five baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65), 086c230 (the base the quote-aware PR started from), 5c959d2 (main when SID-155 started) and 91c6b08 (main before SID-191). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2']]) { // 5c959d2: main when SID-155 started
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2'], ['91c6b08']]) { // 5c959d2: main when SID-155 started; 91c6b08: main before SID-191
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
   const dir = makeScratch('harness-main-');
@@ -1102,7 +1740,7 @@ for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c95
   const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
   baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
 }
-const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
+const newDenies = (c, b) => Boolean(newRules.lineReason(c) || newRules.segmentReason(c, guardCfg, b)); // SID-191: the whole pre-bash rule path (quoting resolved, expansions probed)
 const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
 // Round-7 templates (brace forms, sort -o, uniq -, git log --output, sort --co=). Their quoted payload runs nowhere, so baselines and the guard both allow
 // the bare forms and the gap check asserts nothing for them; ROUND7_SEMI (SID-110) adds `true; <template>` and `<template>; <body>` so they bite.
@@ -1148,6 +1786,16 @@ for (const base of baselines) {
   assert.deepEqual(gaps.filter((r) => r.was).map((r) => `${r.b}: ${r.c}`), [], `a generated body x template that ${base.sha} denied must stay denied`);
   console.log(`regression vs ${base.sha}: ${everything.length} commands x 2 branches, main denies ${rows.filter((r) => r.was).length}, new allows ${lost.length} (all allowlisted: ${[...new Set(lost.map((r) => r.c))].length} of ${ALLOWLIST.size} entries)`);
   console.log(`generated ${generated.length} combinations x 2 branches vs ${base.sha}: new denies all but ${gaps.length} that main also allows`);
+}
+// SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
+{
+  const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
+  const ours = new Set([...r32Ours, ...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral]);
+  const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))).map((c) => c.split(repo).join('<REPO>')).map((c) => (c.length > 500 ? `sha256:${createHash('sha256').update(c).digest('hex')}:${c.length}` : c)))].sort(); // the scratch repo path differs per run; entries over 500 chars are pinned by hash and length
+  // Exact list (scripts/sid191-collateral.json): a command that becomes newly denied, or stops being, fails here and the file is edited in review.
+  const pinned = JSON.parse(readFileSync(join(here, 'sid191-collateral.json'), 'utf8'));
+  assert.deepEqual(fresh, [...pinned].sort(), `SID-191 pinned collateral vs 91c6b08 changed (${fresh.length} now, ${pinned.length} pinned); review the diff and update scripts/sid191-collateral.json`);
+  console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied, all pinned in scripts/sid191-collateral.json`);
 }
 for (const [c, why] of ALLOWLIST) {
   assert.ok(everything.includes(c), `stale ALLOWLIST entry (not in the corpus): ${c} (${why})`);
