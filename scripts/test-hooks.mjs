@@ -930,19 +930,28 @@ for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c95
 }
 const newDenies = (c, b) => Boolean(newRules.envReason(c) || newSegments(c).some((s) => newRules.reason(s, guardCfg, b)));
 const BODIES = ['git push -f origin main', 'git push origin main', 'git push origin HEAD:main', 'git push --mirror', 'git reset --hard', 'git branch -D x', 'git clean -fdx', 'git checkout .', 'git commit --no-verify -m x', 'git stash clear', 'gh pr merge 1', 'gh api -X PUT repos/o/r/pulls/1/merge', 'npm publish'];
+// Round-7 templates (brace forms, sort -o, uniq -, git log --output, sort --co=). Their quoted payload runs nowhere, so baselines and the guard both allow
+// the bare forms and the gap check asserts nothing for them; ROUND7_SEMI (SID-110) adds `true; <template>` and `<template>; <body>` so they bite.
+const ROUND7 = [
+  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
+  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
+  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`
+];
 const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`, (x) => `bash -c "true && ${x}"`, (x) => `bash -c -- 'true; ${x}'`, (x) => `sh -c '${x}'`, (x) => `setsid sh -c 'true; ${x}'`, (x) => `busybox sh -c 'true; ${x}'`, (x) => `fish -c 'true; ${x}'`,
   (x) => `docker exec c sh -c 'true; ${x}'`, (x) => `tmux new 'true; ${x}'`, (x) => `perl -e 'system("true; ${x}")'`, (x) => `parallel ::: 'true; ${x}'`, (x) => `xargs sh -c 'true; ${x}'`, (x) => `ssh host 'cd x; ${x}'`, (x) => `nohup sh -c 'true; ${x}'`,
   (x) => String.raw`echo $'\''; ${x}`, (x) => String.raw`echo $'a\'b' && ${x}`, (x) => String.raw`echo $'\''; ${x}; echo \'`,
   (x) => L('cat <<EOF', "it's", 'EOF', x), (x) => L('cat > f <<EOF', "don't", 'EOF', x), (x) => L("cat <<'EOF'", "it's", 'EOF', x), (x) => L('cat <<-EOF', "\tit's", '\tEOF', x), (x) => L('bash <<E', x, 'E'), (x) => L('cat <<EOF | sh', x, 'EOF'), (x) => L('cat <<EOF', `$(${x})`, 'EOF'),
   (x) => x.replace(/ (\S+)$/, ' \\\n $1'), (x) => `echo "true; ${x}" | sh`, (x) => `echo 'true; ${x}' > f.sh && bash f.sh`, (x) => `git -c core.pager='true; ${x}' log`, (x) => `GIT_PAGER='true; ${x}' git log`, (x) => `echo "$(${x})"`, (x) => `${x} 2>&1`, (x) => `2>&1 ${x}`,
   (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`,
-  (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
-  (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
-  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`,
+  ...ROUND7,
   (x) => `echo '${x}' | sh`, (x) => String.raw`printf '${x}\n' | bash`, (x) => `echo '${x}' | tee >(sh)`, (x) => `sh <(echo '${x}')`, (x) => `echo '${x}' | xargs -I{} sh -c {}`, (x) => `echo ${x} | sh`, (x) => `echo '${x}' > >(sh)`,
   (x) => `source <(echo '${x}')`, (x) => `. <(echo '${x}')`, (x) => `echo '${x}' | source /dev/stdin`, (x) => `echo '${x}' | xargs -I{} sh -c 'eval {}'`, (x) => `echo '${x}' | xargs sh -c 'eval "$@"' _`,
   (x) => `sh -c "$(echo '${x}')"`, (x) => `bash -c "\`printf '${x}'\`"`, (x) => `eval "$(echo '${x}')"`, (x) => `eval \`echo ${x}\``];
+const ROUND7_SEMI = ROUND7.flatMap((t) => [(x) => `true; ${t(x)}`, (x) => `${t(x)}; ${x}`]);
+TEMPLATES.push(...ROUND7_SEMI);
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
+// SID-110: `<template>; <body>` runs the body as its own command, so the current guard must deny every one, on a feature and a protected branch.
+for (const t of ROUND7_SEMI.filter((_, k) => k % 2)) for (const x of BODIES) for (const b of ['feat/x', 'main']) assert.ok(newDenies(t(x), b), `SID-110 ; variant must be denied on ${b}: ${t(x)}`);
 const everything = [...new Set([...corpus, ...generated])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
 const ALLOWLIST = new Map([
