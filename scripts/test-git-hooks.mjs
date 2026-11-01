@@ -3,18 +3,17 @@
 // Plain node and git against temp repos with a local bare origin; nothing touches this checkout's own git config.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DISPATCHER, stub } from './hooks.mjs';
+import { scratch } from './scratch.mjs';
 import { guardVerdict, pushCommand } from '../hooks/harness/git-hook.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hooksCli = join(here, 'hooks.mjs');
 const preBash = join(here, '..', 'hooks', 'harness', 'pre-bash.mjs');
-const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'sflow-test-git-hooks-')));
-process.on('exit', () => rmSync(tmp, { recursive: true, force: true }));
+const tmp = realpathSync(scratch('sflow-test-git-hooks-')); // removed on every exit path (scripts/scratch.mjs, SID-55)
 // A clean environment for git: no inherited GIT_* (the tests may run inside a git hook), a private HOME, no system or global config.
 const ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))), HOME: tmp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const sh = (cwd, c, env = {}) => spawnSync('sh', ['-c', c], { cwd, env: { ...ENV, ...env }, encoding: 'utf8' });
@@ -59,7 +58,7 @@ t('k2: install sets core.hooksPath to executable stubs in the common git dir, an
   const before = statSync(join(dir, 'pre-push')).mtimeMs;
   const again = cli('install', '--repo', d); assert.equal(again.status, 0); assert.match(again.stdout, /^current /);
   assert.equal(statSync(join(dir, 'pre-push')).mtimeMs, before, 'a second install rewrites nothing');
-  assert.equal(sh(d, 'git config --get sflow.previousHooksPath').status, 1, 'nothing to save when core.hooksPath was unset');
+  assert.ok(!existsSync(join(dir, 'previous-hooks-path')), 'nothing to save when core.hooksPath was unset');
   assert.match(cli('check', '--repo', d).stdout, /^ok .*pre-commit, pre-push/);
   writeFileSync(join(dir, 'pre-push'), '#!/bin/sh\nexit 0\n');
   const stale = cli('check', '--repo', d); assert.equal(stale.status, 1); assert.match(stale.stdout, /pre-push: stub is stale or edited/);
@@ -89,8 +88,10 @@ t('k4: a previous core.hooksPath (husky style) is saved, still runs first, and i
   mkdirSync(join(d, 'hk')); writeFileSync(join(d, 'hk', 'pre-push'), '#!/bin/sh\necho husky-ran >&2\nexit ${HK_FAIL:-0}\n'); chmodSync(join(d, 'hk', 'pre-push'), 0o755);
   ok(d, 'git config core.hooksPath hk');
   const r = cli('install', '--repo', d); assert.equal(r.status, 0); assert.match(r.stdout, /saved .*previous core\.hooksPath hk/);
-  assert.equal(ok(d, 'git config --get sflow.previousHooksPath'), 'hk');
-  assert.equal(cli('install', '--repo', d).status, 0); assert.equal(ok(d, 'git config --get sflow.previousHooksPath'), 'hk', 'a rerun keeps the saved path');
+  const saved = join(d, '.git', 'sflow-hooks', 'previous-hooks-path');
+  assert.equal(readFileSync(saved, 'utf8'), `${join(d, 'hk')}\n`, 'saved as an absolute path in the stub dir, not in git config');
+  assert.equal(sh(d, 'git config --get sflow.previousHooksPath').status, 1);
+  assert.equal(cli('install', '--repo', d).status, 0); assert.equal(readFileSync(saved, 'utf8'), `${join(d, 'hk')}\n`, 'a rerun keeps the saved path');
   const p = sh(d, 'echo b > b && git add b && git commit -qm b && git push origin feat/x');
   assert.equal(p.status, 0, p.stderr); assert.match(p.stderr, /husky-ran/); assert.match(p.stderr, /sflow gate ok [0-9a-f]{12}/);
   ok(d, 'echo c > c && git add c && git commit -qm c');
@@ -148,6 +149,9 @@ t('k6: the gate runs at push: a failing gate or a committed secret refuses; a pu
   ok(o, 'git branch other && echo b > b && git add b && git commit -qm b');
   ok(o, 'git checkout -q other && echo c > c && git add c && git commit -qm c && git checkout -q feat/x');
   const r = sh(o, 'git push origin other'); assert.notEqual(r.status, 0); assert.match(r.stderr, /the gate checks HEAD/);
+  for (const c of ['git push origin feat/x other', 'git push --all origin']) { // README: multi-branch pushes and --all are refused while a gate is in force
+    const m = sh(o, c); assert.notEqual(m.status, 0, c); assert.match(m.stderr, /the gate checks HEAD/, c); assert.equal(remoteSha(o, 'other'), null, c);
+  }
 });
 
 t('k7: no policy on origin: pushes go through with "sflow gate skipped: <reason>"; the guard still refuses protected pushes', () => {
@@ -211,6 +215,33 @@ t('k11: sflow runs the guard and gate without the caller\'s GIT_* env, and fails
     assert.match(guardVerdict(d, 'git status', f) ?? 'allowed', want);
   }
   assert.equal(guardVerdict(d, 'git status'), null); assert.match(guardVerdict(d, 'git push origin main'), /protected/);
+});
+
+t('k12: the chained hooks dir can\'t be redirected by an agent: git config is ignored, the guard denies the routes, and a saved path outside the repo fails closed', () => {
+  const evil = join(tmp, 'evil'); mkdirSync(evil, { recursive: true });
+  writeFileSync(join(evil, 'pre-commit'), '#!/bin/sh\necho EVIL-RAN >&2\n'); chmodSync(join(evil, 'pre-commit'), 0o755);
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  for (const c of ['git config sflow.previousHooksPath ' + evil, 'git config --remove-section core', 'git config --edit', 'git config --unset-all core.hookspath',
+    `printf '${evil}\\n' > .git/sflow-hooks/previous-hooks-path`, `echo ${evil} > .git/sflow-hooks/previous-hooks-path`, 'rm .git/sflow-hooks/previous-hooks-path'])
+    assert.equal(claudeDenies(d, c), true, `the Claude guard denies: ${c}`);
+  ok(d, `git config sflow.previousHooksPath ${evil}`); // as if typed around the guard: the hook never reads it
+  const r = sh(d, 'echo b > b && git add b && git commit -qm b'); assert.equal(r.status, 0, r.stderr); assert.doesNotMatch(r.stderr, /EVIL-RAN/);
+  const saved = join(d, '.git', 'sflow-hooks', 'previous-hooks-path');
+  for (const [text, want] of [[`${evil}\n`, /outside the git dir and the working tree/], ['hk\n', /holds a relative path/], [`${join(d, '.git', 'sflow-hooks')}\n`, /sflow's own stub dir/]]) {
+    writeFileSync(saved, text);
+    const f = sh(d, `echo ${text.length} >> b && git add b && git commit -qm x`); assert.notEqual(f.status, 0, text); assert.match(f.stderr, want); assert.doesNotMatch(f.stderr, /EVIL-RAN/);
+    assert.equal(cli('check', '--repo', d).status, 1, `check reports the bad saved path: ${text}`);
+  }
+  symlinkSync(evil, join(d, 'lnk')); writeFileSync(saved, `${join(d, 'lnk')}\n`); // inside the working tree by name, outside once resolved
+  const l = sh(d, 'echo l >> b && git add b && git commit -qm l'); assert.notEqual(l.status, 0); assert.match(l.stderr, /outside the git dir and the working tree/); assert.doesNotMatch(l.stderr, /EVIL-RAN/);
+  ok(d, `rm lnk ${saved}`); assert.equal(cli('check', '--repo', d).status, 0, 'no saved path: back to .git/hooks');
+  const o = repo(); ok(o, `git config core.hooksPath ${evil}`);
+  const i = cli('install', '--repo', o); assert.equal(i.status, 1); assert.match(i.stdout, /REFUSED .*can't be chained/);
+  assert.equal(ok(o, 'git config --get core.hooksPath'), evil, 'a refused install changes nothing'); assert.ok(!existsSync(join(o, '.git', 'sflow-hooks')));
+  const g = repo(); assert.equal(cli('install', '--repo', g).status, 0);
+  ok(g, 'git config --remove-section core'); // as a human could: check says so, and a fresh install repairs it
+  assert.match(cli('check', '--repo', g).stdout, /NOT INSTALLED/);
 });
 
 console.log('git hooks tests ok');

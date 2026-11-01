@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // Git hooks outside Claude (SID-147): run the harness guard and gate on every shell commit and push, not only inside Claude Code.
 // A HUMAN runs this once per repo, outside Claude: agents are denied `git config core.hooksPath` by the guard, on purpose.
-//   install [--repo <dir>]...  write stubs to <git common dir>/sflow-hooks/, save any previous core.hooksPath in sflow.previousHooksPath,
-//                              and point core.hooksPath at the stubs. Idempotent; existing repo hooks are kept and still run first.
+//   install [--repo <dir>]...  write stubs to <git common dir>/sflow-hooks/, save any previous core.hooksPath (absolute) in
+//                              <git common dir>/sflow-hooks/previous-hooks-path, and point core.hooksPath at the stubs. Idempotent; existing repo hooks
+//                              are kept and still run first. A previous core.hooksPath outside the git dir and the working tree is refused (nothing changes).
 //   check   [--repo <dir>]...  exit 1 unless core.hooksPath points at current, executable stubs for this sflow checkout
 // <dir> defaults to the current directory. The stubs call <this sflow>/hooks/harness/git-hook.mjs and fail closed if it is gone.
 import { execFileSync } from 'node:child_process';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PREV_FILE, prevProblem, previousHooksDir } from '../hooks/harness/git-hook.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const DISPATCHER = join(root, 'hooks', 'harness', 'git-hook.mjs');
@@ -34,26 +36,33 @@ export function paths(repo) {
 }
 const same = (a, b) => { const r = (p) => { try { return realpathSync(p); } catch { return resolve(p); } }; return r(a) === r(b); };
 const isExec = (p) => { try { accessSync(p, constants.X_OK); return statSync(p).isFile(); } catch { return false; } };
-const prevDir = (top, common, saved) => (saved ? (isAbsolute(saved) ? saved : resolve(top, saved)) : join(common, 'hooks'));
+// core.hooksPath as git reads it: `~/` is the home dir, a relative path is relative to the working tree.
+const absHooks = (top, v) => (isAbsolute(v) ? v : /^~\//.test(v) ? join(process.env.HOME ?? '~', v.slice(2)) : resolve(top, v));
 // The names to stub: sflow's own, plus every executable hook in the previous hooks dir (so moving core.hooksPath turns none of them off).
 const wanted = (prev) => [...new Set([...SFLOW_HOOKS, ...(existsSync(prev) ? readdirSync(prev).filter((f) => !f.endsWith('.sample') && isExec(join(prev, f))) : [])])].sort();
 
 export function install(repo, { log = console.log } = {}) {
   const { top, common, dir } = paths(repo);
   const current = tryGit(top, 'config', '--local', '--get', 'core.hooksPath');
-  if (current && !same(isAbsolute(current) ? current : resolve(top, current), dir)) {
-    git(top, 'config', '--local', 'sflow.previousHooksPath', current);
-    log(`saved     previous core.hooksPath ${current} (it still runs first)`);
+  const moving = current && !same(absHooks(top, current), dir);
+  if (moving) { // checked before anything is written, so a refusal changes nothing
+    const why = prevProblem(absHooks(top, current), common, [top]);
+    if (why) { log(`REFUSED   ${top}: the current core.hooksPath ${current} can't be chained (${why}); move those hooks into the repo or unset core.hooksPath, then rerun`); return false; }
   }
-  const prev = prevDir(top, common, tryGit(top, 'config', '--local', '--get', 'sflow.previousHooksPath'));
   mkdirSync(dir, { recursive: true });
+  if (moving) {
+    const f = join(dir, PREV_FILE), text = `${absHooks(top, current)}\n`;
+    if (!existsSync(f) || readFileSync(f, 'utf8') !== text) writeFileSync(f, text, { mode: 0o644 });
+    log(`saved     previous core.hooksPath ${current} in ${f} (it still runs first)`);
+  }
+  const prev = previousHooksDir(common, [top]);
   let changed = 0;
   for (const name of wanted(prev)) {
     const p = join(dir, name), text = stub(name);
     if (existsSync(p) && readFileSync(p, 'utf8') === text && isExec(p)) continue;
     writeFileSync(p, text); chmodSync(p, 0o755); changed++;
   }
-  if (!current || !same(isAbsolute(current) ? current : resolve(top, current), dir)) { git(top, 'config', '--local', 'core.hooksPath', dir); changed++; }
+  if (!current || moving) { git(top, 'config', '--local', 'core.hooksPath', dir); changed++; }
   log(`${changed ? 'installed' : 'current  '} ${top} (core.hooksPath ${dir})`);
   return check(repo, { log: () => {} });
 }
@@ -62,10 +71,10 @@ export function check(repo, { log = console.log } = {}) {
   let p; try { p = paths(repo); } catch { log(`NOT A REPO ${resolve(repo)}`); return false; }
   const { top, common, dir } = p;
   const current = tryGit(top, 'config', '--get', 'core.hooksPath');
-  if (!current || !same(isAbsolute(current) ? current : resolve(top, current), dir)) { log(`NOT INSTALLED ${top} (core.hooksPath is ${current ?? 'unset'}; a human runs: npm run hooks -- install --repo ${top})`); return false; }
+  if (!current || !same(absHooks(top, current), dir)) { log(`NOT INSTALLED ${top} (core.hooksPath is ${current ?? 'unset'}; a human runs: npm run hooks -- install --repo ${top})`); return false; }
   const problems = [];
   if (!existsSync(DISPATCHER)) problems.push(`${DISPATCHER} is missing`);
-  const prev = prevDir(top, common, tryGit(top, 'config', '--get', 'sflow.previousHooksPath'));
+  let prev; try { prev = previousHooksDir(common, [top]); } catch (e) { problems.push(e.message); prev = join(common, 'hooks'); }
   for (const name of wanted(prev)) {
     const f = join(dir, name);
     if (!existsSync(f)) problems.push(`${name}: stub missing`);

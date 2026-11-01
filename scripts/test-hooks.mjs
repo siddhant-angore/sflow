@@ -221,6 +221,16 @@ for (const c of ['cat ~/.gitconfig', 'git config --global --get user.name', 'ech
 for (const c of ["printf 'ok' > notes.md", 'echo x | tee a.txt', 'cp a b', 'mv a b', 'ln -s a b', 'install a b', 'dd of=f if=g', 'truncate -s 0 f', "sed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", 'echo "$(echo x > f)"', 'echo `echo x > f`']) assert.ok(writesFile(c), `writesFile: ${c}`);
 for (const c of ['echo "a; b"', 'echo x > /dev/null', 'echo x 2>&1', 'echo x >&2', 'echo x | tee', 'echo x | tee /dev/null', 'echo x > /dev/stderr', "cat <<'EOF'\nx\nEOF", 'cat f', 'sed -n 1p f', 'git log | grep x', 'cat ~/.gitconfig']) assert.ok(!writesFile(c), `writesFile false: ${c}`);
 
+// SID-147 review (5725928282): config changes that turn off the git hooks outside Claude, or point their chaining somewhere an agent chose, are denied.
+const HOOKS_CFG = /turns off the git hooks that run outside Claude|`git config --edit` can change any key/;
+for (const c of ['git config --remove-section core', 'git config --rename-section core x', 'git config --rename-section x core', 'git config remove-section core', 'git config rename-section core x',
+  'git config --local --remove-section CORE', 'git config -f .git/config --remove-section core', 'git -C . config --remove-section core', 'git -c user.name=x config --remove-section "core"',
+  'git config --unset-all core.hookspath', 'git config core.HOOKSPATH /tmp/x', 'git config unset core.HooksPath', 'git config -e', 'git config --edit', 'git config --global --edit', 'git config edit',
+  'git config sflow.previousHooksPath /tmp/evil', 'git config --add sflow.x y', 'git config set sflow.previousHooksPath /tmp/evil', 'git config --unset sflow.previousHooksPath', 'git config --remove-section sflow',
+  'git config --local --rename-section sflow x', 'true && git config SFLOW.previousHooksPath /tmp/evil'])
+  assert.match(reasonOf(run('pre-bash.mjs', bash(c))), HOOKS_CFG, `SID-147 must deny: ${c} (got: ${reasonOf(run('pre-bash.mjs', bash(c))) || 'allowed'})`);
+for (const c of ['git config --get core.hookspath', 'git config --get sflow.previousHooksPath', 'git config --remove-section alias', 'git config --rename-section alias.x alias.y', 'git config user.name x', 'git config --list'])
+  assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-147 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 // SID-155: deleting, moving or un-executing git hooks (.git/hooks, a submodule's or linked worktree's, SID-147's .git/sflow-hooks, .husky) is denied; globs that could match fail closed. Reads and ordinary removals stay allowed.
 const UNHOOK = /deleting or moving git hooks turns off the guards that run outside Claude/;
 const unhookDeny = ['rm -rf .git/hooks', 'rm -f .git/hooks/pre-push', 'mv .git/hooks /tmp/x', 'rm -rf .git/sflow-hooks', 'rm .git/sflow-hooks/pre-push', 'rm -rf .husky', 'rm -rf .husky/', 'rm .husky/pre-commit',

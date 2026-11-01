@@ -1,11 +1,13 @@
 // Git hooks outside Claude (SID-147). The stubs `npm run hooks -- install` writes into <git common dir>/sflow-hooks/ (core.hooksPath) run
 //   node <sflow>/hooks/harness/git-hook.mjs <hook name> [git's hook arguments]
-// 1. The repo's own hook of that name runs first: the core.hooksPath saved at install (git config sflow.previousHooksPath), else <git common dir>/hooks.
+// 1. The repo's own hook of that name runs first: the core.hooksPath saved at install in <git common dir>/sflow-hooks/previous-hooks-path, else <git common dir>/hooks.
+//    Not a git config value: an agent may run `git config`, but the guard denies every shell write into .git/sflow-hooks (SID-155). The saved path is checked again at
+//    run time and must resolve (symlinks followed) inside the git common dir or the repository's working tree, never to the stubs themselves; otherwise the hook fails closed.
 // 2. pre-commit and pre-push then run sflow's checks through the SAME guard and gate code as the Claude hook (pre-bash.mjs, lib.mjs): no second implementation.
 // Either failing fails the hook. No environment variable turns any of this off, and any internal error fails closed (exit 1).
 import { execFileSync, spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config, gitDir, NO_REPLACE_ENV, secretsInDiff } from './lib.mjs';
 
@@ -20,14 +22,30 @@ const fail = (msg) => { process.stderr.write(`sflow ${process.argv[2] ?? 'git'} 
 const gitOut = (cwd, ...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: { ...cleanEnv(), GIT_NO_REPLACE_OBJECTS: '1' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, '');
 const tryGit = (cwd, ...args) => { try { return gitOut(cwd, ...args); } catch { return null; } };
 
+export const PREV_FILE = 'previous-hooks-path';
+const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+const inside = (p, dir) => { const r = relative(real(dir), real(p)); return r === '' || (!!r && !r.startsWith('..') && !isAbsolute(r)); };
+// Why `dir` may not be chained as the previous hooks dir, or null. `common` is the git common dir, `tops` the working trees it may live in.
+export function prevProblem(dir, common, tops) {
+  if (inside(dir, join(common, 'sflow-hooks'))) return `${dir} is sflow's own stub dir`;
+  const roots = [common, ...tops, ...(basename(common) === '.git' ? [dirname(common)] : [])];
+  return roots.some((r) => inside(dir, r)) ? null : `${dir} resolves to ${real(dir)}, outside the git dir and the working tree`;
+}
+// The previous hooks dir: the path saved at install, else <common>/hooks. Throws (the hook fails closed) when the saved path fails prevProblem.
+export function previousHooksDir(common, tops) {
+  const f = join(common, 'sflow-hooks', PREV_FILE);
+  if (!existsSync(f)) return join(common, 'hooks');
+  const dir = readFileSync(f, 'utf8').replace(/\n$/, '');
+  if (!isAbsolute(dir)) throw new Error(`${f} holds a relative path (${dir}); a human reruns \`npm run hooks -- install\``);
+  const why = prevProblem(dir, common, tops);
+  if (why) throw new Error(`${f}: ${why}; a human reruns \`npm run hooks -- install\``);
+  return dir;
+}
+
 // The repo's own hook for `name`, or null. Never one of sflow's own stubs (that would loop).
 export function chainedHook(root, name) {
   const common = resolve(root, gitOut(root, 'rev-parse', '--git-common-dir'));
-  const mine = join(common, 'sflow-hooks');
-  const saved = tryGit(root, 'config', '--get', 'sflow.previousHooksPath');
-  const dir = saved ? (isAbsolute(saved) ? saved : resolve(root, saved.replace(/^~(?=\/)/, process.env.HOME ?? '~'))) : join(common, 'hooks');
-  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
-  if (real(dir) === real(mine)) return null;
+  const dir = previousHooksDir(common, [root]);
   const p = join(dir, name);
   try { accessSync(p, constants.X_OK); } catch { return null; }
   return existsSync(p) && !isDirectory(p) ? p : null;
