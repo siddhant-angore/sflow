@@ -3,12 +3,13 @@
 // Plain node and git against temp repos with a local bare origin; nothing touches this checkout's own git config.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DISPATCHER, stub } from './hooks.mjs';
 import { scratch } from './scratch.mjs';
 import { guardVerdict, pushCommand } from '../hooks/harness/git-hook.mjs';
+import { GATE_RECORD_DIR } from '../hooks/harness/lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hooksCli = join(here, 'hooks.mjs');
@@ -16,9 +17,10 @@ const preBash = join(here, '..', 'hooks', 'harness', 'pre-bash.mjs');
 const tmp = realpathSync(scratch('sflow-test-git-hooks-')); // removed on every exit path (scripts/scratch.mjs, SID-55)
 // A clean environment for git: no inherited GIT_* (the tests may run inside a git hook), a private HOME, no system or global config.
 const ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))), HOME: tmp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
-const sh = (cwd, c, env = {}) => spawnSync('sh', ['-c', c], { cwd, env: { ...ENV, ...env }, encoding: 'utf8' });
+const BOUND = 120_000;
+const sh = (cwd, c, env = {}) => spawnSync('sh', ['-c', c], { cwd, env: { ...ENV, ...env }, encoding: 'utf8', timeout: BOUND });
 const ok = (cwd, c, env) => { const r = sh(cwd, c, env); assert.equal(r.status, 0, `${c}\n${r.stdout}${r.stderr}`); return r.stdout.trim(); };
-const cli = (...args) => spawnSync(process.execPath, [hooksCli, ...args], { env: ENV, encoding: 'utf8' });
+const cli = (...args) => spawnSync(process.execPath, [hooksCli, ...args], { env: ENV, encoding: 'utf8', timeout: BOUND });
 const secret = () => `AKIA${'Q'.repeat(16)}`; // built at run time, so this file holds no secret-shaped text
 let n = 0;
 // A repo whose origin (a local bare repo) has main, optionally with a committed .harness.json; feat/x checked out.
@@ -242,6 +244,157 @@ t('k12: the chained hooks dir can\'t be redirected by an agent: git config is ig
   const g = repo(); assert.equal(cli('install', '--repo', g).status, 0);
   ok(g, 'git config --remove-section core'); // as a human could: check says so, and a fresh install repairs it
   assert.match(cli('check', '--repo', g).stdout, /NOT INSTALLED/);
+});
+
+t('k13: SID-213: a real push is refused when a commit in the range holds a removed secret or the scan fails; a first push and a later one scan from the same base', () => {
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git -c core.hooksPath=/dev/null commit -qm leak && git rm -q cfg.txt && git -c core.hooksPath=/dev/null commit -qm unleak');
+  const first = sh(d, 'git push origin feat/x');
+  assert.notEqual(first.status, 0); assert.match(first.stderr, /a commit in the pushed range adds text that looks like a secret \(AWS key\)/); assert.equal(remoteSha(d, 'feat/x'), null);
+  ok(d, 'git reset -q --hard HEAD~2 && echo b > b && git add b && git commit -qm b');
+  const clean = sh(d, 'git push origin feat/x'); assert.equal(clean.status, 0, clean.stderr);
+  const tip = remoteSha(d, 'feat/x');
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git -c core.hooksPath=/dev/null commit -qm leak && git rm -q cfg.txt && git -c core.hooksPath=/dev/null commit -qm unleak');
+  const later = sh(d, 'git push origin feat/x');
+  assert.notEqual(later.status, 0, 'a later push (before is not zeros) is refused too'); assert.match(later.stderr, /a commit in the pushed range/); assert.equal(remoteSha(d, 'feat/x'), tip);
+  ok(d, 'git reset -q --hard HEAD~2 && echo c > c && git add c && git commit -qm c');
+  const realGit = ok(d, 'command -v git'), bin = join(tmp, `shim${n}`); mkdirSync(bin);
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = log ] && { echo "fatal: shim refused log" >&2; exit 128; }; done\nexec "${realGit}" "$@"\n`); chmodSync(join(bin, 'git'), 0o755);
+  // The dispatcher directly: git puts its exec-path first on a hook's PATH, so a shim never runs under a real `git push`.
+  const broken = spawnSync(process.execPath, [DISPATCHER, 'pre-push', 'origin'], { cwd: d, encoding: 'utf8', env: { ...ENV, PATH: `${bin}:${process.env.PATH}` }, input: `refs/heads/feat/x ${ok(d, 'git rev-parse HEAD')} refs/heads/feat/x ${tip}\n` });
+  assert.notEqual(broken.status, 0); assert.match(broken.stderr, /could not read the diff for the secret scan \(failing closed\): fatal: shim refused log/);
+});
+
+const dispatchPrePush = (d, dispatcher = DISPATCHER) => spawnSync(process.execPath, [dispatcher, 'pre-push', 'origin'], { cwd: d, encoding: 'utf8', env: ENV, timeout: BOUND, input: `refs/heads/feat/x ${ok(d, 'git rev-parse HEAD')} refs/heads/feat/x ${'0'.repeat(40)}\n` });
+const oldRecord = (d) => { const dir = join(d, '.git', 'harness-gate'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, ok(d, 'git rev-parse HEAD')), 'x\n'); }; // 0.5.0's folder
+
+t('k14: SID-213: grafts neither hide a token commit from a real push nor make a rewrite look like a fast-forward', () => {
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git -c core.hooksPath=/dev/null commit -qm t1 && git -c core.hooksPath=/dev/null commit -q --allow-empty -m t2 && git rm -q cfg.txt && git -c core.hooksPath=/dev/null commit -qm rm');
+  const t1 = ok(d, 'git rev-parse HEAD~2'), t2 = ok(d, 'git rev-parse HEAD~1');
+  writeFileSync(join(d, '.git', 'info', 'grafts'), `${t1} ${t2}\n${t2} ${t1}\n`);
+  const p = sh(d, 'git push origin feat/x');
+  assert.notEqual(p.status, 0, 'the push is refused'); assert.match(p.stderr, /a commit in the pushed range adds text that looks like a secret \(AWS key\)/); assert.equal(remoteSha(d, 'feat/x'), null);
+
+  const n = repo();
+  assert.equal(cli('install', '--repo', n).status, 0);
+  ok(n, 'echo 1 > one && git add one && git commit -qm one && git push -q origin feat/x');
+  const was = remoteSha(n, 'feat/x');
+  ok(n, 'git reset -q --hard HEAD~1 && echo 2 > two && git add two && git commit -qm two');
+  const local = ok(n, 'git rev-parse HEAD');
+  writeFileSync(join(n, '.git', 'info', 'grafts'), `${local} ${was}\n`);
+  assert.equal(sh(n, `git merge-base --is-ancestor ${was} ${local}`).status, 0, 'the graft makes the rewrite look like a fast-forward to plain git');
+  assert.equal(pushCommand(n, 'origin', ['refs/heads/feat/x', local, 'refs/heads/feat/x', was]), 'git push --force origin feat/x:feat/x', 'pushCommand reads the real parents');
+  const f = sh(n, 'git push origin feat/x');
+  assert.notEqual(f.status, 0, 'the disguised force push is refused'); assert.match(f.stderr, /force/i); assert.equal(remoteSha(n, 'feat/x'), was, 'origin unchanged');
+});
+
+t('k15: SID-213: pre-commit refuses a staged token whatever hides it from git diff', () => {
+  const silent = join(tmp, 'silent-conv'); writeFileSync(silent, '#!/bin/sh\necho clean\n'); chmodSync(silent, 0o755);
+  const attrs = join(tmp, 'attrs-diff'); writeFileSync(attrs, '* -diff\n');
+  const attrsBin = join(tmp, 'attrs-bin'); writeFileSync(attrsBin, '* diff=bin\n');
+  const vectors = {
+    'textconv driver': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt diff=hide\n'); ok(d, `git config diff.hide.textconv "${silent}" && git add .gitattributes && git commit -qm attrs`); },
+    'external diff': (d) => ok(d, `git config diff.external "${silent}"`),
+    'color.ui=always': (d) => ok(d, 'git config color.ui always'),
+    'committed -diff': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); ok(d, 'git add .gitattributes && git commit -qm attrs'); },
+    'committed binary': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt binary\n'); ok(d, 'git add .gitattributes && git commit -qm attrs'); },
+    '.git/info/attributes -diff': (d) => writeFileSync(join(d, '.git', 'info', 'attributes'), '* -diff\n'),
+    'core.attributesFile -diff': (d) => ok(d, `git config core.attributesFile "${attrs}"`),
+    'core.attributesFile diff=bin': (d) => ok(d, `git config core.attributesFile "${attrsBin}" && git config diff.bin.binary true`),
+    'core.bigFileThreshold=10': (d) => ok(d, 'git config core.bigFileThreshold 10'),
+  };
+  for (const [name, set] of Object.entries(vectors)) {
+    const d = repo();
+    assert.equal(cli('install', '--repo', d).status, 0);
+    set(d);
+    const before = ok(d, 'git rev-parse HEAD');
+    writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+    const r = sh(d, 'git add cfg.txt && git commit -qm leak');
+    assert.notEqual(r.status, 0, `${name}: commit refused`); assert.match(r.stderr, /staged text looks like a secret \(AWS key\)/, name);
+    assert.equal(ok(d, 'git rev-parse HEAD'), before, `${name}: no commit made`);
+  }
+  const nul = repo();
+  assert.equal(cli('install', '--repo', nul).status, 0);
+  writeFileSync(join(nul, 'cfg.bin'), `key=${secret()}\0\n`);
+  const r = sh(nul, 'git add cfg.bin && git commit -qm leak'); assert.notEqual(r.status, 0, 'NUL byte: commit refused'); assert.match(r.stderr, /staged text looks like a secret \(AWS key\)/);
+  const fine = repo();
+  assert.equal(cli('install', '--repo', fine).status, 0);
+  writeFileSync(join(fine, '.gitattributes'), '*.txt -diff\n'); writeFileSync(join(fine, 'ok.txt'), 'plain\n');
+  ok(fine, 'git add .gitattributes ok.txt && git commit -qm clean');
+  assert.equal(ok(fine, 'git log -1 --format=%s'), 'clean', 'a clean -diff file still commits');
+});
+
+t('k16: SID-213: a 0.5.0 gate record does not count at pre-push', () => {
+  const s = repo();
+  writeFileSync(join(s, 'cfg.txt'), `key=${secret()}\n`);
+  ok(s, 'git add cfg.txt && git commit -qm leak');
+  oldRecord(s);
+  const leak = dispatchPrePush(s);
+  assert.notEqual(leak.status, 0, 'token head with an old record is refused'); assert.match(leak.stderr, /looks like a secret \(AWS key\)/);
+
+  const g = repo({ gate: ['false'] });
+  ok(g, 'echo b > b && git add b && git commit -qm b');
+  oldRecord(g);
+  const failing = dispatchPrePush(g);
+  assert.notEqual(failing.status, 0, 'failing gate with an old record is refused'); assert.match(failing.stderr, /harness gate failed: `false`/);
+
+  // The guard is stubbed to allow and to write nothing, so only the dispatcher's own record check can refuse. Called directly: no hook is installed.
+  const copy = join(tmp, 'harness-copy'); cpSync(dirname(DISPATCHER), copy, { recursive: true });
+  writeFileSync(join(copy, 'pre-bash.mjs'), 'process.exit(0);\n');
+  const c = repo();
+  ok(c, 'echo b > b && git add b && git commit -qm b');
+  oldRecord(c);
+  const closed = dispatchPrePush(c, join(copy, 'git-hook.mjs'));
+  assert.notEqual(closed.status, 0, 'only an old record: fails closed'); assert.match(closed.stderr, /the gate passed no record for [0-9a-f]{12} \(failing closed\)/);
+  const dir = join(c, '.git', GATE_RECORD_DIR); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, ok(c, 'git rev-parse HEAD')), 'x\n');
+  const open = dispatchPrePush(c, join(copy, 'git-hook.mjs'));
+  assert.equal(open.status, 0, open.stderr); assert.match(open.stderr, /sflow gate ok [0-9a-f]{12}/, 'a new record counts');
+});
+
+t('k17: SID-213: pre-commit scans textconv output and runs only what main ran', () => {
+  const encoded = `${Buffer.from(`key=${secret()}\n`).toString('base64')}\n`;
+  const staged = (driver) => {
+    const d = repo();
+    assert.equal(cli('install', '--repo', d).status, 0);
+    writeFileSync(join(d, '.gitattributes'), '*.b64 diff=z\n');
+    ok(d, `git config diff.z.textconv '${driver}' && git add .gitattributes && git commit -qm attrs`);
+    writeFileSync(join(d, 'k.b64'), encoded);
+    return d;
+  };
+  const leak = staged('base64 -d');
+  const refused = sh(leak, 'git add k.b64 && git commit -qm leak');
+  assert.notEqual(refused.status, 0, 'textconv output holds a token: commit refused'); assert.match(refused.stderr, /staged text looks like a secret \(AWS key\)/);
+  const colored = staged('base64 -d');
+  ok(colored, 'git config color.ui always');
+  const hidden = sh(colored, 'git add k.b64 && git commit -qm leak');
+  assert.notEqual(hidden.status, 0, 'color.ui=always: commit refused'); assert.match(hidden.stderr, /staged text looks like a secret \(AWS key\)/);
+  const broken = staged('false');
+  const closed = sh(broken, 'git add k.b64 && git commit -qm broken');
+  assert.notEqual(closed.status, 0, 'a failing driver: commit refused'); assert.match(closed.stderr, /could not read the staged diff \(failing closed\)/);
+
+  const d = repo();
+  assert.equal(cli('install', '--repo', d).status, 0);
+  const ran = join(d, '.git', 'external-ran'), external = join(d, '.git', 'external');
+  writeFileSync(external, `#!/bin/sh\n: > "${ran}"\n`); chmodSync(external, 0o755);
+  ok(d, `git config diff.external "${external}" && echo plain > plain.txt && git add plain.txt && git commit -qm plain`);
+  assert.ok(!existsSync(ran), 'diff.external did not run: main passed --no-ext-diff here');
+});
+
+t('k18: SID-213: pre-push denies a head whose token sits behind a shallow boundary, and writes no record', () => {
+  const d = repo();
+  writeFileSync(join(d, 'cfg.txt'), `key=${secret()}\n`);
+  ok(d, 'git add cfg.txt && git commit -qm leak && git rm -q cfg.txt && git commit -qm remove');
+  ok(d, 'git fetch -q --depth=1 "file://$PWD" feat/x');
+  assert.equal(ok(d, 'git rev-parse --is-shallow-repository'), 'true');
+  const r = dispatchPrePush(d);
+  assert.notEqual(r.status, 0, 'refused'); assert.match(r.stderr, /a commit in the pushed range adds text that looks like a secret \(AWS key\)/);
+  assert.ok(!existsSync(join(d, '.git', GATE_RECORD_DIR, ok(d, 'git rev-parse HEAD'))), 'no gate record');
 });
 
 console.log('git hooks tests ok');

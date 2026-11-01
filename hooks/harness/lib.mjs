@@ -12,8 +12,12 @@ export function readEvent() {
 }
 
 // Replace refs (refs/replace/) can swap any object git reads, including the commit and file the policy comes from, so they are off for every call.
+// Grafts (.git/info/grafts) rewrite parents the same way, and git 2.47 still honours them under --no-replace-objects, so only GIT_GRAFT_FILE turns them off.
+// A shallow boundary cuts parents the same way, and a shallow fetch makes one out of any local commit, so GIT_SHALLOW_FILE turns that off too: a read that needs a parent the clone really lacks fails.
 // core.fsmonitor=false: a configured fsmonitor hook script would otherwise run inside the hook on `git status`/`diff`.
-export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
+export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_SHALLOW_FILE: '/dev/null' };
+// <git dir>/<this>/<head> records that the gate passed for head. Versioned: a change that makes the gate stricter gets a new name, so a head that passed the weaker gate is checked again.
+export const GATE_RECORD_DIR = 'harness-gate-v2';
 export function git(root, ...args) {
   return execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
 }
@@ -784,8 +788,68 @@ export const SECRET_PATTERNS = [
   ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
   ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
 ];
-// Names of the patterns that match a line added in a unified diff.
-export function secretsInDiff(diff) {
-  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
-  return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
+// Names of the patterns that match a line added in a unified or combined (--cc) diff. `+++` is a file header only between `diff ` and the first `@@`: inside a hunk it is
+// an added line starting with `++`, or an octopus merge's three-column prefix. A combined hunk opens with one `@` per parent plus one, and only a line with `+` in every
+// column is new in the merge. Any other line came from a parent, so that parent's own commit, or origin, already accounts for it.
+const addedLines = (diff) => {
+  let inHunk = false, prefix = '+';
+  return diff.split('\n').filter((l) => {
+    if (l.startsWith('diff ')) { inHunk = false; prefix = '+'; return false; }
+    if (l.startsWith('@@')) { inHunk = true; prefix = '+'.repeat(/^@+/.exec(l)[0].length - 1); return false; }
+    return l.startsWith(prefix) && (inHunk || !l.startsWith('+++'));
+  });
+};
+const secretNames = (lines) => { const added = lines.join('\n'); return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n); };
+export const secretsInDiff = (diff) => secretNames(addedLines(diff));
+
+// The flags stop repo config hiding added lines: color puts escape codes before the `+`, an external diff or textconv driver can print anything, and -diff, binary, a binary diff driver or a NUL byte print
+// `Binary files differ` unless --text. Shared with the pre-commit scan, so the two cannot drift.
+// core.bigFileThreshold=1g is defence in depth no test can tell from --text on git 2.47: only the binary sniff reads the threshold and --text skips the sniff, --cc and diff-tree -c never read it, and a file a textconv read takes for binary is read raw by the --text read.
+// core.commitGraph=false: git trusts a graph file's parent column, so a hand-edited graph can cut commits out of the walk. GIT_SHALLOW_FILE=/dev/null also turns the graph off today, because git counts a repo with any shallow file as shallow; this does not lean on that.
+const SCAN_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.bigFileThreshold=1g', '-c', 'core.commitGraph=false'];
+const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '--text'];
+const SCAN_EXCLUDES = [':(exclude)*.lock', ':(exclude)*.snap'];
+const SCAN_PATHS = ['--', '.', ...SCAN_EXCLUDES];
+export const scanRead = (root, args, { maxBuffer = 256 << 20, flags = SCAN_FLAGS, paths = SCAN_PATHS } = {}) => execFileSync('git', [...SCAN_GLOBALS, ...args, ...flags, ...paths], { cwd: root, env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer }).toString();
+// A second read of the net diff, because 0.5.0 denied a token only a repo's textconv driver or external diff prints and --no-textconv alone would stop that. Each is that scan's 0.5.0 read plus --no-color, which can only show more,
+// so it runs no program 0.5.0 did not run: history is never read this way, and only the push read ever ran an external diff.
+export const STAGED_DRIVER_FLAGS = ['--no-color', '--no-ext-diff'];
+const PUSH_DRIVER_FLAGS = ['--no-color'];
+
+// SID-213: the push gate's scan of base..HEAD. Returns null when clean, else { result, detail, reason }: result 'secret' or 'error' for runs.jsonl, reason for the deny.
+// Any failure to read the range is an error, never "no secrets". The net diff sees what the final tree adds; the per-commit log sees what history carries to the remote even when a later commit removes it.
+// log only: --full-history because a pathspec otherwise skips a side branch whose merge matches the other parent; --root because log.showroot=false hides a root commit's diff; --cc for what a merge itself adds;
+// --no-show-signature because log.showSignature runs gpg.program.
+// --cc cannot be the whole read of a merge. It ignores --text, so it prints `Binary files differ` for a -diff or binary file; it cuts a line at a NUL byte, which the binary sniff misses past byte 8000; and from 64 parents it prints no line as new.
+// So every merge is also read against every parent: as in --cc, only a line added against all of them is new in the merge. Limited to the paths it changes against all of them, since a whole diff against a parent can carry that parent's history into the buffer.
+const MAX_MERGE_PARENTS = 63;
+const addedByMerges = (read, merges) => merges.flatMap(([merge, ...parents]) => {
+  const changed = read(['diff-tree', '-c', '--name-only', '-z', '--no-commit-id', merge], { flags: [], paths: [] }).split('\0').filter(Boolean);
+  if (!changed.length) return [];
+  // A name that is not UTF-8 decodes to U+FFFD and could not be passed back to git, so such a merge is read whole.
+  const paths = changed.some((p) => p.includes('\ufffd')) ? SCAN_PATHS : ['--', ...changed.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES];
+  const perParent = parents.map((p) => new Set(addedLines(read(['diff', `${p}..${merge}`], { paths }))));
+  return [...perParent[0]].filter((line) => perParent.every((added) => added.has(line)));
+});
+export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
+  const read = (args, opts) => scanRead(root, args, { maxBuffer, ...opts }), range = `${base}..HEAD`;
+  let net, history;
+  try {
+    if (!base) throw new Error('no base commit to scan from');
+    // No pathspec: the parent count of a merge that changes only excluded paths, or nothing, still counts.
+    const merges = read(['rev-list', '--merges', '--parents', range], { flags: [], paths: [] }).split('\n').filter(Boolean).map((l) => l.split(' '));
+    const wide = merges.find(([, ...parents]) => parents.length > MAX_MERGE_PARENTS);
+    if (wide) return { result: 'error', detail: `secret scan: merge ${wide[0].slice(0, 12)} has ${wide.length - 1} parents`, reason: `harness gate: a merge in the pushed range has ${wide.length - 1} parents (${wide[0]}), and the secret scan reads at most ${MAX_MERGE_PARENTS} (failing closed). Split the octopus into merges of at most ${MAX_MERGE_PARENTS} parents, then push again.` };
+    net = [...secretsInDiff(read(['diff', range])), ...secretsInDiff(read(['diff', range], { flags: PUSH_DRIVER_FLAGS }))];
+    const log = read(['log', '--no-show-signature', '-p', '--cc', '--root', '--full-history', '--format=%H', range]);
+    history = secretNames([...addedLines(log), ...addedByMerges(read, merges)]);
+  } catch (e) {
+    const first = (e.stderr?.toString().trim() || e.message).split('\n')[0];
+    const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.' : '';
+    return { result: 'error', detail: `secret scan: ${first}`, reason: `harness gate: could not read the diff for the secret scan (failing closed): ${first}${split}` };
+  }
+  const names = [...new Set([...net, ...history])].join(', ');
+  if (net.length) return { result: 'secret', detail: names, reason: `harness gate: committed text looks like a secret (${names}); remove it and rewrite the commit before pushing` };
+  if (history.length) return { result: 'secret', detail: names, reason: `harness gate: a commit in the pushed range adds text that looks like a secret (${names}), and it would reach the remote in history even though the final tree no longer has it. It must be removed by rewriting those commits (a human step).` };
+  return null;
 }

@@ -4,7 +4,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { canon, config, currentBranch, deny, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, readEvent, record, secretsInDiff } from './lib.mjs';
+import { canon, config, currentBranch, deny, GATE_RECORD_DIR, git, gitDir, HOOK_FILE_DENY, hookFileName, hookFileReason, isPolicyPath, NO_REPLACE_ENV, PLACEHOLDER, policyDeny, policyNote, pushSecretScan, readEvent, record } from './lib.mjs';
 import { analyzeWrites, guardSegments, lineReason, retargets, segmentReason } from './guard-rules.mjs';
 
 const ev = readEvent();
@@ -73,15 +73,15 @@ try {
   if (git(cfg.root, 'status', '--porcelain', '--untracked-files=no')) { deny('harness gate: tracked changes are uncommitted; commit them first so the gate checks what you push'); process.exit(0); }
   if (cfg.gate.some((c) => c.includes(PLACEHOLDER))) { deny(`harness gate: .harness.json still has the placeholder gate; set the project checks on ${cfg.source}`); process.exit(0); }
   const head = git(cfg.root, 'rev-parse', 'HEAD');
-  const dir = join(gitDir(cfg.root), 'harness-gate');
+  const dir = join(gitDir(cfg.root), GATE_RECORD_DIR);
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
-  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
+  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, '-c', 'core.commitGraph=false', 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
   const base = mergeBase ?? cfg.baseSha; // a sha, never a ref name: names can be shadowed by tags and branches. A present policy implies a verified baseSha, so there is no further fallback.
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };
-  const secret = base ? secretHits(cfg.root, base) : [];
-  if (secret.length) { log(`secret 0 ${secret.join(',')}`); deny(`harness gate: committed text looks like a secret (${secret.join(', ')}); remove it and rewrite the commit before pushing`); process.exit(0); }
+  const scan = pushSecretScan(cfg.root, base);
+  if (scan) { log(`${scan.result} 0 ${scan.detail}`); deny(scan.reason); process.exit(0); }
   for (const raw of cfg.gate) {
     const command = raw.replaceAll('{base}', base);
     const started = Date.now();
@@ -98,10 +98,4 @@ try {
   writeFileSync(join(dir, head), new Date().toISOString() + '\n');
 } catch (e) {
   deny(`harness hook error (failing closed): ${e.message}`);
-}
-
-function secretHits(root, base) {
-  let diff = '';
-  try { diff = execSync(`git --no-replace-objects -c core.fsmonitor=false diff ${base}..HEAD -- . ':(exclude)*.lock' ':(exclude)*.snap'`, { cwd: root, env: NO_REPLACE_ENV, maxBuffer: 256 << 20 }).toString(); } catch { return []; }
-  return secretsInDiff(diff);
 }

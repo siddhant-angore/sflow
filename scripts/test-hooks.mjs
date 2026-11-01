@@ -6,16 +6,17 @@ import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync,
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gitWrites as newGitWrites, pathWithin, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
+import { GATE_RECORD_DIR, gitWrites as newGitWrites, pathWithin, pushSecretScan, secretsInDiff, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
-  const out = execFileSync('node', [join(hooks, hook)], { input: JSON.stringify(ev), cwd: ev.cwd }).toString().trim();
+  const out = execFileSync('node', [join(hooks, hook)], { input: JSON.stringify(ev), cwd: ev.cwd, timeout: 120_000 }).toString().trim();
   return out ? JSON.parse(out) : null;
 };
-const sh = (cwd, c) => execFileSync('sh', ['-c', c], { cwd, stdio: 'pipe' }).toString().trim();
+const sh = (cwd, c) => execFileSync('sh', ['-c', c], { cwd, stdio: 'pipe', timeout: 120_000, maxBuffer: 1 << 26 }).toString().trim();
+const TOKEN = 'AKIA' + 'ABCDEFGHIJKLMNOP'; // built at run time, so this file holds no secret-shaped text
 const reasonOf = (r) => r?.hookSpecificOutput?.permissionDecisionReason ?? '';
 const denied = (hook, ev) => run(hook, ev)?.hookSpecificOutput?.permissionDecision === 'deny';
 
@@ -222,6 +223,310 @@ for (const c of [`awk '{print $1}' f`, `gawk '{print $1, $2}' f | sort`, `sed 's
   assert.doesNotMatch(pv(c), /\$[1@]/, `R32 payload view drops a data program's $1: ${c}`);
 // R32-END (cases of the other items are added above this line)
 if (process.env.SFLOW_R32_ONLY === '1') { console.log(`R32 only: ${JSON.stringify(r32Counts)}`); process.exit(0); }
+
+// SID-213: the push secret scan fails closed, reads every commit in the pushed range, and can't be blinded by repo config.
+// The cases collect their failures so one run names every broken behaviour.
+{
+  const realGit = sh(repo, 'command -v git'), head = (d) => sh(d, 'git rev-parse HEAD');
+  const NET = /committed text looks like a secret \(AWS key\)/, HISTORY = /a commit in the pushed range adds text that looks like a secret \(AWS key\)/, CLOSED = /could not read the diff for the secret scan \(failing closed\)/;
+  const scanRepo = (policy = { gate: ['test -f a'] }) => {
+    const d = makeScratch('harness-scan-');
+    sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
+    writeFileSync(join(d, '.harness.json'), JSON.stringify(policy));
+    sh(d, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
+    return d;
+  };
+  const addToken = (d, file = 's.txt') => sh(d, `echo "k=${TOKEN}" > ${file} && git add ${file} && git commit -qm add-${file}`);
+  const addRemove = (d) => { addToken(d); sh(d, 'git rm -q s.txt && git commit -qm remove-s'); };
+  const clean = (d, file = 'c') => sh(d, `echo ${file} > ${file} && git add ${file} && git commit -qm ${file}`);
+  const gitDirOf = (d) => sh(d, 'git rev-parse --absolute-git-dir');
+  const gateRuns = (d, sha) => { const f = join(gitDirOf(d), 'harness', 'runs.jsonl'); return existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.kind === 'gate' && r.head === sha.slice(0, 12)) : []; };
+  const push = (d, env = {}) => {
+    const out = execFileSync('node', [join(hooks, 'pre-bash.mjs')], { cwd: d, env: { ...process.env, ...env }, timeout: 120_000, input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push origin feat/x' }, cwd: d }) }).toString().trim();
+    const sha = head(d);
+    return { why: reasonOf(out ? JSON.parse(out) : null), recorded: existsSync(join(gitDirOf(d), GATE_RECORD_DIR, sha)), runs: gateRuns(d, sha) };
+  };
+  const refused = (r, why, result) => {
+    assert.match(r.why, why);
+    assert.ok(!r.recorded, 'no gate record');
+    assert.ok(r.runs.some((x) => x.result === result), `runs.jsonl has result ${result}: ${JSON.stringify(r.runs)}`);
+    assert.ok(!r.runs.some((x) => x.result === 'pass'), 'runs.jsonl has no pass for this head');
+  };
+  const passed = (r) => { assert.equal(r.why, ''); assert.ok(r.recorded, 'gate record written'); };
+  const shim = (sub) => {
+    const dir = makeScratch('harness-shim-');
+    writeFileSync(join(dir, 'git'), `#!/bin/sh\nskip=\nfor a in "$@"; do\n  if [ -n "$skip" ]; then skip=; continue; fi\n  case "$a" in -c|-C) skip=1; continue;; -*) continue;; esac\n  if [ "$a" = "${sub}" ]; then echo "fatal: shim refused ${sub}" >&2; exit 128; fi\n  break\ndone\nexec "${realGit}" "$@"\n`);
+    chmodSync(join(dir, 'git'), 0o755);
+    return { PATH: `${dir}:${process.env.PATH}` };
+  };
+  const blinders = {
+    'color.ui=always': (d) => sh(d, 'git config color.ui always'),
+    'color.diff=always': (d) => sh(d, 'git config color.diff always'),
+    'diff.external': (d) => { const x = join(gitDirOf(d), 'silent-diff'); writeFileSync(x, '#!/bin/sh\nexit 0\n'); chmodSync(x, 0o755); sh(d, `git config diff.external "${x}"`); },
+    'textconv': (d) => { const x = join(gitDirOf(d), 'silent-conv'); writeFileSync(x, '#!/bin/sh\necho clean\n'); chmodSync(x, 0o755); writeFileSync(join(d, '.gitattributes'), '*.txt diff=hide\n'); sh(d, `git config diff.hide.textconv "${x}" && git add .gitattributes && git commit -qm attrs`); },
+    'core.bigFileThreshold=10': (d) => sh(d, 'git config core.bigFileThreshold 10'),
+    'core.attributesFile * -diff': (d) => { const x = join(gitDirOf(d), 'attrs'); writeFileSync(x, '* -diff\n'); sh(d, `git config core.attributesFile "${x}"`); },
+    'core.attributesFile diff=bin with diff.bin.binary': (d) => { const x = join(gitDirOf(d), 'attrs'); writeFileSync(x, '* diff=bin\n'); sh(d, `git config core.attributesFile "${x}" && git config diff.bin.binary true`); },
+    'committed .gitattributes -diff': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); },
+    'committed .gitattributes binary': (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt binary\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); },
+    '.git/info/attributes -diff': (d) => writeFileSync(join(gitDirOf(d), 'info', 'attributes'), '* -diff\n'),
+  };
+  const nulToken = `printf 'k=${TOKEN}\\000\\n'`;
+  const bigBinary = (d) => writeFileSync(join(d, 'big.bin'), Buffer.alloc(1 << 20, 'ab\0\n'));
+  const logWithoutGraftOverride = (d, range) => sh(d, `env -u GIT_GRAFT_FILE git log -p --cc --root --full-history --format=%H ${range}`);
+  const oldRecord = (d) => { const dir = join(gitDirOf(d), 'harness-gate'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, head(d)), 'x\n'); }; // 0.5.0's folder: a head recorded there passed the weaker scan
+  const stopReason = (d) => run('stop.mjs', { cwd: d })?.reason ?? '';
+  const side = (d, name) => sh(d, `git checkout -q -b ${name} && echo ${name} > ${name} && git add ${name} && git commit -qm ${name} && git checkout -q feat/x`);
+  const dropLast = (d, file) => sh(d, `sed -i '$d' ${file} && git add ${file} && git commit -qm remove-last-line`);
+  const evilMerge = (d, write = `echo "k=${TOKEN}"`) => { side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${write} > merged.txt && git add merged.txt && git commit -qm evil`); assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit'); sh(d, 'git rm -q merged.txt && git commit -qm remove'); };
+  const lateNulToken = `{ for i in $(seq 120); do echo ${'p'.repeat(80)}; done; printf 'x\\000k=${TOKEN}\\n'; }`;
+  const changedAgainstAllParents = (d, ref, name) => sh(d, `git diff-tree -c --name-only -z --no-commit-id ${ref}`).split('\0').includes(name);
+  const octopus = (d, n, content) => {
+    const parent = head(d), tree = sh(d, 'git rev-parse HEAD^{tree}');
+    const parents = sh(d, `for i in $(seq ${n}); do git commit-tree ${tree} -p ${parent} -m p$i; done`).split('\n');
+    const merged = content ? sh(d, `blob=$(printf '%s\\n' '${content}' | git hash-object -w --stdin) && git update-index --add --cacheinfo 100644,$blob,merged.txt && git write-tree && git reset -q`) : tree;
+    sh(d, `git reset -q --hard $(git commit-tree ${merged} ${parents.map((p) => `-p ${p}`).join(' ')} -m octopus)`);
+    assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, n + 1, `${n} parents`);
+  };
+  const refusedWide = (d, n = 64) => { const r = push(d); refused(r, new RegExp(`a merge in the pushed range has ${n} parents`), 'error'); assert.match(r.why, /failing closed/); assert.match(r.why, /split/i); };
+  const b64 = (text) => Buffer.from(text).toString('base64');
+  const script = (d, name, body) => { const x = join(gitDirOf(d), name); writeFileSync(x, `#!/bin/sh\n${body}\n`); chmodSync(x, 0o755); return x; };
+  const textconvFile = (d, driver = 'base64 -d') => { writeFileSync(join(d, '.gitattributes'), '*.b64 diff=z\n'); writeFileSync(join(d, 'k.b64'), `${b64(`k=${TOKEN}\n`)}\n`); sh(d, `git config diff.z.textconv '${driver}' && git add .gitattributes k.b64 && git commit -qm encoded`); };
+  // Git trusts a graph file's parent column: only `git commit-graph verify` reads the checksum.
+  const poisonGraph = (d, parents, generations = {}) => {
+    sh(d, 'git -c commitGraph.generationVersion=1 commit-graph write --reachable --no-progress');
+    const f = join(gitDirOf(d), 'objects', 'info', 'commit-graph'), b = readFileSync(f);
+    const chunk = (id) => { for (let i = 8; ; i += 12) if (b.toString('latin1', i, i + 4) === id) return Number(b.readBigUInt64BE(i + 4)); };
+    const oids = chunk('OIDL'), count = b.readUInt32BE(chunk('OIDF') + 255 * 4);
+    const pos = (sha) => { for (let i = 0; i < count; i++) if (b.toString('hex', oids + 20 * i, oids + 20 * i + 20) === sha) return i; throw new Error(`${sha} not in the graph`); };
+    const row = (sha) => chunk('CDAT') + 36 * pos(sha);
+    for (const [commit, parent] of parents) b.writeUInt32BE(pos(parent), row(commit) + 20);
+    for (const [sha, gen] of Object.entries(generations)) b.writeUInt32BE(gen << 2, row(sha) + 28);
+    rmSync(f, { force: true }); writeFileSync(f, b);
+  };
+  const fakeGpg = (d) => {
+    const marker = join(gitDirOf(d), 'gpg-ran');
+    return { marker, program: script(d, 'fake-gpg', `case "$*" in *--verify*) : > "${marker}";; esac\ncase "$*" in *-bsau*) echo '[GNUPG:] SIG_CREATED ' >&2; printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n';; esac\nexit 0`) };
+  };
+  const diffOffTxt = (d) => { writeFileSync(join(d, '.gitattributes'), '*.txt -diff\n'); sh(d, 'git add .gitattributes && git commit -qm attrs'); };
+
+  const cases = {
+    'a failing git diff denies, records error, no pass, no gate record': () => { const d = scanRepo(); clean(d); const r = push(d, shim('diff')); refused(r, CLOSED, 'error'); assert.match(r.why, /fatal: shim refused diff/); passed(push(d)); },
+    'a failing git log denies, records error, no pass, no gate record': () => { const d = scanRepo(); clean(d); const r = push(d, shim('log')); refused(r, CLOSED, 'error'); assert.match(r.why, /fatal: shim refused log/); passed(push(d)); },
+    'a scan error is not a split-the-push message': () => { const d = scanRepo(); clean(d); const why = push(d, shim('diff')).why; assert.match(why, CLOSED); assert.doesNotMatch(why, /split/i); },
+    'a bad base object fails closed': () => { const d = scanRepo(); clean(d); const v = pushSecretScan(d, 'f'.repeat(40)); assert.equal(v.result, 'error'); assert.match(v.reason, CLOSED); assert.doesNotMatch(v.reason, /split/i); },
+    'net diff over maxBuffer says split the push': () => { const d = scanRepo(); clean(d); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 10); assert.equal(v.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    'history log over maxBuffer says split the push': () => { const d = scanRepo(); sh(d, 'echo x > t && git add t && git commit -qm t && git rm -q t && git commit -qm rm'); assert.equal(sh(d, 'git diff origin/main..HEAD'), '', 'empty net diff'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 20); assert.equal(v.result, 'error'); assert.match(v.reason, /split the push into smaller pushes/); },
+    'a generous limit does not overflow': () => { const d = scanRepo(); clean(d); assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 20), null); },
+    'a null or empty base fails closed': () => { const d = scanRepo(); addToken(d); for (const b of [null, undefined, '']) { const v = pushSecretScan(d, b); assert.equal(v?.result, 'error', `base ${b}`); assert.match(v.reason, CLOSED); } },
+    ...Object.fromEntries(Object.entries(blinders).flatMap(([n, set]) => [
+      [`${n} does not hide a secret in the tree`, () => { const d = scanRepo(); set(d); addToken(d); refused(push(d), NET, 'secret'); }],
+      [`${n} does not hide a secret only in history`, () => { const d = scanRepo(); set(d); addRemove(d); refused(push(d), HISTORY, 'secret'); }],
+      [`${n} does not hide a secret a merge adds, removed later`, () => { const d = scanRepo(); set(d); evilMerge(d); refused(push(d), HISTORY, 'secret'); }],
+    ])),
+    'a NUL byte in the file does not hide a secret in the tree': () => { const d = scanRepo(); sh(d, `${nulToken} > s.txt && git add s.txt && git commit -qm nul`); assert.equal(sh(d, 'git diff --numstat origin/main..HEAD').split('\t')[0], '-', 'git takes the file for binary'); refused(push(d), NET, 'secret'); },
+    'a NUL byte in the file does not hide a secret only in history': () => { const d = scanRepo(); sh(d, `${nulToken} > s.txt && git add s.txt && git commit -qm nul && git rm -q s.txt && git commit -qm rm`); refused(push(d), HISTORY, 'secret'); },
+    'a NUL byte in the file does not hide a secret a merge adds, removed later': () => { const d = scanRepo(); evilMerge(d, nulToken); refused(push(d), HISTORY, 'secret'); },
+    'an octopus merge adding a secret to a -diff file, removed later, is denied': () => { const d = scanRepo(); diffOffTxt(d); side(d, 'o1'); side(d, 'o2'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 o2 && echo "k=${TOKEN}" > merged.txt && git add merged.txt && git commit -qm evil && git rm -q merged.txt && git commit -qm remove`); refused(push(d), HISTORY, 'secret'); },
+    'a merge editing a -diff file on both sides, secret in the resolution, is denied': () => { const d = scanRepo(); diffOffTxt(d); sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q -b o1 && printf '1\\no\\n' > f.txt && git add f.txt && git commit -qm o && git checkout -q feat/x && printf 'x\\n1\\n' > f.txt && git add f.txt && git commit -qm x; git merge -q --no-ff --no-commit o1; printf 'x\\n1\\no\\nk=${TOKEN}\\n' > f.txt; git add f.txt && git commit -qm evil`); dropLast(d, 'f.txt'); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: merging origin main into a -diff file keeps its token line without denying': () => {
+      const d = scanRepo();
+      diffOffTxt(d);
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x && printf '1\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm tok && git push -q origin main`);
+      sh(d, `git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nk=${TOKEN}\\n' > f.txt; git add f.txt && git commit -qm merge-main`);
+      assert.match(sh(d, 'git log -1 --cc --text --format='), /^Binary files differ$/m, 'the case --cc cannot read');
+      passed(push(d));
+    },
+    'lock-in: a clean merge adding a -diff file passes': () => { const d = scanRepo(); diffOffTxt(d); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo clean > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
+    'a binary in the net diff over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    'a binary only in history over maxBuffer denies and says split the push': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big && git rm -q big.bin && git commit -qm rm'); assert.equal(sh(d, 'git diff origin/main..HEAD'), '', 'empty net diff'); const v = pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 16); assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/); },
+    // The merge changes big.bin against both parents. Against feat/x that is the whole file, so only the per-parent read can overflow.
+    'a merge of origin main whose per-parent read is over maxBuffer denies and says split the push': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      diffOffTxt(d);
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x`);
+      bigBinary(d);
+      sh(d, `printf '1\\nm\\n' > f.txt && git add big.bin f.txt && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && printf '0\\n1\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; printf '0\\n1\\nm\\nresolved\\n' > f.txt; printf 'changed\\n' >> big.bin; git add f.txt big.bin && git commit -qm merge-main`);
+      const base = sh(d, 'git rev-parse origin/main');
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'big.bin'), 'the merge changes big.bin against every parent');
+      assert.ok(sh(d, `git log -p --cc --text --full-history --format=%H ${base}..HEAD`).length < limit, 'the log itself fits, so only the per-parent read can overflow');
+      const v = pushSecretScan(d, base, limit);
+      assert.equal(v?.result, 'error'); assert.match(v.reason, CLOSED); assert.match(v.reason, /split the push into smaller pushes/);
+    },
+    'lock-in: merging origin main with a big file the merge leaves alone does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, `git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat; git merge -q --no-ff --no-commit origin/main; echo resolved > m.txt; git add m.txt && git commit -qm merge-main`);
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
+    'lock-in: a plain merge of origin main with a big file reads no path and does not overflow': () => {
+      const d = scanRepo(), limit = 1 << 16;
+      sh(d, 'git checkout -q main');
+      bigBinary(d);
+      sh(d, 'git add big.bin && git commit -qm big-on-main && git push -q origin main && git checkout -q feat/x && echo f > f && git add f && git commit -qm feat && git merge -q --no-ff -m merge-main origin/main');
+      assert.ok(!sh(d, 'git diff-tree -c --name-only --no-commit-id HEAD'), 'the merge changes no path against every parent');
+      assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), limit), null);
+    },
+    'a NUL before the token, past byte 8000, does not hide a secret a merge adds, removed later': () => {
+      const d = scanRepo();
+      evilMerge(d, lateNulToken);
+      const cc = sh(d, 'git log -1 -p --cc --format= HEAD~1');
+      assert.doesNotMatch(cc, /^Binary files /m, 'git takes the file for text');
+      assert.deepEqual(secretsInDiff(cc), [], '--cc cuts the line at the NUL');
+      assert.ok(changedAgainstAllParents(d, 'HEAD~1', 'merged.txt'), 'the path list names the file');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a merge adding a secret to an awkwardly named file, removed later, is denied': () => {
+      for (const name of ['m[x].txt', 'a\\012b.txt', 'f\\377.txt', 'sp ace/*.txt', ':(top)x.txt']) {
+        const d = scanRepo();
+        side(d, 'o1'); clean(d);
+        sh(d, `n=$(printf '${name}') && git merge -q --no-ff --no-commit o1 && mkdir -p "$(dirname "$n")" && ${lateNulToken} > "$n" && git add -- ":(literal)$n" && git commit -qm evil && git rm -q -- ":(literal)$n" && git commit -qm remove`);
+        refused(push(d), HISTORY, 'secret');
+      }
+    },
+    'lock-in: a merge adding a token to a *.lock or *.snap file stays out of the scan': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && ${lateNulToken} > x.lock && ${lateNulToken} > y.snap && git add x.lock y.snap && git commit -qm evil`); passed(push(d)); },
+    'lock-in: a clean evil-shaped merge is allowed': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, 'git merge -q --no-ff --no-commit o1 && echo fine > merged.txt && git add merged.txt && git commit -qm merge'); passed(push(d)); },
+    ...Object.fromEntries([64, 65].map((n) => [`a ${n}-parent octopus adding a secret in a new file, removed later, is denied`, () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      octopus(d, n, `k=${TOKEN}`);
+      assert.ok(changedAgainstAllParents(d, 'HEAD', 'merged.txt'), 'the path list names the file');
+      sh(d, 'git rm -q merged.txt && git commit -qm remove');
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], '--cc has no all-plus column at this width');
+      const r = push(d);
+      assert.ok(r.why, 'denied'); assert.ok(!r.recorded, 'no gate record');
+    }])),
+    'a 64-parent merge with no secret is denied and says to split it': () => { const d = scanRepo(); octopus(d, 64, 'fine'); refusedWide(d); },
+    'a 64-parent merge equal to all its parents is denied too': () => { const d = scanRepo(); octopus(d, 64); refusedWide(d); },
+    'a 63-parent octopus adding a secret, removed later, is denied': () => { const d = scanRepo(); octopus(d, 63, `k=${TOKEN}`); sh(d, 'git rm -q merged.txt && git commit -qm remove'); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: a clean 63-parent octopus is allowed': () => { const d = scanRepo(); octopus(d, 63, 'fine'); passed(push(d)); },
+    'a shallow boundary does not hide a token in the commit behind it, before or after unshallowing': () => {
+      const d = scanRepo(), mirror = join(makeScratch('harness-mirror-'), 'm.git');
+      addRemove(d);
+      sh(d, `git clone -q --no-local --mirror . "${mirror}" && git fetch -q --depth=1 "file://$PWD" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'true', 'the head is a shallow boundary');
+      assert.deepEqual(secretsInDiff(sh(d, 'git log -p --cc --format= HEAD')), [], 'the boundary hides the token from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+      sh(d, `git fetch -q --unshallow "${mirror}" feat/x`);
+      assert.equal(sh(d, 'git rev-parse --is-shallow-repository'), 'false', 'unshallowed');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a genuinely shallow clone whose range reaches the boundary fails closed': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      addRemove(d); sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch feat/x "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git fetch -q --depth=1 origin main:refs/remotes/origin/main');
+      clean(clone, 'more');
+      refused(push(clone), CLOSED, 'error');
+    },
+    'a genuinely shallow clone with commits above the base still scans them': () => {
+      const d = scanRepo(), clone = join(makeScratch('harness-shallow-'), 'c');
+      sh(d, 'git push -q origin feat/x');
+      sh(d, `git clone -q --depth=1 --branch main "file://$PWD.origin.git" "${clone}"`);
+      sh(clone, 'git config user.email t@t && git config user.name t && git checkout -q -b feat/x');
+      clean(clone, 'more');
+      passed(push(clone));
+      addToken(clone);
+      refused(push(clone), NET, 'secret');
+    },
+    'gate commands run with the shallow file off': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); passed(push(d)); },
+    'log.showSignature does not run gpg.program during the scan': () => {
+      const d = scanRepo(), { marker, program } = fakeGpg(d);
+      sh(d, `echo c > c && git add c && git -c gpg.program="${program}" commit -S -qm signed && git config gpg.program "${program}" && git config log.showSignature true`);
+      assert.match(sh(d, 'git cat-file commit HEAD'), /^gpgsig /m, 'a signed commit');
+      sh(d, 'git log -1');
+      assert.ok(existsSync(marker), 'a plain git log runs the program');
+      rmSync(marker);
+      passed(push(d));
+      assert.ok(!existsSync(marker), 'the scan did not run it');
+    },
+    // Tips come from the object itself, so the graph lies about a commit below them.
+    'a commit-graph with rewritten parents does not hide a token commit': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      addRemove(d); clean(d);
+      poisonGraph(d, [[sh(d, 'git rev-parse HEAD~1'), base]]);
+      assert.deepEqual(secretsInDiff(sh(d, `git log -p --cc --format= ${base}..HEAD`)), [], 'the graph hides the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a commit-graph giving a false merge-base does not change the base': () => {
+      const d = scanRepo({ gate: ['echo base={base}'] }), base = sh(d, 'git rev-parse origin/main'), older = sh(d, 'git rev-parse origin/main~1');
+      clean(d, 'one'); const one = head(d); clean(d, 'two'); const two = head(d); clean(d, 'three');
+      poisonGraph(d, [[one, older], [older, two]], { [base]: 20, [older]: 19 });
+      assert.notEqual(sh(d, `git merge-base HEAD ${base} || echo none`), base, 'the graph gives a false merge-base, or none');
+      const r = push(d); passed(r);
+      assert.ok(r.runs.some((x) => x.command === `echo base=${base}`), `base is ${base}: ${JSON.stringify(r.runs)}`);
+    },
+    'textconv output is scanned in the tree': () => { const d = scanRepo(); textconvFile(d); assert.deepEqual(secretsInDiff(sh(d, 'git diff --no-textconv origin/main..HEAD')), [], 'the raw file holds no token'); refused(push(d), NET, 'secret'); },
+    'color.ui=always does not hide textconv output': () => { const d = scanRepo(); sh(d, 'git config color.ui always'); textconvFile(d); refused(push(d), NET, 'secret'); },
+    'a failing textconv driver fails closed': () => { const d = scanRepo(); textconvFile(d, 'false'); refused(push(d), CLOSED, 'error'); },
+    'history is not read with textconv: a driver for a file only in history does not run': () => {
+      const d = scanRepo(), ran = join(gitDirOf(d), 'conv-ran');
+      textconvFile(d, script(d, 'conv', `: > "${ran}"\nexec base64 -d "$1"`));
+      sh(d, 'git rm -q k.b64 && git commit -qm remove');
+      passed(push(d));
+      assert.ok(!existsSync(ran), 'the driver did not run');
+    },
+    'a diff.external printing a token still denies the push, as on main': () => { const d = scanRepo(); clean(d); const x = script(d, 'loud-diff', `echo '+k=${TOKEN}'`); sh(d, `git config diff.external "${x}"`); refused(push(d), NET, 'secret'); },
+    'lock-in: a binary under the limit passes the scan': () => { const d = scanRepo(); bigBinary(d); sh(d, 'git add big.bin && git commit -qm big'); assert.equal(pushSecretScan(d, sh(d, 'git rev-parse origin/main'), 1 << 23), null); },
+    'a .git/info/grafts cycle over two token commits is denied': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      sh(d, `echo "k=${TOKEN}" > s.txt && git add s.txt && git commit -qm t1 && git commit -q --allow-empty -m t2 && git rm -q s.txt && git commit -qm rm`);
+      const t1 = sh(d, 'git rev-parse HEAD~2'), t2 = sh(d, 'git rev-parse HEAD~1');
+      writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${t1} ${t2}\n${t2} ${t1}\n`);
+      assert.deepEqual(secretsInDiff(logWithoutGraftOverride(d, `${base}..HEAD`)), [], 'the grafts hide the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'a graft cutting the token commits out of the walk is denied': () => {
+      const d = scanRepo(), base = sh(d, 'git rev-parse origin/main');
+      addRemove(d);
+      writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${head(d)} ${base}\n`);
+      assert.deepEqual(secretsInDiff(logWithoutGraftOverride(d, `${base}..HEAD`)), [], 'the graft hides the added line from a plain git log');
+      refused(push(d), HISTORY, 'secret');
+    },
+    'gate commands run with grafts off and the real merge-base': () => { const d = scanRepo({ gate: ['test "$GIT_GRAFT_FILE" = /dev/null', 'test "$GIT_NO_REPLACE_OBJECTS" = 1', 'echo base={base}'] }), mb = head(d); clean(d); const real = head(d); clean(d, 'second'); writeFileSync(join(gitDirOf(d), 'info', 'grafts'), `${real} ${sh(d, 'git rev-parse origin/main~1')}\n`); const r = push(d); passed(r); assert.ok(r.runs.some((x) => x.command === `echo base=${mb}`), `base is ${mb}: ${JSON.stringify(r.runs)}`); },
+    'an old-style record does not skip the scan': () => { const d = scanRepo(); addToken(d); oldRecord(d); refused(push(d), NET, 'secret'); },
+    'an old-style record does not skip the scan of history': () => { const d = scanRepo(); addRemove(d); oldRecord(d); refused(push(d), HISTORY, 'secret'); },
+    'an old-style record does not skip the gate commands': () => { const d = scanRepo({ gate: ['false'] }); clean(d); oldRecord(d); const r = push(d); assert.match(r.why, /harness gate failed: `false`/); assert.ok(!r.recorded, 'no new record'); },
+    'a clean head with an old-style record re-runs the gate once, then the new record skips it': () => { const d = scanRepo(); clean(d); oldRecord(d); const r = push(d); passed(r); assert.equal(r.runs.filter((x) => x.result === 'pass').length, 1, 'the gate ran'); assert.equal(push(d).runs.filter((x) => x.result === 'pass').length, 1, 'recorded head skips the gate'); },
+    'Stop does not take an old-style record for a passed gate': () => { const d = scanRepo(); clean(d); oldRecord(d); assert.match(stopReason(d), /the gate in \.harness\.json has not passed for HEAD/); },
+    'Stop takes the new record for a passed gate': () => { const d = scanRepo(); clean(d); passed(push(d)); assert.doesNotMatch(stopReason(d), /has not passed for HEAD/); },
+    'first push: token added then removed is denied': () => { const d = scanRepo(); addRemove(d); const r = push(d); refused(r, HISTORY, 'secret'); assert.match(r.why, /rewriting those commits \(a human step\)/); assert.doesNotMatch(r.why, /--no-verify|core\.hooksPath|bypass/); },
+    'rewritten branch: new range holding add and remove is denied': () => { const d = scanRepo(); clean(d, 'first'); passed(push(d)); sh(d, 'git push -q origin feat/x && git reset -q --hard HEAD~1'); clean(d, 'second'); addRemove(d); refused(push(d), HISTORY, 'secret'); },
+    'evil merge adding a new file, removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && echo "k=${TOKEN}" > merged.txt && git add merged.txt && git commit -qm evil && git rm -q merged.txt && git commit -qm remove`); refused(push(d), HISTORY, 'secret'); },
+    'evil merge editing a file, line removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 && echo "k=${TOKEN}" >> a && git add a && git commit -qm evil`); dropLast(d, 'a'); refused(push(d), HISTORY, 'secret'); },
+    'octopus evil merge, line removed later, is denied': () => { const d = scanRepo(); side(d, 'o1'); side(d, 'o2'); clean(d); sh(d, `git merge -q --no-ff --no-commit o1 o2 && echo "k=${TOKEN}" >> a && git add a && git commit -qm evil`); assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 4, 'three parents'); dropLast(d, 'a'); refused(push(d), HISTORY, 'secret'); },
+    'a side branch whose merge leaves the tree unchanged is still read': () => { const d = scanRepo(); sh(d, 'git checkout -q -b leak'); addRemove(d); sh(d, 'git checkout -q feat/x'); clean(d); sh(d, 'git merge -q --no-ff -m merge-leak leak'); refused(push(d), HISTORY, 'secret'); },
+    'log.showroot=false does not hide a root commit in the range': () => { const d = scanRepo(); sh(d, `git config log.showroot false && git checkout -q --orphan feat/y && git rm -qrf . && echo "k=${TOKEN}" > s.txt && git add s.txt && git commit -qm root && git rm -q s.txt && echo a > a && git add a && git commit -qm clean && git branch -qf feat/x && git checkout -q feat/x`); refused(push(d), HISTORY, 'secret'); },
+    'an added line starting with ++ is read, not taken for a header': () => { const d = scanRepo(); sh(d, `echo "++k=${TOKEN}" > p.txt && git add p.txt && git commit -qm plus`); refused(push(d), NET, 'secret'); },
+    'an added ++ line only in history is read': () => { const d = scanRepo(); sh(d, `echo "++k=${TOKEN}" > p.txt && git add p.txt && git commit -qm plus && git rm -q p.txt && git commit -qm rm`); refused(push(d), HISTORY, 'secret'); },
+    'lock-in: a secret in the tree keeps the net message': () => { const d = scanRepo(); addToken(d); refused(push(d), NET, 'secret'); },
+    'lock-in: base is the merge-base with origin main on first and later pushes': () => {
+      const d = scanRepo({ gate: ['echo base={base}'] }), mb = head(d);
+      sh(d, 'git checkout -q main && echo m > m && git add m && git commit -qm m && git push -q origin main && git checkout -q feat/x');
+      assert.notEqual(sh(d, 'git rev-parse origin/main'), mb, 'origin main moved past the branch point');
+      clean(d, 'one'); passed(push(d)); assert.ok(gateRuns(d, head(d)).some((x) => x.command === `echo base=${mb}`), 'first push (before = zeros) uses the merge-base');
+      sh(d, 'git push -q origin feat/x'); clean(d, 'two'); passed(push(d)); assert.ok(gateRuns(d, head(d)).some((x) => x.command === `echo base=${mb}`), 'a later push uses the same merge-base, not the pushed before');
+    },
+    'lock-in: *.lock and *.snap stay out of both scans': () => { const d = scanRepo(); addToken(d, 'x.lock'); addToken(d, 'y.snap'); sh(d, 'git rm -q y.snap && git commit -qm rm-snap'); passed(push(d)); },
+    'lock-in: a clean branch passes': () => { const d = scanRepo(); clean(d); const r = push(d); passed(r); assert.ok(r.runs.some((x) => x.result === 'pass')); },
+    'lock-in: a token already on origin main does not deny the feature push': () => { const d = scanRepo(); sh(d, `git checkout -q main && echo "k=${TOKEN}" > onmain.txt && git add onmain.txt && git commit -qm tok && git push -q origin main && git checkout -q -B feat/x main`); clean(d); passed(push(d)); },
+    // Both sides edit the same line and the resolution keeps both, so --cc shows main's token line with a one-column `+ ` prefix. It came from a parent already on origin.
+    'lock-in: merging origin main, a resolution keeping its token line does not deny': () => {
+      const d = scanRepo();
+      sh(d, `printf '1\\n' > f.txt && git add f.txt && git commit -qm f && git checkout -q main && git merge -q --ff-only feat/x && printf '1\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm tok && git push -q origin main`);
+      sh(d, `git checkout -q feat/x && printf '1\\nfeat\\n' > f.txt && git add f.txt && git commit -qm feat; git merge -q --no-ff origin/main; printf '1\\nfeat\\nk=${TOKEN}\\n' > f.txt && git add f.txt && git commit -qm merge-main`);
+      assert.equal(sh(d, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit');
+      assert.match(sh(d, 'git log -1 --cc --format='), /^\+ k=AKIA/m, '--cc shows the one-column prefix this case is about');
+      passed(push(d));
+    },
+  };
+  const failed = [];
+  for (const [name, fn] of Object.entries(cases)) {
+    try { fn(); console.log(`ok   SID-213 ${name}`); }
+    catch (e) { failed.push(name); console.log(`FAIL SID-213 ${name}: ${String(e.message).split('\n')[0].slice(0, 200)}`); }
+  }
+  assert.deepEqual(failed, [], 'SID-213 cases');
+}
 
 const mustDeny = [
   'git push --force origin feat/x', 'git push -f', 'git push -fu origin feat/x', 'git push -uf origin feat/x', 'git push --force-with-lease origin main',
@@ -622,7 +927,7 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git add -A && git commit -m x &&
 sh(repo, 'echo b > b && git add b && git commit -qm b');
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/x')), null, 'passing gate allows');
 const gitdir = sh(repo, 'git rev-parse --absolute-git-dir');
-assert.ok(existsSync(join(gitdir, 'harness-gate', sh(repo, 'git rev-parse HEAD'))), 'gate records HEAD');
+assert.ok(existsSync(join(gitdir, GATE_RECORD_DIR, sh(repo, 'git rev-parse HEAD'))), 'gate records HEAD');
 assert.match(readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8'), /"kind":"gate".*"result":"pass".*test -f a/);
 assert.equal(run('pre-bash.mjs', bash('gh pr create --fill')), null, 'recorded HEAD skips the gate');
 assert.equal(run('pre-bash.mjs', bash('git status')), null, 'gate ignores non-push commands');
@@ -640,9 +945,10 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin feat/x'))), /pla
 setPolicy({ gate: ['head -c 2000000 /dev/zero | tr "\\0" x'] });
 sh(repo, 'echo e > e && git add e && git commit -qm e');
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/x')), null, 'large gate output is not a failure');
-sh(repo, 'echo "key = AKIAABCDEFGHIJKLMNOP" > s.txt && git add s.txt && git commit -qm s');
+sh(repo, `echo "key = ${TOKEN}" > s.txt && git add s.txt && git commit -qm s`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git push origin feat/x'))), /AWS key/);
-sh(repo, 'git rm -q s.txt && git commit -qm rm');
+// SID-213: the scan now reads every commit in the range, so a later `git rm` no longer clears this branch. Later steps keep pushing feat/x, so the harness's own git drops the commit instead.
+sh(repo, 'git reset -q --hard HEAD~1');
 
 // Fail closed: a malformed policy on origin denies instead of crashing open.
 sh(repo, "git checkout -q main && printf '{bad' > .harness.json && git commit -qam bad && git push -q origin main && git checkout -q feat/x");
@@ -654,7 +960,7 @@ setPolicy({ gate: ['test -f a'] });
 const wt = trackScratch(join(repo, '..', 'wt-' + Date.now()));
 sh(repo, `git worktree add -q -b feat/wt "${wt}" main && cd "${wt}" && echo w > w && git add w && git commit -qm w`);
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/wt', wt)), null, 'gate passes in a worktree');
-assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), 'harness-gate', sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
+assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), GATE_RECORD_DIR, sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
 
 // Stop: silent with nothing ahead; blocks once per state; never loops; silent outside the harness.
 sh(repo, 'git checkout -q main');
