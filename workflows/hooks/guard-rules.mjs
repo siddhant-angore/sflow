@@ -112,6 +112,10 @@ const replaceReason = (a) => {
   return list ? null : NO_REPLACE;
 };
 
+// An unquoted word that starts with a glob that can match a name starting with `-` (`*`, `?`, `[-]`, `[!a]`, `[^x]`): bash may expand it to a file named like an option (`--exec=...`). Pattern check only; quoted words are literal.
+const NO_OPT_GLOB = 'an unquoted glob in a git <sub> argument can expand to a file named like an option (--exec=, --upload-pack=); quote it or spell the names out';
+const optGlob = (raw) => { const w = []; for (let [t, r] = take(raw); t !== null; [t, r] = take(r)) w.push(t); return w.slice(2).some((t) => /^[*?]/.test(t) || /[-!^]/.test(/^\[(\]?[^\]]*)\]/.exec(t)?.[1] ?? '')) ? NO_OPT_GLOB : null; };
+
 export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch) {
   const p = pushReason(raw, prot, branch);
   if (p) return p;
@@ -128,6 +132,7 @@ export function reason(raw, { protectedBranches: prot, allowMerge, unreadable },
     [/^git\s+replace\b/, replaceReason],
     [/^git\s+(filter-branch|filter-repo)\b|^git\s+update-ref\s+-d\b|^git\s+reflog\s+expire\b|^git\s+gc\b.*--prune/, 'history rewriting is not allowed'],
     [/^git\s+push\b/, null],
+    [/^git\s+(push|fetch|pull|clone|ls-remote|archive|submodule)\b/, () => optGlob(raw)],
     [/^git\s+remote\s+set-head\b/, (a) => (a.some((x) => /^(-a|--auto)$/.test(x)) && !a.some((x) => /^(-d|--delete)$/.test(x)) ? null : NO_SET_HEAD)],
     [/^git\s+symbolic-ref\b/, () => symrefReason(raw)],
     [/^git\s+(fetch|pull)\b/, (a) => { const dsts = a.filter((x) => !x.startsWith('-')).map((x) => x.replace(/^\+/, '').split(':').slice(1).join(':')); return dsts.some(isReplaceRef) ? NO_REPLACE : dsts.some(isRemoteRef) ? NO_FETCH_DST : null; }],
