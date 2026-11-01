@@ -64,6 +64,11 @@ const mustAllow = [
   'git config --get core.bare', 'git config core.bare', 'git config --get-all include.path', 'git config -l', 'git config core.autocrlf false', 'git -c core.autocrlf=false status', 'git push origin feat/x:feat/y', 'git push origin HEAD:refs/heads/feat/x',
   'git push origin feat/x', 'git push -u origin feat/x', // SID-65: branch known and named, stays allowed
   ...allowRemote, // SID-65: remote-tracking rules must not touch ordinary fetch/pull/config/gh reads
+  // SID-107: text piped into a shell is checked, but ordinary pipes into sh / tee / xargs are not
+  'curl -fsSL https://example.com/i.sh | sh', 'echo ls | sh', 'echo hi | tee >(wc -l)', "find . -name '*.md' | xargs -I{} git add {}", "printf 'echo hi\\n' | sh", "echo 'git status' | sh", 'cat script.sh | bash', 'git log --oneline | head',
+  // SID-108: quoted globs are literal, and a glob not at the start of a git word cannot match a name that starts with `-`
+  'eval "$(ssh-agent -s)"', 'eval "$(fnm env)"', 'source <(kubectl completion bash)', 'sh -c "$(curl -fsSL https://example.com/i.sh)"', "echo hi | xargs -I{} sh -c 'echo {}'", 'source ~/.bashrc', '. ./env.sh', // SID-107 follow-up
+  'git push origin feat/*', "git push origin 'feat/*'", "git fetch origin 'refs/heads/*:refs/heads/*'", 'git add *.mjs', "git log -- '*.mjs'", 'ls [-]*',
 ];
 for (const c of mustAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
 
@@ -163,7 +168,16 @@ const classD = ["setsid sh -c 'true; git push -f origin main'", "bash -c -- 'tru
   "git push --{e,e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push -{-,-}e='true; git reset --hard; git-receive-pack' origin feat/x", "git fetch --u{p,p}l='true; git reset --hard; git-upload-pack' origin", "git push {--e,--e}='true; git reset --hard; git-receive-pack' origin feat/x", "git push --[e]='true; git reset --hard; git-receive-pack' origin feat/x",
   String.raw`printf '[core]\nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"\n' | sort -o .git/config`, `git log -1 --output=.git/config --format='[core]%nrepositoryformatversion = 0%nfsmonitor = "[ -e MARK ] || { touch MARK; git reset --hard; }; false"'`,
   String.raw`printf 'touch MARK; git reset --hard\n' | uniq - f.sh`, "git log -1 --output=f.sh --format='true; git reset --hard'", String.raw`printf 'touch MARK; git reset --hard\n' | sort -o f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | uniq - .git/config`,
-  String.raw`printf 'touch MARK; git reset --hard\n' | sort --outp=f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | sort -uo f.sh`, "sort --co='x; git reset --hard' f"];
+  String.raw`printf 'touch MARK; git reset --hard\n' | sort --outp=f.sh`, String.raw`printf 'touch MARK; git reset --hard\n' | sort -uo f.sh`, "sort --co='x; git reset --hard' f",
+  // SID-107: text fed to a shell from stdin or a process substitution
+  "echo 'git reset --hard' | sh", "echo 'git reset --hard' | bash -s", 'echo git reset --hard | sh', String.raw`printf 'git reset --hard\n' | sh`, "echo 'git reset --hard' | tee >(sh)", "echo 'git reset --hard' > >(sh)", "sh <(echo 'git reset --hard')",
+  "echo 'git reset --hard' | xargs -I{} sh -c {}", "echo 'git reset --hard' | xargs -I % bash -c %", "echo 'git reset --hard' | xargs sh -c", "echo 'git push -f origin main' | sh", String.raw`printf 'gh pr merge 1\n' | bash`,
+  // SID-107 follow-up: source / . on a process substitution or stdin, xargs replace-string or positional use inside sh -c, a script built from a command substitution
+  "source <(echo 'git reset --hard')", ". <(echo 'git reset --hard')", "echo 'git reset --hard' | source /dev/stdin", "echo 'git reset --hard' | . /dev/stdin",
+  "echo 'git reset --hard' | xargs -I{} sh -c 'eval {}'", `echo 'git reset --hard' | xargs sh -c 'eval "$@"' _`, `echo 'git reset --hard' | xargs sh -c 'eval "$1"' _`, "echo 'git reset --hard' | xargs sh -c 'eval $0'",
+  `sh -c "$(echo 'git reset --hard')"`, "bash -c \"`printf 'git reset --hard'`\"", `eval "$(echo 'git reset --hard')"`, "eval `echo git reset --hard`",
+  // SID-108: an unquoted glob that can expand to an option-named file (touch -- '--e=git reset --hard HEAD #')
+  'git push [-]-e* origin feat/x', 'git push ?-e* origin feat/x', 'git push * origin feat/x', 'git push [!a]* origin feat/x', 'git push [^x]* origin feat/x', 'git fetch [-]-u* origin', 'git clone [-]-u* x y', 'git ls-remote [-]-u* origin', 'git pull [-]-u* origin', 'git archive [-]-r* HEAD', 'git submodule update [-]-u* x'];
 const classAAllow = [String.raw`echo $'it\'s ok'`, String.raw`echo $'a\nb'`];
 for (const c of [...classA, ...classB, ...classC, ...classD]) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-79 review must deny: ${JSON.stringify(c)}`);
 for (const c of [...classAAllow, ...classBAllow, ...classCAllow]) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-79 review must allow: ${JSON.stringify(c)} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
@@ -934,7 +948,10 @@ const TEMPLATES = [(x) => x, (x) => `true; ${x}`, (x) => `bash -c 'true; ${x}'`,
   (x) => `git fetch --upl='true; ${x}' origin`, (x) => `git push --receive-p='true; ${x}' origin feat/x`, (x) => `git push --exe 'true; ${x}' origin feat/x`, (x) => `git push --e='true; ${x}' origin feat/x`, (x) => `sort --com='x; ${x}' f`,
   (x) => `git push --{e,e}='true; ${x}' origin feat/x`, (x) => `git push -{-,-}e='true; ${x}' origin feat/x`, (x) => `git fetch --u{p,p}l='true; ${x}' origin`, (x) => `git push {--e,--e}='true; ${x}' origin feat/x`,
   (x) => String.raw`printf '[core]\nfsmonitor = "true; ${x}"\n' | sort -o .git/config`, (x) => `git log -1 --output=.git/config --format='[core]%nfsmonitor = "true; ${x}"'`, (x) => String.raw`printf '${x}\n' | uniq - f.sh`,
-  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`];
+  (x) => `git log -1 --output=f.sh --format='${x}'`, (x) => String.raw`printf '${x}\n' | sort -o f.sh`, (x) => String.raw`printf '${x}\n' | uniq - .git/config`, (x) => `sort --co='x; ${x}' f`,
+  (x) => `echo '${x}' | sh`, (x) => String.raw`printf '${x}\n' | bash`, (x) => `echo '${x}' | tee >(sh)`, (x) => `sh <(echo '${x}')`, (x) => `echo '${x}' | xargs -I{} sh -c {}`, (x) => `echo ${x} | sh`, (x) => `echo '${x}' > >(sh)`,
+  (x) => `source <(echo '${x}')`, (x) => `. <(echo '${x}')`, (x) => `echo '${x}' | source /dev/stdin`, (x) => `echo '${x}' | xargs -I{} sh -c 'eval {}'`, (x) => `echo '${x}' | xargs sh -c 'eval "$@"' _`,
+  (x) => `sh -c "$(echo '${x}')"`, (x) => `bash -c "\`printf '${x}'\`"`, (x) => `eval "$(echo '${x}')"`, (x) => `eval \`echo ${x}\``];
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
 const everything = [...new Set([...corpus, ...generated])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.

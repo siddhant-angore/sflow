@@ -310,6 +310,40 @@ function payload(s) {
 // A command reads a shell script from stdin: `bash`, `busybox sh`, `ssh host` (not `sh -c`). Heredoc text anywhere in a command that has such a segment may reach it (`cat <<E | sh`), so all its bodies count as commands.
 const feedsShell = (n) => { const b = head(n)[1] ?? ''; return (SHELL.test(b) || b === 'ssh') && payload(n).length === 0; };
 
+// The replace-string of the xargs in a raw segment (`-I{}`, `-I %`, `-i`, `--replace[=S]`), or null. normalize() strips xargs, so `xargs -I{} sh -c {}` is only seen as `sh -c {}` there.
+function xargsRepl(s) {
+  let r = /(?:^|\s)xargs\s+([\s\S]*)$/.exec(s)?.[1], repl = null;
+  for (; r !== undefined;) {
+    const [t, a] = take(r);
+    if (!t?.startsWith('-') || t === '--') return repl;
+    r = a;
+    if (t === '-I') { const [v, b] = take(a); repl = v && unquote(v); r = b; }
+    else if (/^-I./.test(t)) repl = unquote(t.slice(2));
+    else if (t === '-i' || t === '--replace') repl = '{}';
+    else if (/^-i./.test(t)) repl = unquote(t.slice(2));
+    else if (t.startsWith('--replace=')) repl = unquote(t.slice(10));
+    else if ((t.length === 2 && WRAPPERS.xargs.includes(t[1])) || LONG_ARG.has(t)) r = take(a)[1];
+  }
+  return repl;
+}
+// A shell that reads its SCRIPT from stdin or a process substitution: `sh`, `bash -s`, `ssh host`, `xargs sh -c` (not `bash file.sh`, which reads the file), or `xargs -I{} sh -c {}`, where each input line is the script.
+function stdinShell(o) {
+  const s = stripRedirs(o.trim()), n = normalize(s), [h, b, r] = head(n);
+  if (h === 'source' || h === '.') return /^(?:\/dev\/(?:stdin|fd\/0))?$/.test(r.trim()); // `source <(cmd)` (the `<(` is cut off), `| source /dev/stdin`; not `source file`
+  if (feedsShell(n)) { if (b === 'ssh') return true; for (let [t, a] = take(r); t !== null; [t, a] = take(a)) if (!/^[-+]/.test(t)) return false; return true; }
+  const p = payload(n)[0]?.trim();
+  if (p === undefined) return false;
+  if (/[$`]$/.test(p)) return true; // `sh -c "$(cmd)"`, `eval \`cmd\``: split() cuts the segment right at the substitution, so the payload ends in `$` or a backtick; the script is cmd's output
+  // under xargs the input reaches the script as the replace-string or as positional arguments ($@ $* $0 $1 ..)
+  return /(?:^|\s)xargs\s/.test(s) && (p.includes('{}') || (xargsRepl(s) !== null && p.includes(xargsRepl(s))) || /\$(?:[@*0-9]|\{[@*0-9])/.test(p));
+}
+// What a stdin shell may be fed: every quoted string in the line, and the argument text of each other segment (`echo git reset --hard | sh`), with echo -e / printf escapes decoded.
+const esc = (t) => t.replace(/\\([\s\S])/g, (_, c) => (c === 'n' || c === 'r' ? '\n' : c === 't' ? '\t' : c));
+const fedText = (line, out) => [
+  ...[...line.matchAll(/\$'((?:\\[\s\S]|[^'\\])*)'|'([^']*)'|"((?:\\[\s\S]|[^"\\])*)"/g)].map((m) => esc(m[1] ?? m[2] ?? m[3])),
+  ...out.filter((o) => !stdinShell(o)).map((o) => esc(unquote(take(stripRedirs(o.trim()))[1]))),
+];
+
 // Quoted text is only data when nothing in the command can execute it. `echo 'x; git push -f origin main' | sh` and `... > f.sh && bash f.sh` run it, and `git -c core.pager='...' log` or `GIT_PAGER='...' git log` execute it,
 // so quotes are honoured only when every segment (judged raw, after redirections) starts with a command that never runs its arguments; anything else also gets the quote-blind scan.
 const NON_EXEC = /^(?:(?:echo|printf|grep|cat|rg|cd|pwd|ls|true|false|:|test|\[|head|tail|wc|sort|uniq|cut|tr|mkdir|touch|tee|sleep)|git\s+(?:add|commit|status|log|diff|show|push|fetch|switch|checkout|restore|branch|rm|mv|tag|stash|reset|clean|rev-parse)|gh\s+(?:pr\s+(?:create|edit|comment|view)|issue\s+(?:create|comment|view)))(?:\s|$)/;
@@ -429,6 +463,7 @@ export function segments(cmd) {
     if (!d.quoted) { const x = split(`"${d.text.replace(/\\[\s\S]|"/g, (m) => (m === '"' ? '\\"' : m))}"`); raw.push(...x.out.slice(1)); unsure ||= x.open || x.docs.length > 0; } // an unquoted body still expands $( ) and backticks
     if (reads) extra.push(...segments(d.text));
   }
+  if (out.some(stdinShell)) extra.push(...fedText(joined, out).flatMap(segments)); // text piped into a shell (`echo 'git reset --hard' | sh`, `tee >(sh)`, `sh <(echo ..)`, `xargs -I{} sh -c {}`) runs
   const run = (s) => { const n = normalize(s); return n ? [n, ...payload(n).flatMap(segments)] : []; };
   const qa = [...raw.flatMap(run), ...extra];
   if (!unsure && raw.every(nonExec) && !writesFile(joined)) return qa; // a line that writes a file keeps main's quote-blind scan too: what it writes can run later
