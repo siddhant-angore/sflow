@@ -589,10 +589,10 @@ export function canon(cmd) {
       out += cmd.slice(i, e); i = Math.max(e, i + 2); continue;
     }
     if (isOp(c)) { out += c; i++; continue; }
-    const start = i; let val = '', quoted = false, expands = false; // one word
+    const start = i; let val = '', quoted = false, expands = false, joined = false; // one word
     while (i < n && !isOp(cmd[i])) {
       const ch = cmd[i];
-      if (ch === '\\') { if (cmd[i + 1] === '\n') { i += 2; continue; } quoted = true; val += cmd[i + 1] ?? ''; i += 2; }
+      if (ch === '\\') { if (cmd[i + 1] === '\n') { joined = true; i += 2; continue; } quoted = true; val += cmd[i + 1] ?? ''; i += 2; }
       else if (ch === "'") { const e = cmd.indexOf("'", i + 1); quoted = true; if (e < 0) { open = true; i = n; } else { val += cmd.slice(i + 1, e); i = e + 1; } }
       else if (ch === '$' && cmd[i + 1] === "'") { const e = quoteEnd(cmd, i); quoted = true; if (e > n) { open = true; i = n; } else { val += ansi(cmd.slice(i + 2, e - 1)); i = e; } }
       else if (ch === '"' || (ch === '$' && cmd[i + 1] === '"')) {
@@ -607,7 +607,8 @@ export function canon(cmd) {
       else if (ch === '`') { expands = true; let k = i + 1; for (; k < n && cmd[k] !== '`'; k++) if (cmd[k] === '\\') k++; if (k >= n) { open = true; i = n; break; } val += cmd.slice(i, k + 1); i = k + 1; }
       else { if (ch === '$') expands = true; val += ch; i++; }
     }
-    const raw = cmd.slice(start, i);
+    // SID-191 review B2: a line continuation inside a word joins it (`c\<newline>ore.hooksPath` is core.hooksPath), so the word is rewritten too.
+    const raw = joined ? cmd.slice(start, i).replace(/\\\n/g, '') : cmd.slice(start, i);
     out += !quoted || expands ? raw : val !== '' && SAFE_WORD.test(val) ? val : `'${val.replace(/'/g, `'\\''`)}'`;
   }
   if (pending.length) open = open; // an unterminated heredoc still runs (bash warns), so it does not count as open

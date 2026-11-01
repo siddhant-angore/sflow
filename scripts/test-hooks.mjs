@@ -121,6 +121,39 @@ for (const body of SPLIT_BODIES) {
 for (const c of splitVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 quote-split variant must deny on ${b}: ${c}`);
 for (const c of splitVariants.filter((_, k) => k % 37 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 quote-split variant must deny through the hook: ${c}`);
 console.log(`SID-191: ${sid191.length} reported + ${sid191More.length} more must-deny, ${sid191Allow.length} must-allow, ${splitVariants.length} generated quote-split variants x 2 branches denied`);
+// SID-191 review (B1-B5 on b3b69f9): the reported forms, then generated variants of every SPLIT_BODIES command. Each was allowed on b3b69f9.
+const sid191Review = [
+  "bash -c 'gh pr '\\''merge'\\'' 1'", "bash -c 'git reset '\\''--hard'\\'' HEAD~1'", "bash -c 'git push origin '\\'''\\''main'", "bash -c 'git commit '\\''--no-verify'\\'' -m x'",
+  "bash -c 'git -c c\"ore.hooksPath=/tmp/h\" commit -m x'", "bash -c 'git -c \\c\\o\\r\\e\\.\\h\\o\\o\\k\\s\\P\\a\\t\\h\\=/tmp/h commit -m x'", // B1
+  'git -c c\\\nore.hooksPath=/tmp/h commit -m x', 'git -c core.hooks\\\nPath=/tmp/h commit -m x', // B2
+  'gh pr {merge,1}', 'git reset {--hard,HEAD~1}', 'git commit {--no-verify,-m} x', 'git {push,origin} main', 'git push origin {main,feat}', 'g{h,} pr merge 1', // B3
+  'touch -- --hard && git reset --har? HEAD~1', 'touch merge; gh pr m?rge 1', 'touch main && git push origin ma?n', 'git push origin m[a]in', 'git reset -[-]hard', 'git commit -[-]no-verify', 'gh api -X P[U]T repos/o/r/pulls/1/merge', 'g?t push origin main', // B4
+  'npm ${X:-publish}', 'npm "$(printf %s publish)"', 'npm `echo publish`', 'pnpm $X', 'yarn ${C}', 'p(){ "$@"; }; p gh pr merge 1', 'p(){ "$@"; }; p git push origin main', 'function p { $@; }; p git reset --hard', "bash -c 'eval \"$1\"' _ 'gh pr merge 1'", "sh -c '$1 $2 $3 $4' _ git push origin main", "bash -c '\"$@\"' _ git reset --hard", // B5
+  "eval 'gh pr '\\''merge'\\'' 1'", "eval 'git -c c\"ore.hooksPath=/tmp/h\" commit -m x'", "env bash -c 'gh pr '\\''merge'\\'' 1'", "timeout 5 sh -c 'git reset '\\''--hard'\\''", "nice -n 5 bash -c 'git -c c\"ore.hooksPath=/tmp/h\" commit'", // B1 through eval and wrappers
+  'git -c "core.hooks\\\nPath=/tmp/p" commit -m x', // a backslash-newline inside double quotes joins the word (pins canon's double-quote escape handling)
+  Array(10).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), // nested past PAYLOAD_DEPTH: fails closed
+];
+for (const c of sid191Review) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review must deny on ${b}: ${c}`);
+for (const c of sid191Review.filter((_, k) => k % 4 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review must deny through the hook: ${c}`);
+const sid191ReviewAllow = ['git add *.mjs', 'git add src/*.mjs docs/*.md', 'ls *.md', 'echo {a,b}', "git commit -m 'fix {a,b}'", 'git commit -m "x {a,b} *"', "git log --format='{%H}'", 'gh pr view 1', 'npm test', 'npm run build', 'npm "test"',
+  "bash -c 'npm test'", "sh -c 'echo \"$1\"' _ hi", 'f(){ echo "$@"; }; f a b', "bash -c 'git status'", Array(3).fill(0).reduce((s) => `bash -c '${s.replace(/'/g, `'\\''`)}'`, 'git status'), 'eval "$(ssh-agent -s)"'];
+for (const c of sid191ReviewAllow) assert.ok(!guardDenies(c), `SID-191 review must allow: ${c} (${newRules.lineReason(c) ?? newRules.segmentReason(c, sid191Cfg, 'feat/x')?.why})`);
+const sqr = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+const GLOB_WORDS = new Set(['push', 'reset', 'clean', 'branch', 'stash', 'commit', 'checkout', 'config', 'update-ref', 'filter-branch', 'pr', 'api', 'merge', 'publish', 'PUT', 'main', '--force', '--hard', '--no-verify', '--mirror', '--stdin', '-D', 'clear']);
+const reviewVariants = [];
+for (const body of SPLIT_BODIES) {
+  const ws = body.split(' ');
+  reviewVariants.push(`bash -c ${sqr(body)}`, `sh -c 'eval "$1"' _ ${sqr(body)}`, `bash -c '"$@"' _ ${body}`, `p(){ "$@"; }; p ${body}`, `bash -c ${sqr(`bash -c ${sqr(body)}`)}`);
+  ws.forEach((w, k) => {
+    const at = (x) => [...ws.slice(0, k), x, ...ws.slice(k + 1)].join(' ');
+    reviewVariants.push(`bash -c ${sqr(at(`'${w}'`))}`, `bash -c ${sqr(at(`\\${w}`))}`, at(`{${w},${w}}`)); // B1 quoting inside a payload, B3 braces
+    if (w.length >= 2) { const m = Math.ceil(w.length / 2); reviewVariants.push(at(`${w.slice(0, m)}\\\n${w.slice(m)}`)); } // B2 continuation inside the word
+    if (GLOB_WORDS.has(w)) reviewVariants.push(at(`${w.slice(0, -1)}?`), at(`${w.slice(0, 1)}[${w[1]}]${w.slice(2)}`), at(`${w.slice(0, 2)}*`)); // B4
+  });
+}
+for (const c of reviewVariants) for (const b of ['feat/x', 'main']) assert.ok(guardDenies(c, b), `SID-191 review variant must deny on ${b}: ${c}`);
+for (const c of reviewVariants.filter((_, k) => k % 41 === 0)) assert.ok(denied('pre-bash.mjs', bash(c)), `SID-191 review variant must deny through the hook: ${c}`);
+console.log(`SID-191 review: ${sid191Review.length} must-deny, ${sid191ReviewAllow.length} must-allow, ${reviewVariants.length} generated variants x 2 branches denied`);
 
 for (const c of mustDeny.filter((x) => /replace/.test(x) && !/symbolic-ref|--stdin|^git push/.test(x))) assert.match(reasonOf(run('pre-bash.mjs', bash(c))), /replace refs can change what the harness policy reads/, `replace message: ${c}`);
 assert.match(reasonOf(run('pre-bash.mjs', bash('git symbolic-ref HEAD refs/remotes/origin/main'))), /git switch/, 'HEAD symref message names git switch');
@@ -1098,7 +1131,7 @@ for (const base of baselines) {
 // SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
 {
   const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
-  const ours = new Set([...sid191, ...sid191More, ...splitVariants]);
+  const ours = new Set([...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants]);
   const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))))].sort();
   console.log(`SID-191 collateral vs 91c6b08: ${fresh.length} corpus commands newly denied${fresh.length ? ':\n  ' + fresh.map((c) => JSON.stringify(c)).join('\n  ') : ''}`);
 }

@@ -475,6 +475,7 @@ export function expansionReason(seg, cfg, branch, vars = new Map()) {
   let words = w, cands;
   if (hasExp(w[0])) cands = ['git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'uv'].map((e) => [e, ...w.slice(1)]);
   else if (/^(git|gh)$/.test(w[0])) cands = [w];
+  else if (/^(npm|pnpm|yarn|bun)$/.test(canon(w[0]).text) && w[1] !== undefined && hasExp(w[1])) return say(w[1]); // SID-191 review B5: `npm ${X:-publish}`, `npm "$(printf %s publish)"`
   else return null;
   // the rest of the line names a guarded subcommand (`$CMD push`, `$GH pr merge 1`, `$X publish`), or is itself an expansion: a guarded program
   // could be in that variable, so it fails closed. `$EDITOR notes.md`, `$PYTHON x.py`, `$CMD status` stay allowed.
@@ -547,24 +548,149 @@ export function lineReason(cmd) {
   if (C.open) return NO_OPEN;
   return [...new Set([cmd, C.text])].map(envReason).find(Boolean) ?? hiddenConfigReason(cmd);
 }
+// SID-191 review B1/B5: text another shell runs, with its quoting resolved the way that shell receives it. `bash -c 'P' a b` runs P with $0=a
+// $1=b; `eval A B` runs "A B"; a function defined on the line whose body uses its arguments (`p(){ "$@"; }`) runs its body with the call's
+// arguments. Positional parameters are substituted (each "$@" argument quoted on its own), so `bash -c 'eval "$1"' _ 'gh pr merge 1'` and
+// `p gh pr merge 1` are read as the commands they run. Nesting past PAYLOAD_DEPTH fails closed.
+export const PAYLOAD_DEPTH = 8;
+const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+const POS = /"\$(@|\*|\d|\{\d+\})"|\$(@|\*|\d|\{\d+\})/g;
+const positional = (body, args) => body.replace(POS, (m, q, u) => {
+  const k = (q ?? u).replace(/[{}]/g, '');
+  if (k === '@') return q ? args.slice(1).map(sq).join(' ') : args.slice(1).join(' ');
+  if (k === '*') return q ? sq(args.slice(1).join(' ')) : args.slice(1).join(' ');
+  const v = args[+k] ?? '';
+  return q ? sq(v) : v;
+});
+const SH_RUN = /^(?:sh|ash|bash|zsh|dash|ksh|mksh|fish)$/;
+function functionDefs(cmd) {
+  const defs = new Map();
+  for (const t of new Set([cmd, canon(cmd).text])) for (const m of t.matchAll(/(?:^|[\s;&|(])(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\s*\)\s*([{(])([\s\S]*?)[})](?=\s*(?:;|&|\||\n|$))|(?:^|[\s;&|(])function\s+([A-Za-z_][\w-]*)\s*\{([\s\S]*?)\}(?=\s*(?:;|&|\||\n|$))/g)) {
+    const name = m[1] ?? m[4], body = m[3] ?? m[5];
+    if (POS.test(body)) defs.set(name, body);
+    POS.lastIndex = 0;
+  }
+  return defs;
+}
+// The scripts one segment hands to another shell: [{ text }]. simpleCommands gives each word's value as the shell passes it on.
+function runsText(seg, defs) {
+  const out = [];
+  for (const { w: raw } of simpleCommands(seg)) {
+    let i = 0; while (i < raw.length && /^[A-Za-z_]\w*=/.test(raw[i])) i++;
+    let w = raw.slice(i);
+    // wrappers (env, timeout, nice, ...) are already stripped: segments() normalizes each segment
+    let b = base(w[0] ?? '');
+    if (b === 'busybox') { w = w.slice(1); b = base(w[0] ?? ''); }
+    if (b === 'eval' && w.length > 1) out.push(w.slice(1).join(' '));
+    else if (SH_RUN.test(b)) {
+      for (let k = 1; k < w.length; k++) {
+        const o = w[k];
+        if (!/^[-+]/.test(o)) break;
+        if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(o)) { let j = k + 1; while (j < w.length && /^[-+]/.test(w[j]) && w[j] !== '--') j += /^[-+][oO]$/.test(w[j]) ? 2 : 1; if (w[j] === '--') j++; if (w[j] !== undefined) out.push(positional(w[j], w.slice(j + 1))); break; }
+        if (/^[-+][oO]$/.test(o)) k++;
+      }
+    } else if (defs.has(w[0] ?? '')) out.push(positional(defs.get(w[0]), w));
+  }
+  return out;
+}
+
+// SID-191 review B3/B4: brace expansion and unquoted globs can build a guarded word (`gh pr {merge,1}`, `g{h,} pr merge 1`,
+// `git reset --har? HEAD~1`, `git push origin m[a]in`). Each word is read with its quoting: an unquoted {a,b} or {a..b} in a guarded command
+// (or in its command word) is denied; an unquoted glob in a guarded command is denied when it could match a denied token, a guarded
+// subcommand or a protected branch (`git add *.mjs` stays allowed).
+const GUARDED = /^(git|gh|npm|pnpm|yarn|bun|cargo|uv|twine|npx)$/;
+// The words of a segment, each as [{ c, q }] (q: the character was quoted or escaped). Expansions are kept as unquoted text.
+function quotedWords(seg) {
+  const words = []; let cur = null;
+  const push = (c, q) => { (cur ??= []).push({ c, q }); };
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i];
+    if (ch === '\\') { if (seg[i + 1] === '\n') { i++; continue; } if (i + 1 < seg.length) push(seg[++i], true); continue; }
+    if (ch === "'") { const e = seg.indexOf("'", i + 1), end = e < 0 ? seg.length : e; for (const c of seg.slice(i + 1, end)) push(c, true); if (cur === null) cur = []; i = end; continue; }
+    if (ch === '"') { let j = i + 1; if (cur === null) cur = []; for (; j < seg.length && seg[j] !== '"'; j++) { if (seg[j] === '\\' && '$`"\\\n'.includes(seg[j + 1] ?? '')) { j++; if (seg[j] !== '\n') push(seg[j], true); } else push(seg[j], true); } i = j; continue; }
+    if (/[\s;&|<>()]/.test(ch)) { if (cur) words.push(cur); cur = null; continue; }
+    push(ch, false);
+  }
+  if (cur) words.push(cur);
+  return words;
+}
+const plainOf = (w) => w.map((x) => x.c).join('');
+// Brace expansion of one word ([{c,q}]): the alternatives, or null when it has no unquoted {a,b} / {a..b}.
+function braceAlts(w) {
+  for (let i = 0; i < w.length; i++) {
+    if (w[i].c !== '{' || w[i].q) continue;
+    let d = 0, commas = [], j = i;
+    for (; j < w.length; j++) { const x = w[j]; if (x.q) continue; if (x.c === '{') d++; else if (x.c === '}' && --d === 0) break; else if (x.c === ',' && d === 1) commas.push(j); }
+    if (j >= w.length) return null;
+    const pre = plainOf(w.slice(0, i)), post = plainOf(w.slice(j + 1));
+    if (commas.length) { const cuts = [i, ...commas, j]; return cuts.slice(1).map((c, k) => pre + plainOf(w.slice(cuts[k] + 1, c)) + post); }
+    if (/^[^.]*\.\.[^.]*$/.test(plainOf(w.slice(i + 1, j)))) return [pre + post, pre + plainOf(w.slice(i + 1, j)) + post];
+  }
+  return null;
+}
+// An unquoted glob word as a RegExp, or null.
+function globRe(w) {
+  if (!w.some((x) => !x.q && /[*?[]/.test(x.c))) return null;
+  let re = '';
+  for (let i = 0; i < w.length; i++) {
+    const { c, q } = w[i];
+    if (q) { re += c.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&'); continue; }
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (c === '[') { let j = i + 1; if (w[j]?.c === '!' || w[j]?.c === '^') j++; if (w[j]?.c === ']') j++; while (j < w.length && w[j].c !== ']') j++; if (j >= w.length) { re += '\\['; continue; } let cls = plainOf(w.slice(i + 1, j)).replace(/^[!^]/, '^').replace(/\\/g, '\\\\'); re += `[${cls}]`; i = j; }
+    else re += c.replace(/[\\^$.+()[\]{}|/-]/g, '\\$&');
+  }
+  try { return new RegExp(`^${re}$`); } catch { return /^/; }
+}
+const DANGER = () => [...PROBES, ...GIT_SUBS, ...GH_SUBS, 'publish', 'unpublish', 'deprecate', 'PUT', 'POST', 'DELETE', 'PATCH', '-XPUT', '-XDELETE', '--method', '--no-verify', '--force-with-lease', '--force-if-includes', '--prune', 'core.hooksPath', 'HUSKY', 'pre-commit'];
+export function shapeReason(seg, cfg) {
+  const ws = quotedWords(seg);
+  let i = 0; while (i < ws.length && /^[A-Za-z_]\w*=/.test(plainOf(ws[i]))) i++;
+  const head = ws[i];
+  if (!head) return null;
+  const alts = braceAlts(head);
+  if (alts && alts.some((a) => GUARDED.test(base(a)))) return `brace expansion in the command word (${plainOf(head)}) can build a guarded command; write the command out`;
+  const hg = globRe(head);
+  if (hg && ['git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'uv', 'twine', 'npx'].some((e) => hg.test(e))) return `a glob in the command word (${plainOf(head)}) can match a guarded command; write the command out`;
+  if (!GUARDED.test(base(plainOf(head)))) return null;
+  const danger = [...DANGER(), ...(cfg?.protectedBranches ?? [])];
+  for (const w of ws.slice(i + 1)) {
+    if (braceAlts(w)) return `brace expansion (${plainOf(w)}) in a ${base(plainOf(head))} command can build a denied word; quote it or write the words out`;
+    const re = globRe(w);
+    if (re && !plainOf(w).includes('$')) { const hit = danger.find((t) => re.test(t)); if (hit) return `the unquoted glob ${plainOf(w)} in a ${base(plainOf(head))} command could match ${hit}; quote it or write the word out`; }
+  }
+  return null;
+}
+
 // Every segment that may run: segments() of the line, and each segment again with its own quoting resolved (text inside $( ),
 // sh -c '..' and piped-in scripts is unquoted only once it is a segment of its own).
 export function guardSegments(cmd) {
-  const segs = [], seen = new Set();
-  for (const todo = segments(cmd); todo.length;) { // the whole line's canon form adds nothing: each segment below is re-read with its quoting resolved (a mutation dropping it survived)
-    const s = todo.shift();
+  const segs = [], seen = new Set(), defs = functionDefs(cmd);
+  segs.payloads = []; segs.tooDeep = false;
+  for (const todo = segments(cmd).map((s) => [s, 0]); todo.length;) { // the whole line's canon form adds nothing: each segment below is re-read with its quoting resolved (a mutation dropping it survived)
+    const [s, d] = todo.shift();
     if (seen.has(s)) continue;
     seen.add(s); segs.push(s);
     const c = canon(s);
-    if (!c.open && c.text !== s) todo.push(...segments(c.text).map((x) => normalize(x)).filter(Boolean));
+    if (!c.open && c.text !== s) todo.push(...segments(c.text).map((x) => [normalize(x), d]).filter((x) => x[0]));
+    // SID-191 review B1/B5: what this segment hands to another shell, read as that shell reads it
+    for (const p of runsText(s, defs)) {
+      if (d + 1 > PAYLOAD_DEPTH) { segs.tooDeep = true; break; }
+      if (segs.payloads.includes(p)) continue;
+      segs.payloads.push(p);
+      todo.push(...segments(p).map((x) => [normalize(x), d + 1]).filter((x) => x[0]));
+    }
   }
   return segs;
 }
 // The first segment the rules deny, with why; null when none does.
 export function segmentReason(cmd, cfg, branch, segs = guardSegments(cmd)) {
   const vars = assignments(cmd);
+  if (segs.tooDeep) return { why: `shell -c / eval payloads are nested more than ${PAYLOAD_DEPTH} deep, so the guard can't read what runs; run the command directly`, seg: cmd };
+  // SID-191 review B1: a payload gets the whole-line checks too (core.hooksPath, hidden config, an unclosed quote)
+  for (const p of segs.payloads ?? []) { const why = lineReason(p); if (why) return { why, seg: p }; }
   for (const seg of segs) {
-    const why = reason(seg, cfg, branch) ?? expansionReason(seg, cfg, branch, vars);
+    const why = reason(seg, cfg, branch) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
     if (why) return { why, seg };
   }
   // expansions, on the commands with their substitutions whole (segments() cuts them out), as written and with quoting resolved
