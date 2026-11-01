@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULTS = { protectedBranches: ['main', 'master'], gate: [], allowMerge: false, dod: [] };
@@ -15,11 +15,23 @@ export function readEvent() {
 // Grafts (.git/info/grafts) rewrite parents the same way, and git 2.47 still honours them under --no-replace-objects, so only GIT_GRAFT_FILE turns them off.
 // A shallow boundary cuts parents the same way, and a shallow fetch makes one out of any local commit, so GIT_SHALLOW_FILE turns that off too: a read that needs a parent the clone really lacks fails.
 // core.fsmonitor=false: a configured fsmonitor hook script would otherwise run inside the hook on `git status`/`diff`.
+// SID-244: the pathspec variables change how git reads every pathspec the scan passes: with GIT_LITERAL_PATHSPECS a `:(literal)x` is a file of that name and matches nothing, and GIT_ICASE_PATHSPECS widens `:(exclude)*.lock` to X.LOCK. Nothing sflow runs inherits them.
 export const NO_REPLACE_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_SHALLOW_FILE: '/dev/null' };
+for (const k of ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) delete NO_REPLACE_ENV[k];
+// advice.graftFileDeprecated=false: GIT_GRAFT_FILE makes git print eight hint lines on most reads, ahead of any real error.
+export const GIT_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'advice.graftFileDeprecated=false'];
+const missing = (p) => { try { lstatSync(p); return false; } catch (e) { return e.code === 'ENOENT' || e.code === 'ENOTDIR'; } };
+// The env for one gate command. With no shallow file or grafts file in the repo an override changes no history walk, and only breaks things: every repo reads as shallow, `git clone --depth 1` fails, git prints hints. So each override goes when its file is absent, and stays when one exists, planted or real, so a gate command never sees a boundary or graft the #34 gate could not see. The scan keeps both, always.
+export const gateEnv = (root) => {
+  const common = resolve(root, git(root, 'rev-parse', '--git-common-dir')), env = { ...NO_REPLACE_ENV };
+  if (missing(join(common, 'shallow'))) delete env.GIT_SHALLOW_FILE;
+  if (missing(join(common, 'info', 'grafts'))) delete env.GIT_GRAFT_FILE;
+  return env;
+};
 // <git dir>/<this>/<head> records that the gate passed for head. Versioned: a change that makes the gate stricter gets a new name, so a head that passed the weaker gate is checked again.
 export const GATE_RECORD_DIR = 'harness-gate-v2';
 export function git(root, ...args) {
-  return execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
+  return execFileSync('git', [...GIT_GLOBALS, '-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: NO_REPLACE_ENV }).toString().trim();
 }
 
 // The work tree root; failing that (cwd inside .git, or core.bare=true) the git dir itself, flagged noWorkTree, so the repo stays readable
@@ -135,7 +147,7 @@ export function chase(p, trail = [], hops = 0) {
 }
 // git that tells "no repository" (null) from a failure (throws): a missing binary, a safe.directory refusal or a broken config all throw.
 function gitAt(at, args, unset = []) {
-  const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-C', at, ...args], { encoding: 'utf8', env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+  const r = spawnSync('git', [...GIT_GLOBALS, '-C', at, ...args], { encoding: 'utf8', env: NO_REPLACE_ENV, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
   if (r.error) throw r.error;
   if (r.status === 0) return r.stdout.replace(/\n$/, '');
   if (unset.includes(r.status)) return null;
@@ -234,7 +246,7 @@ export const currentBranch = (root) => { try { return git(root, 'symbolic-ref', 
 // Indirection (`g=git; $g push -f`, aliases, `sh -c '...'`, scripts written then run) stays best-effort: SID-77/78.
 const KEYWORDS = new Set(['!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const EXES = new Set(['git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'uv', 'twine']);
-const WRAPPERS = { env: 'uC', command: '', builtin: '', exec: 'a', nice: 'n', nohup: '', time: 'of', timeout: 'ks', stdbuf: 'ioe', ionice: 'cnpPu', sudo: 'ugCDhprtTU', doas: 'uC', xargs: 'nILPsdEa' }; // short options that take a separate argument
+const WRAPPERS = { env: 'uC', command: '', builtin: '', exec: 'a', nice: 'n', nohup: '', setsid: '', time: 'of', timeout: 'ks', stdbuf: 'ioe', ionice: 'cnpPu', sudo: 'ugCDhprtTU', doas: 'uC', xargs: 'nILPsdEa' }; // short options that take a separate argument
 const LONG_ARG = new Set(['--user', '--group', '--chdir', '--unset', '--host', '--prompt', '--role', '--type', '--other-user', '--close-from', '--command-timeout', '--adjustment', '--kill-after', '--signal', '--max-args', '--max-procs', '--max-lines', '--replace', '--delimiter', '--eof', '--arg-file']);
 const GIT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
 const take = (s) => { const m = /^\s*((?:"[^"]*"|'[^']*'|\S)+)\s*/.exec(s); return m ? [m[1], s.slice(m[0].length)] : [null, '']; };
@@ -473,7 +485,7 @@ function dequote(s) { // q: s single, d double, a $'..'
   return out;
 }
 const GIT_SEP = /&&|\|\||;|\n|`|[()]|(?<!>)\||(?<![<>&\d])&(?![>&])/, GIT_REDIR = /(?<![-=])\d*(?:&>>?|>>|>\||<>|>&|>)\s*([^\s<>|&;()]+)/g;
-const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|sflow-hooks|info|modules\/.+))?\/*$|(?:^|\/)\.husky\/*$/, GIT_CMDS = new Set(['sort', 'uniq', 'git', 'tee', 'cp', 'mv', 'ln', 'install', 'sed', 'perl', 'dd', 'truncate']);
+const GIT_CD = /(?:^|\/)[^\/\s]*\.git(?:\/(?:hooks|sflow-hooks|info|modules\/.+))?\/*$|(?:^|\/)\.husky\/*$/, GIT_CMDS = new Set(['sort', 'uniq', 'git', 'tee', 'cp', 'mv', 'ln', 'install', 'rsync', 'sed', 'perl', 'dd', 'truncate']);
 const GIT_WRAP = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'time', 'timeout', 'stdbuf', 'ionice', 'xargs']), GIT_KW = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
 const NO_FILE = /^\/dev\/(?:null|stdout|stderr|tty)$/;
 // SID-155: removing, moving or un-executing a git hook turns off the guards that run outside Claude (SID-147). The hooks dirs: .git/hooks (also a
@@ -489,6 +501,15 @@ const hookGlob = (p) => {
   if (!/[*?[]/.test(p)) return false;
   const c = p.split('/');
   return c.some((x, i) => globPart(x, '.husky') || (globPart(x, '.git') && i + 1 < c.length && ['hooks', 'sflow-hooks'].some((h) => globPart(c[i + 1], h))));
+};
+// SID-243: .git/info/attributes (a submodule's or a linked worktree's too) sets diff drivers for every path, and is not in any commit. A glob that could match it counts.
+const ATTR_FILE = /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?info\/attributes$/i;
+export const isInfoAttributes = (p) => {
+  const n = posix.normalize(String(p));
+  if (ATTR_FILE.test(n)) return true;
+  if (!/[*?[]/.test(n)) return false;
+  const c = n.split('/').slice(-3);
+  return c.length === 3 && globPart(c[0], '.git') && globPart(c[1], 'info') && globPart(c[2], 'attributes');
 };
 // Output files named by sort (-o FILE, -oFILE, clusters like -uo FILE, --output and its unique abbreviations) and uniq (second operand). Both write the file, so they count as file writes.
 export function sortOut(args) {
@@ -520,14 +541,14 @@ export function uniqOut(args) {
 }
 // One pass over one string: { writes: git-dir/config writes as [{ path, kind }], files: every file it writes }. Commands inside $( ) in a quoted string are hidden here; scanAll adds them.
 function scan(cmd) {
-  const text = cmd.replace(/\\\n/g, '').replace(/\$\(\s*git\s+rev-parse\s+--git-path\s+hooks\s*\)|`\s*git\s+rev-parse\s+--git-path\s+hooks\s*`/g, '.git/hooks').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--git-common-dir\s*\)|`\s*git\s+rev-parse\s+--git-common-dir\s*`|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
+  const text = cmd.replace(/\\\n/g, '').replace(/\$\(\s*git\s+rev-parse\s+--git-path\s+hooks\s*\)|`\s*git\s+rev-parse\s+--git-path\s+hooks\s*`/g, '.git/hooks').replace(/\$\(\s*git\s+rev-parse\s+--git-path\s+info\/attributes\s*\)|`\s*git\s+rev-parse\s+--git-path\s+info\/attributes\s*`/g, '.git/info/attributes').replace(/\$\{?GIT_DIR\}?|\$\(\s*git\s+rev-parse\s+--git-common-dir\s*\)|`\s*git\s+rev-parse\s+--git-common-dir\s*`|\$\(\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*\)|`\s*git\s+rev-parse\s+--(?:absolute-)?git-dir\s*`/g, '.git'); // $GIT_DIR and rev-parse --git-dir name a git dir
   const dq = dequote(text), base = (x) => x.replace(/^.*\//, '');
   const dirs = [...show(dq).matchAll(/(?:^|[\s;&|(`])(?:GIT_DIR=|--git-dir[=\s]\s*)([^\s;&|)`]+)/g)].map((m) => m[1].replace(/\/+$/, '')).filter(Boolean); // GIT_DIR=X, --git-dir X: X/config is a git config
   const writes = [], files = []; let cwd = null;
   const hit = (t) => {
     t = show(t).replace(/\/{2,}/g, '/').replace(/\/(?:\.\/)+/g, '/');
     const d = dirs.find((x) => t.startsWith(`${x}/`)); if (d) t = `.git/${t.slice(d.length + 1)}`;
-    for (const p of cwd && !/^[\/~$]/.test(t) ? [t, `${cwd}/${t.replace(/^\.\//, '')}`] : [t]) { const kind = KIND_RES.find(([, re]) => re.test(p))?.[0]; if (kind) return void writes.push({ path: p, kind }); }
+    for (const p of cwd && !/^[\/~$]/.test(t) ? [t, `${cwd}/${t.replace(/^\.\//, '')}`] : [t]) { const kind = isInfoAttributes(p) ? 'attributes' : KIND_RES.find(([, re]) => re.test(p))?.[0]; if (kind) return void writes.push({ path: p, kind }); }
   };
   const put = (t) => { if (!NO_FILE.test(show(t))) files.push(show(t)); hit(t); };
   const unhook = (t) => { // SID-155: t is removed, moved away or has its mode changed
@@ -563,7 +584,10 @@ function scan(cmd) {
     else { // cp mv ln install: the destination is -t DIR or the last operand
       const j = args.findIndex((a) => /^-[a-zA-Z]*t$/.test(a) || a === '--target-directory'), eq = args.find((a) => a.startsWith('--target-directory='));
       const dest = eq ? eq.slice(19) : j >= 0 ? args[j + 1] : operands.at(-1);
-      if (dest) put(dest);
+      if (dest) {
+        put(dest);
+        for (const p of cwd && !/^[\/~$]/.test(dest) ? [dest, `${cwd}/${dest}`] : [dest]) if (isInfoAttributes(`${p}/attributes`)) writes.push({ path: p, kind: 'attributes' }); // a copy into .git/info itself: which name lands there isn't provable (`cp attributes .git/info`, `cp -r d .git/info`)
+      }
       if (name === 'ln') operands.filter((x) => x !== dest && (j < 0 || x !== args[j + 1])).forEach(hit); // SID-162: a link to or from a hook or git config file (`ln -s .git/hooks/post-commit pc`, `ln .git/hooks/pre-commit hl`) lets a later write or chmod change it
       if (name === 'mv') (eq || j >= 0 ? operands.filter((o) => o !== dest) : operands.slice(0, -1)).forEach(unhook); // SID-155: mv takes its sources away
     }
@@ -584,27 +608,35 @@ export function gitWrites(cmd) {
 export const writesFile = (cmd) => scanAll(cmd).files.length > 0;
 
 // Everything that may run. Quote-aware segments (with $( ), backtick, heredoc-body and payload extraction) are always used. Unless quotes are honoured, the text is also split quote-blind on && || ; | newline, as before.
-export function segments(cmd) {
+// raw: each piece as written, not normalized, so `git -c k=v` and VAR=x prefixes are still there.
+export function segments(cmd, raw = false) {
   const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)); // backslash-newline continues the line
-  const { out, docs, open } = split(joined), raw = [...out], extra = [];
+  const { out, docs, open } = split(joined), pieces = [...out], extra = [], again = (t) => segments(t, raw);
   let unsure = open;
   const reads = out.some((o) => feedsShell(normalize(o)));
   for (const d of docs) {
-    if (!d.quoted) { const x = split(`"${d.text.replace(/\\[\s\S]|"/g, (m) => (m === '"' ? '\\"' : m))}"`); raw.push(...x.out.slice(1)); unsure ||= x.open || x.docs.length > 0; } // an unquoted body still expands $( ) and backticks
-    if (reads) extra.push(...segments(d.text));
+    if (!d.quoted) { const x = split(`"${d.text.replace(/\\[\s\S]|"/g, (m) => (m === '"' ? '\\"' : m))}"`); pieces.push(...x.out.slice(1)); unsure ||= x.open || x.docs.length > 0; } // an unquoted body still expands $( ) and backticks
+    if (reads) extra.push(...again(d.text));
   }
-  if (out.some(stdinShell)) extra.push(...fedText(joined, out).flatMap(segments)); // text piped into a shell (`echo 'git reset --hard' | sh`, `tee >(sh)`, `sh <(echo ..)`, `xargs -I{} sh -c {}`) runs
-  const run = (s) => { const n = normalize(s); return n ? [n, ...payload(n).flatMap(segments)] : []; };
-  const qa = [...raw.flatMap(run), ...extra];
-  if (!unsure && raw.every(nonExec) && !writesFile(joined)) return qa; // a line that writes a file keeps main's quote-blind scan too: what it writes can run later
+  if (out.some(stdinShell)) extra.push(...fedText(joined, out).flatMap(again)); // text piped into a shell (`echo 'git reset --hard' | sh`, `tee >(sh)`, `sh <(echo ..)`, `xargs -I{} sh -c {}`) runs
+  const run = (s) => { const n = normalize(s); return n ? [raw ? s : n, ...payload(n).flatMap(again)] : []; };
+  const qa = [...pieces.flatMap(run), ...extra];
+  if (!unsure && pieces.every(nonExec) && !writesFile(joined)) return qa; // a line that writes a file keeps main's quote-blind scan too: what it writes can run later
   const seen = new Set(qa), blind = [];
   // Lines of a heredoc body no shell reads are data, so as on main a leading keyword is not stripped there; bodies fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) are still checked fully through `extra`.
   const bodyLines = reads ? new Set() : new Set(docs.flatMap((d) => d.text.split(/&&|\|\||;|\||\n/).map((x) => x.trim())));
   for (const s of [cmd, joined].flatMap((t) => t.split(/&&|\|\||;|\||\n/))) {
     const n = normalize(s, !bodyLines.has(s.trim()));
-    if (n && !seen.has(n)) { seen.add(n); blind.push(n, ...payload(n).flatMap(segments)); }
+    if (n && !seen.has(n)) { seen.add(n); blind.push(raw ? s : n, ...payload(n).flatMap(again)); }
   }
   return [...new Set([...qa, ...blind])];
+}
+
+export const rawSegments = (cmd) => segments(cmd, true);
+// No command on the line can run its quoted text: every piece is a known non-executing command, nothing is written to a file, and no heredoc expands.
+export function quotesAreData(cmd) {
+  const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)), { out, docs } = split(joined);
+  return docs.every((d) => d.quoted) && out.every(nonExec) && !writesFile(joined);
 }
 
 // SID-191 review item 8 and re-review B6: a deny must reach Claude Code whole, or not pretend to. An async stdout write of more than a pipe buffer
@@ -806,7 +838,7 @@ export const secretsInDiff = (diff) => secretNames(addedLines(diff));
 // `Binary files differ` unless --text. Shared with the pre-commit scan, so the two cannot drift.
 // core.bigFileThreshold=1g is defence in depth no test can tell from --text on git 2.47: only the binary sniff reads the threshold and --text skips the sniff, --cc and diff-tree -c never read it, and a file a textconv read takes for binary is read raw by the --text read.
 // core.commitGraph=false: git trusts a graph file's parent column, so a hand-edited graph can cut commits out of the walk. GIT_SHALLOW_FILE=/dev/null also turns the graph off today, because git counts a repo with any shallow file as shallow; this does not lean on that.
-const SCAN_GLOBALS = ['--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.bigFileThreshold=1g', '-c', 'core.commitGraph=false'];
+const SCAN_GLOBALS = [...GIT_GLOBALS, '-c', 'core.bigFileThreshold=1g', '-c', 'core.commitGraph=false'];
 const SCAN_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '--text'];
 const SCAN_EXCLUDES = [':(exclude)*.lock', ':(exclude)*.snap'];
 const SCAN_PATHS = ['--', '.', ...SCAN_EXCLUDES];
@@ -823,16 +855,34 @@ const PUSH_DRIVER_FLAGS = ['--no-color'];
 // --cc cannot be the whole read of a merge. It ignores --text, so it prints `Binary files differ` for a -diff or binary file; it cuts a line at a NUL byte, which the binary sniff misses past byte 8000; and from 64 parents it prints no line as new.
 // So every merge is also read against every parent: as in --cc, only a line added against all of them is new in the merge. Limited to the paths it changes against all of them, since a whole diff against a parent can carry that parent's history into the buffer.
 const MAX_MERGE_PARENTS = 63;
-const addedByMerges = (read, merges) => merges.flatMap(([merge, ...parents]) => {
+// SID-244: `git diff` takes no --pathspec-from-file (measured on 2.47), so a merge's paths go in chunks small enough for any argv (the kernel's floor is 128 KiB). The path limit already cuts rename pairs across the rest of the tree; a pair cut across chunks reads as an add and a delete, which shows more lines, never fewer. The reads of one parent share one maxBuffer.
+const MAX_PATH_BYTES = 96 << 10;
+const chunked = (paths) => {
+  const out = []; let cur = null, size = 0;
+  for (const p of paths) {
+    const n = Buffer.byteLength(p) + 11; // :(literal) and a NUL
+    if (!cur || size + n > MAX_PATH_BYTES) { out.push(cur = []); size = 0; }
+    cur.push(p); size += n;
+  }
+  return out;
+};
+const addedByMerges = (read, merges, maxBuffer) => merges.flatMap(([merge, ...parents]) => {
   const changed = read(['diff-tree', '-c', '--name-only', '-z', '--no-commit-id', merge], { flags: [], paths: [] }).split('\0').filter(Boolean);
   if (!changed.length) return [];
   // A name that is not UTF-8 decodes to U+FFFD and could not be passed back to git, so such a merge is read whole.
-  const paths = changed.some((p) => p.includes('\ufffd')) ? SCAN_PATHS : ['--', ...changed.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES];
-  const perParent = parents.map((p) => new Set(addedLines(read(['diff', `${p}..${merge}`], { paths }))));
+  const lists = changed.some((p) => p.includes('\ufffd')) ? [SCAN_PATHS] : chunked(changed).map((c) => ['--', ...c.map((p) => `:(literal)${p}`), ...SCAN_EXCLUDES]);
+  const perParent = parents.map((p) => {
+    const diff = lists.map((paths) => read(['diff', `${p}..${merge}`], { paths })).join('\n');
+    if (diff.length > maxBuffer) throw Object.assign(new Error(`the reads of merge ${merge.slice(0, 12)} hold more than ${maxBuffer} bytes`), { code: 'ENOBUFS' });
+    return new Set(addedLines(diff));
+  });
   return [...perParent[0]].filter((line) => perParent.every((added) => added.has(line)));
 });
-export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
-  const read = (args, opts) => scanRead(root, args, { maxBuffer, ...opts }), range = `${base}..HEAD`;
+// The line a human needs from git's stderr: hints (and warnings) can come first.
+export const firstError = (text) => { const l = String(text).trim().split('\n'); return l.find((x) => /^(?:fatal|error):/.test(x)) ?? l.find((x) => x.trim() && !/^hint:/.test(x)) ?? l[0]; };
+// exec is a seam for the tests: a real E2BIG needs a limit they can't set.
+export function pushSecretScan(root, base, maxBuffer = 256 << 20, exec = scanRead) {
+  const read = (args, opts) => exec(root, args, { maxBuffer, ...opts }), range = `${base}..HEAD`;
   let net, history;
   try {
     if (!base) throw new Error('no base commit to scan from');
@@ -842,10 +892,11 @@ export function pushSecretScan(root, base, maxBuffer = 256 << 20) {
     if (wide) return { result: 'error', detail: `secret scan: merge ${wide[0].slice(0, 12)} has ${wide.length - 1} parents`, reason: `harness gate: a merge in the pushed range has ${wide.length - 1} parents (${wide[0]}), and the secret scan reads at most ${MAX_MERGE_PARENTS} (failing closed). Split the octopus into merges of at most ${MAX_MERGE_PARENTS} parents, then push again.` };
     net = [...secretsInDiff(read(['diff', range])), ...secretsInDiff(read(['diff', range], { flags: PUSH_DRIVER_FLAGS }))];
     const log = read(['log', '--no-show-signature', '-p', '--cc', '--root', '--full-history', '--format=%H', range]);
-    history = secretNames([...addedLines(log), ...addedByMerges(read, merges)]);
+    history = secretNames([...addedLines(log), ...addedByMerges(read, merges, maxBuffer)]);
   } catch (e) {
-    const first = (e.stderr?.toString().trim() || e.message).split('\n')[0];
-    const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.' : '';
+    const first = firstError(e.stderr?.toString().trim() || e.message);
+    const split = e.code === 'ENOBUFS' ? ' The range is too large to scan: split the push into smaller pushes, landing each on the base branch before the next, because the scan covers everything since the base branch.'
+      : e.code === 'E2BIG' ? ' A merge in the range touches too many paths for one git command line: split the merge into smaller merges, then push again.' : '';
     return { result: 'error', detail: `secret scan: ${first}`, reason: `harness gate: could not read the diff for the secret scan (failing closed): ${first}${split}` };
   }
   const names = [...new Set([...net, ...history])].join(', ');

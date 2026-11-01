@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GATE_RECORD_DIR, gitWrites as newGitWrites, pathWithin, pushSecretScan, secretsInDiff, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 import { scratch as makeScratch, trackScratch } from './scratch.mjs';
+import { COLLATERAL as sid243Collateral, MUST_ALLOW as sid243Allow, MUST_DENY_ATTR, MUST_DENY_CONFIG, MUST_DENY_OPAQUE, MUST_DENY_OVERRIDE, MUST_DENY_WRAPPER, NESTED_QUOTE_VARIANTS, QUOTE_VARIANTS, WRAP_VARIANTS } from './sid243-cases.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -429,7 +430,8 @@ if (process.env.SFLOW_R32_ONLY === '1') { console.log(`R32 only: ${JSON.stringif
       addToken(clone);
       refused(push(clone), NET, 'secret');
     },
-    'gate commands run with the shallow file off': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); passed(push(d)); },
+    // SID-244 narrowed this: the override stays when the repo has a shallow file, and goes when it has none (scripts/test-diff-guard.mjs).
+    'gate commands run with the shallow file off in a repo that has one': () => { const d = scanRepo({ gate: ['test "$GIT_SHALLOW_FILE" = /dev/null'] }); clean(d); writeFileSync(join(gitDirOf(d), 'shallow'), `${sh(d, 'git rev-parse origin/main')}\n`); passed(push(d)); },
     'log.showSignature does not run gpg.program during the scan': () => {
       const d = scanRepo(), { marker, program } = fakeGpg(d);
       sh(d, `echo c > c && git add c && git -c gpg.program="${program}" commit -S -qm signed && git config gpg.program "${program}" && git config log.showSignature true`);
@@ -1728,11 +1730,11 @@ assert.equal(startEntry.length, 1, 'exactly one SessionStart entry');
 assert.match(startEntry[0].hooks[0].command, /hooks\/harness\/session-start\.mjs/);
 // Regression check: the quote-aware guard must not allow anything the quote-blind guard on main denied, except the allowlist. Corpus: every command sent through bash() above plus a generated body x template set.
 const here = dirname(fileURLToPath(import.meta.url)), gitHere = (...a) => execFileSync('git', ['-C', here, ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-// Five baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65), 086c230 (the base the quote-aware PR started from), 5c959d2 (main when SID-155 started) and 91c6b08 (main before SID-191). Nothing any of them denies may become allowed, except the allowlist.
+// Six baselines: main at 6bd7438 (with #16, SID-79/80), main at f70d9bd (with #13, SID-65), 086c230 (the base the quote-aware PR started from), 5c959d2 (main when SID-155 started), 91c6b08 (main before SID-191) and b07b159 (main before SID-243). Nothing any of them denies may become allowed, except the allowlist.
 const pick = (revs) => revs.find((r) => { try { gitHere('rev-parse', '--verify', '-q', `${r}^{commit}`); return true; } catch { return false; } });
 const guardCfg = { protectedBranches: ['main', 'master'], allowMerge: false };
 const baselines = [];
-for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2'], ['91c6b08']]) { // 5c959d2: main when SID-155 started; 91c6b08: main before SID-191
+for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230'], ['5c959d2'], ['91c6b08'], ['b07b159']]) { // 5c959d2: main when SID-155 started; 91c6b08: main before SID-191; b07b159: main before SID-243
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
   const dir = makeScratch('harness-main-');
@@ -1764,7 +1766,9 @@ TEMPLATES.push(...ROUND7_SEMI);
 const generated = BODIES.flatMap((b) => TEMPLATES.map((t) => t(b)));
 // SID-110: `<template>; <body>` runs the body as its own command, so the current guard must deny every one, on a feature and a protected branch.
 for (const t of ROUND7_SEMI.filter((_, k) => k % 2)) for (const x of BODIES) for (const b of ['feat/x', 'main']) assert.ok(newDenies(t(x), b), `SID-110 ; variant must be denied on ${b}: ${t(x)}`);
-const everything = [...new Set([...corpus, ...generated])];
+// SID-243: the new deny forms, must-allows, near misses, pinned collateral and generated variants (asserted in scripts/test-diff-guard.mjs) join the corpus.
+const sid243Denies = [...MUST_DENY_CONFIG, ...MUST_DENY_OVERRIDE, ...MUST_DENY_OPAQUE, ...MUST_DENY_ATTR, ...MUST_DENY_WRAPPER, ...WRAP_VARIANTS, ...QUOTE_VARIANTS, ...NESTED_QUOTE_VARIANTS];
+const everything = [...new Set([...corpus, ...generated, ...sid243Denies, ...sid243Allow, ...sid243Collateral])];
 // Each entry is a command main denied only because it scans quoted text, and the new guard allows because nothing in the command can run that text.
 const ALLOWLIST = new Map([
   ['echo "a && git push -f"', 'quoted text of echo, which runs nothing'],
@@ -1790,7 +1794,7 @@ for (const base of baselines) {
 // SID-191 collateral: what the guard newly denies compared with main 91c6b08, over the whole corpus (the SID-191 cases themselves excluded). Pinned, so any growth is a visible test change.
 {
   const main191 = baselines.find((x) => x.sha.startsWith('91c6b08'));
-  const ours = new Set([...r32Ours, ...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral]);
+  const ours = new Set([...r32Ours, ...sid191, ...sid191More, ...splitVariants, ...sid191Review, ...reviewVariants, ...sid191Rev2, ...rev2Variants, ...sid191LiteralCollateral, ...sid243Denies]);
   const fresh = [...new Set(everything.filter((c) => !ours.has(c) && ['feat/x', 'main'].some((b) => nowDenies.get(`${b} ${c}`) && !main191.denies(c, b))).map((c) => c.split(repo).join('<REPO>')).map((c) => (c.length > 500 ? `sha256:${createHash('sha256').update(c).digest('hex')}:${c.length}` : c)))].sort(); // the scratch repo path differs per run; entries over 500 chars are pinned by hash and length
   // Exact list (scripts/sid191-collateral.json): a command that becomes newly denied, or stops being, fails here and the file is edited in review.
   const pinned = JSON.parse(readFileSync(join(here, 'sid191-collateral.json'), 'utf8'));
