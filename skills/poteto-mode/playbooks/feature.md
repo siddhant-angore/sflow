@@ -4,6 +4,7 @@
 
 - **sflow (before):** Read the Operating behaviors section of the **using-agent-skills** skill and hold to it for the whole task. The task must carry testable acceptance criteria and an out-of-scope list; if it does not, run the **Spec** playbook first.
 1. `how` over the affected subsystem.
+- **sflow (before):** Before fan-out or a multi-file change, run the usage check in `usage-handoff.md` of the **sflow** skill. If Claude Code or Grok Bot is below about 15% remaining, pause per that file with the handoff note on the issue, and report the reset time in IST instead of starting.
 2. `architect` for parallel design exploration.
    - **sflow (in):** Each runner reads the **codebase-design** skill with its `DEEPENING.md` and `DESIGN-IT-TWICE.md` (deep modules, the deletion test, one adapter is a hypothetical seam). A change that adds or alters a contract also reads the **api-and-interface-design** skill (Hyrum's Law, the idempotency-key contract). A UI change also reads the **frontend-ui-engineering** skill. Record a new term in `GLOSSARY.md` and a hard-to-reverse choice as an ADR per the **domain-modeling** skill.
 3. Write the throughput checkpoint as four todo items. A dimension that genuinely does not apply (single file, no fan-out) keeps its item with `n/a: <reason>` rather than being dropped:
