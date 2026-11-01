@@ -13,6 +13,8 @@
     "test:vendor": "node scripts/test-vendor.mjs",
     "model-budget": "node scripts/model-budget.mjs",
     "test:model-budget": "node scripts/test-model-budget.mjs",
+    "refresh-install": "node scripts/refresh-install.mjs",
+    "test:refresh-install": "node scripts/test-refresh-install.mjs",
     "upstream": "node scripts/upstream.mjs"
   }
 }
