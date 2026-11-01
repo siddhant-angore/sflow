@@ -10,6 +10,15 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
 
 > Each pull request adds its own entry here when it merges. The release step moves them under a version heading.
 
+### Added
+
+- Model budget (SID-143). `templates/pstack-models.md` is a default pstack model sheet: sonnet for workers and reviewers, haiku for mechanical work, and opus only for architecture and final verdicts. It caps effort at `high` and uses no fable. Until now no sheet shipped, so every swarm role fell back to opus at `xhigh`.
+  - `npm run model-budget -- install|check [--config <dir>]...` writes the sheet to `<config>/rules/pstack-models.md`, which Claude Code loads every session. `install` keeps a sheet that differs unless `--force`. `check` exits 1 when a config's sheet is missing or names an unknown model or effort.
+  - `npm run test:model-budget` covers the tiers and both commands offline, and `npm run check` runs it.
+  - The README's "Model budget" section explains the tiers and how to escalate one task.
+  - `install --force` backs up a sheet that differs to `pstack-models.md.bak-<UTC timestamp>` (not `.md`, so Claude Code does not load it as a second sheet) and prints the path. A symlink at the sheet path is refused.
+  - No guard, permission or settings change.
+
 ### Changed
 
 - `addyosmani/agent-skills` bumped from `eb07f19f52c2` to [`8bfcc1f9916f`](https://github.com/addyosmani/agent-skills/commit/8bfcc1f9916f2eea55494d8c1fa7f4bde867dd9e) (upstream 0.6.15; 12 vendored files change and one is added, the lock goes from 916 to 917 files). `constraint-driven-development` wires `npm run check:security` and `npm run check:a11y` through the new `scripts/quality-gate.mjs` (#694), which only reads a semgrep or axe JSON report and exits 0 (below threshold), 1 (blocking findings) or 2 (unusable report or invocation), and adds a "run the real CI command against a known violation and a clean control" step; `test-driven-development` says to exercise the real boundary for crash and rollback behavior (#750); `security-and-hardening` adds session cookies to its description (#759) and, with `git-workflow-and-versioning`, `references/security-checklist.md` and `hardening-patterns.md`, the staged-secret scan now lists file names only (`git diff --cached -i -G... --name-only`) so credentials are not echoed (#718); `doubt-driven-development` says to strip reasoning but keep contradicting evidence (#754); `context-engineering` replaces the fixed 75% trim point with "compact well before the host's limit" (#739); `browser-testing-with-devtools` waits for fonts and resize observers to settle before measuring layout after a viewport or font change, and `references/accessibility-checklist.md` states the large-text contrast thresholds precisely (#733); `shipping-and-launch` types the `ErrorBoundary` example with `React.PropsWithChildren` (#683); `git-workflow-and-versioning` also applies to inline diffs (#620). (SID-106)

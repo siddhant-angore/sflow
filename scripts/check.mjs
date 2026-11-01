@@ -25,6 +25,7 @@ try {
   run('node', ['scripts/test-eval-brake.mjs']);
   run('node', ['scripts/test-upstream.mjs']);
   run('node', ['scripts/test-vendor.mjs']);
+  run('node', ['scripts/test-model-budget.mjs']);
   run('node', ['scripts/check-routing.mjs']);
 } catch (err) { failure = err; }
 
