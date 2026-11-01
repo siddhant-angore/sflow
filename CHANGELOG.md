@@ -18,6 +18,13 @@ Each release has an "Upstream pins" table: the commit of every vendored source t
   - The README's "Model budget" section explains the tiers and how to escalate one task.
   - `install --force` backs up a sheet that differs to `pstack-models.md.bak-<UTC timestamp>` (not `.md`, so Claude Code does not load it as a second sheet) and prints the path. A symlink at the sheet path is refused.
   - No guard, permission or settings change.
+- Golden-update guard (SID-171). A new harness hook, `hooks/harness/golden.mjs`, runs on Bash and on every file tool (`Edit|Write|MultiEdit|NotebookEdit`). It denies updating golden files any way but the very_good MCP `test` tool with `update_goldens: true`. It is tighten-only.
+  - Shell: `--update-goldens`, `autoUpdateGoldenFiles` and update-goldens env or define spellings are denied anywhere in a command. In a Dart repo the hook also reads the local files the command runs (scripts, Makefile and includes, `melos.yaml`/`pubspec.yaml`, `package.json`, `justfile`, `dart run` targets, `bin/<name>.dart`, and `flutter_test_config.dart` for `flutter test`), following the files they name up to 4 levels deep.
+  - File tools: those switches can't be written into code or config, only into prose files. This closes the temporary `flutter_test_config.dart` route from SID-153.
+  - Fail closed: an unreadable event or file, a binary inside the project, a `cd` it can't follow before something runs, more than 400 files, or any error denies with exit 2 and the JSON deny.
+  - Collateral denies: any command that names `--update-goldens` or `UPDATE_GOLDENS` (a grep, an echo, a commit message or PR body that uses the flag; plain words like "update goldens" are fine); `make <any target>` when the Makefile has a golden target anywhere; running a binary inside a Dart project; `cd "$VAR" && ./script` in a Dart repo.
+  - No allowlist for a regen script: that would be a loosening, offered to Siddhant on SID-153.
+  - `npm run test:golden` (66 must-deny, 29 must-allow and 12 file-tool cases, fail-closed cases, the matcher) runs in `npm run check`. All 27 mutations of the hook are killed.
 
 ### Changed
 

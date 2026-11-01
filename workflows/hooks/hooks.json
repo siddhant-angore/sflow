@@ -4,7 +4,8 @@
   ],
   "PreToolUse": [
     { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/pre-bash.mjs\"", "timeout": 900 } ] },
-    { "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/policy.mjs\"" } ] }
+    { "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/policy.mjs\"" } ] },
+    { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/golden.mjs\"", "timeout": 60 } ] }
   ],
   "Stop": [
     { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/harness/stop.mjs\"", "timeout": 120 } ] }
