@@ -169,6 +169,7 @@ export function envReason(cmd) {
   if (/\b(HUSKY|LEFTHOOK|SKIP_HOOKS|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG)=/.test(cmd)) return 'disabling commit hooks by environment is not allowed';
   const writes = gitWrites(cmd).map((w) => w.kind);
   if (writes.includes('config')) return 'writing a git config file directly can make git run commands (core.pager, core.sshCommand, aliases, filters); use `git config <key> <value>` instead';
+  if (writes.includes('unhook') && !policyWriteReason(cmd)) return 'deleting or moving git hooks turns off the guards that run outside Claude; leave them in place and ask the user'; // SID-155; a policy-file write on the same line keeps its own (also denying) reason
   if (writes.includes('hooks')) return 'writing into a hooks directory installs code git runs automatically; ask the user, or use the harness hook setup';
   if (writes.length && segments(cmd).some((s) => /^git\b/.test(s))) return 'a write into .git/info or .git/modules is followed by a git command on the same line; git may run what was written; do the write on its own and review it';
   return null;
