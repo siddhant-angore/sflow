@@ -1,12 +1,13 @@
 // Pipes sample events through each hook and asserts the decision. Run: node scripts/test-hooks.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitWrites as newGitWrites, segments as newSegments, writesFile } from '../hooks/harness/lib.mjs';
 import * as newRules from '../hooks/harness/guard-rules.mjs';
+import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -18,7 +19,7 @@ const reasonOf = (r) => r?.hookSpecificOutput?.permissionDecisionReason ?? '';
 const denied = (hook, ev) => run(hook, ev)?.hookSpecificOutput?.permissionDecision === 'deny';
 
 // A repo with an origin whose main carries the policy, and a feature branch checked out.
-const repo = mkdtempSync(join(tmpdir(), 'harness-test-'));
+const repo = makeScratch('harness-test-');
 sh(repo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(repo, '.harness.json'), JSON.stringify({ gate: ['test -f a', 'echo base={base}'] }));
 sh(repo, 'git add .harness.json && git commit -qm policy && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -258,7 +259,7 @@ assert.match(reasonOf(run('pre-bash.mjs', bash('git status'))), /failing closed/
 setPolicy({ gate: ['test -f a'] });
 
 // Linked worktree: .git is a file; gate and stop still work.
-const wt = join(repo, '..', 'wt-' + Date.now());
+const wt = trackScratch(join(repo, '..', 'wt-' + Date.now()));
 sh(repo, `git worktree add -q -b feat/wt "${wt}" main && cd "${wt}" && echo w > w && git add w && git commit -qm w`);
 assert.equal(run('pre-bash.mjs', bash('git push origin feat/wt', wt)), null, 'gate passes in a worktree');
 assert.ok(existsSync(join(sh(wt, 'git rev-parse --absolute-git-dir'), 'harness-gate', sh(wt, 'git rev-parse HEAD'))), 'gate records in the worktree git dir');
@@ -274,7 +275,7 @@ assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: false }), null, 'sam
 assert.equal(run('stop.mjs', { cwd: repo, stop_hook_active: true }), null, 'never loops');
 sh(repo, 'git checkout -q -- a');
 assert.match(run('stop.mjs', { cwd: repo, stop_hook_active: false })?.reason ?? '', /gate/);
-const plain = mkdtempSync(join(tmpdir(), 'plain-'));
+const plain = makeScratch('plain-');
 sh(plain, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && echo b > b');
 assert.equal(run('stop.mjs', { cwd: plain, stop_hook_active: false }), null, 'repo without .harness.json is left alone');
 assert.equal(run('pre-bash.mjs', bash('git push --force', plain))?.hookSpecificOutput?.permissionDecision, 'deny', 'guard still applies without a policy file');
@@ -307,7 +308,7 @@ const runsAfter = readFileSync(join(gitdir, 'harness', 'runs.jsonl'), 'utf8').tr
 assert.ok(runsAfter.some((r) => r.kind === 'stop' && r.decision === 'brake'), 'brake recorded');
 
 // Solo repo: an explicit empty protectedBranches turns the push guard off but keeps every other rule.
-const solo = mkdtempSync(join(tmpdir(), 'harness-solo-'));
+const solo = makeScratch('harness-solo-');
 sh(solo, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init');
 writeFileSync(join(solo, '.harness.json'), JSON.stringify({ protectedBranches: [], gate: [] }));
 sh(solo, 'git add .harness.json && git commit -qm p && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin');
@@ -320,7 +321,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 {
   const { config } = await import(join(hooks, 'lib.mjs'));
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid65-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid65-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mk = (name) => { // repo on feat/x, bare origin with main only (no policy), origin/HEAD unset
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -598,7 +599,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
       for (const cmd of ['echo x > .harness.json', 'cp x/.harness.json .', 'cp a .claude/settings.json']) assert.ok(verdict(d, cmd).deny, `k8 ${tag}: SID-66 must deny: ${cmd}`);
       for (const cmd of ['cat .harness.json', 'cp .harness.json /tmp/', 'jq . .harness.json']) assert.ok(!verdict(d, cmd).deny, `k8 ${tag}: SID-66 must allow: ${cmd} (${verdict(d, cmd).why})`);
     }
-    const nonRepo = mkdtempSync(join(tmpdir(), 'harness-sid65-k8n-'));
+    const nonRepo = makeScratch('harness-sid65-k8n-');
     made.push(nonRepo);
     for (const cmd of ['gh pr merge 1 -R o/r', 'git push -f origin HEAD:main']) assert.ok(verdict(nonRepo, cmd).deny, `k8 non-repo: must deny: ${cmd}`);
     for (const cmd of ['ls', 'git clone /nonexistent/x.git', 'git init', 'gh pr view 1 -R o/r']) assert.ok(!verdict(nonRepo, cmd).deny, `k8 non-repo: must allow: ${cmd}`);
@@ -690,7 +691,7 @@ assert.ok(denied('pre-bash.mjs', bash('git push --force origin main', solo)), 's
 // Deny messages say what to do instead; narrow rules, so normal work stays allowed. Symlink defence and the SID-65 backstop are covered too.
 {
   const made = [];
-  const scratch = (name) => { const d = mkdtempSync(join(tmpdir(), `harness-sid66-${name}-`)); made.push(d, `${d}.origin.git`); return d; };
+  const scratch = (name) => { const d = makeScratch(`harness-sid66-${name}-`); made.push(d, `${d}.origin.git`); return d; };
   const mkNone = (name) => { // repo on feat/x, bare origin with main only: no policy committed
     const d = scratch(name);
     sh(d, 'git init -q -b main && git config user.email t@t && git config user.name t && echo a > a && git add a && git commit -qm init && git clone -q --bare . "$(pwd).origin.git" && git remote add origin "$(pwd).origin.git" && git fetch -q origin && git checkout -q -b feat/x');
@@ -876,7 +877,7 @@ const baselines = [];
 for (const revs of [['6bd7438', 'origin/main'], ['f70d9bd'], ['086c230']]) {
   const rev = pick(revs);
   assert.ok(rev, `regression check needs history: none of ${revs.join(', ')} exists here; fetch full history (git fetch --unshallow origin main)`);
-  const dir = mkdtempSync(join(tmpdir(), 'harness-main-'));
+  const dir = makeScratch('harness-main-');
   for (const f of ['lib.mjs', 'guard-rules.mjs']) writeFileSync(join(dir, f), gitHere('show', `${rev}:workflows/hooks/${f}`));
   const [lib, rules] = await Promise.all(['lib.mjs', 'guard-rules.mjs'].map((f) => import(pathToFileURL(join(dir, f)).href)));
   baselines.push({ sha: gitHere('rev-parse', '--short', rev), denies: (c, b) => Boolean(rules.envReason(c) || lib.segments(c).some((s) => rules.reason(s, guardCfg, b))) });
