@@ -75,7 +75,7 @@ try {
   const dir = join(gitDir(cfg.root), GATE_RECORD_DIR);
   mkdirSync(dir, { recursive: true });
   if (existsSync(join(dir, head))) process.exit(0);
-  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
+  const mergeBase = cfg.baseSha ? (() => { try { return git(cfg.root, '-c', 'core.commitGraph=false', 'merge-base', 'HEAD', cfg.baseSha); } catch { return null; } })() : null;
   const base = mergeBase ?? cfg.baseSha; // a sha, never a ref name: names can be shadowed by tags and branches. A present policy implies a verified baseSha, so there is no further fallback.
   const deadline = Date.now() + 840_000;
   const log = (line) => { const [result, ms, ...cmd] = line.split(' '); record(cfg.root, { kind: 'gate', head: head.slice(0, 12), result, ms: Number(ms) || null, command: cmd.join(' ') }); };

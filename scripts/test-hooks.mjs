@@ -242,6 +242,7 @@ const bash = (command, cwd = repo) => (corpus.add(command), { tool_name: 'Bash',
       assert.ok(r.runs.some((x) => x.command === `echo base=${base}`), `base is ${base}: ${JSON.stringify(r.runs)}`);
     },
     'textconv output is scanned in the tree': () => { const d = scanRepo(); textconvFile(d); assert.deepEqual(secretsInDiff(sh(d, 'git diff --no-textconv origin/main..HEAD')), [], 'the raw file holds no token'); refused(push(d), NET, 'secret'); },
+    'color.ui=always does not hide textconv output': () => { const d = scanRepo(); sh(d, 'git config color.ui always'); textconvFile(d); refused(push(d), NET, 'secret'); },
     'a failing textconv driver fails closed': () => { const d = scanRepo(); textconvFile(d, 'false'); refused(push(d), CLOSED, 'error'); },
     'history is not read with textconv: a driver for a file only in history does not run': () => {
       const d = scanRepo(), ran = join(gitDirOf(d), 'conv-ran');

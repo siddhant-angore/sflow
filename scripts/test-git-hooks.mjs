@@ -370,6 +370,10 @@ t('k17: SID-213: pre-commit scans textconv output and runs only what main ran', 
   const leak = staged('base64 -d');
   const refused = sh(leak, 'git add k.b64 && git commit -qm leak');
   assert.notEqual(refused.status, 0, 'textconv output holds a token: commit refused'); assert.match(refused.stderr, /staged text looks like a secret \(AWS key\)/);
+  const colored = staged('base64 -d');
+  ok(colored, 'git config color.ui always');
+  const hidden = sh(colored, 'git add k.b64 && git commit -qm leak');
+  assert.notEqual(hidden.status, 0, 'color.ui=always: commit refused'); assert.match(hidden.stderr, /staged text looks like a secret \(AWS key\)/);
   const broken = staged('false');
   const closed = sh(broken, 'git add k.b64 && git commit -qm broken');
   assert.notEqual(closed.status, 0, 'a failing driver: commit refused'); assert.match(closed.stderr, /could not read the staged diff \(failing closed\)/);

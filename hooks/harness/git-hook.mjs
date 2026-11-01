@@ -9,7 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config, GATE_RECORD_DIR, gitDir, NO_REPLACE_ENV, scanRead, secretsInDiff } from './lib.mjs';
+import { config, GATE_RECORD_DIR, gitDir, NO_REPLACE_ENV, scanRead, secretsInDiff, STAGED_DRIVER_FLAGS } from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ZERO = /^0+$/;
@@ -97,7 +97,7 @@ function preCommit(root) {
   if (why) fail(why);
   // Staged secrets, with the push gate's patterns. GIT_INDEX_FILE is kept here on purpose: `git commit -a` and `git commit <path>` stage into a temporary index.
   let diff = '';
-  try { diff = scanRead(root, ['diff', '--cached']); } catch (e) { fail(`could not read the staged diff (failing closed): ${e.message}`); }
+  try { diff = [scanRead(root, ['diff', '--cached']), scanRead(root, ['diff', '--cached'], { flags: STAGED_DRIVER_FLAGS })].join('\n'); } catch (e) { fail(`could not read the staged diff (failing closed): ${e.message}`); }
   const hits = secretsInDiff(diff);
   if (hits.length) fail(`staged text looks like a secret (${hits.join(', ')}); unstage it (git restore --staged <file>) and remove it`);
 }
