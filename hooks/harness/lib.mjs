@@ -519,3 +519,18 @@ export function record(root, entry) {
   } catch {}
 }
 
+// Secret patterns for the push gate (pre-bash.mjs) and the git pre-commit hook (git-hook.mjs, SID-147): one list, so the two cannot drift.
+export const SECRET_PATTERNS = [
+  ['private key', /-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY/],
+  ['AWS key', /\bAKIA[0-9A-Z]{16}\b/],
+  ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36,}\b/],
+  ['Slack token', /\bxox[baprs]-[A-Za-z0-9-]{10,}/],
+  ['Anthropic/OpenAI key', /\bsk-(ant-)?[A-Za-z0-9_-]{20,}\b/],
+  ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ['Linear key', /\blin_api_[A-Za-z0-9]{20,}\b/],
+];
+// Names of the patterns that match a line added in a unified diff.
+export function secretsInDiff(diff) {
+  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
+  return SECRET_PATTERNS.filter(([, re]) => re.test(added)).map(([n]) => n);
+}
