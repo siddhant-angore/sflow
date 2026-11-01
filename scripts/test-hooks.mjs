@@ -234,6 +234,18 @@ const unhookAllow = ['rm -rf build/', 'rm hooks.txt', 'rm -rf hooks', 'rm -rf sr
 for (const c of unhookDeny) { const r = reasonOf(run('pre-bash.mjs', bash(c))); assert.match(r, UNHOOK, `SID-155 must deny: ${c} (got: ${r || 'allowed'})`); }
 assert.ok(denied('pre-bash.mjs', bash('rm -rf .h*')), 'SID-155: .h* could match .husky and .harness.json; denied (the policy reason wins)');
 for (const c of unhookAllow) assert.ok(!denied('pre-bash.mjs', bash(c)), `SID-155 must allow: ${c} (${reasonOf(run('pre-bash.mjs', bash(c)))})`);
+// CTO review of #23 (5725928139): a wrapper line with a trailing rm-family word used to skip the GIT_CMDS write scan, allowing writes main denies.
+// The 11 rows from the review, then every wrapper x write x trailing rm word. All go through bash(), so the regression check below also proves main denies them.
+const wrapRm = ['env tee .git/hooks/pre-commit rm', 'xargs tee .git/hooks/pre-commit rm', 'command tee .git/hooks/pre-commit rm', 'nohup tee .git/hooks/post-checkout shred',
+  'nohup sed -i s/x/y/ .git/hooks/pre-commit unlink', 'env perl -pi -e s/a/b/ .git/hooks/pre-commit rm', 'time dd of=.git/hooks/pre-push rm', 'env tee .git/config rm',
+  'sudo tee -a .git/config chmod', 'env sed -i s/a/b/ .git/config rmdir', 'env truncate -s0 .git/config unlink'];
+for (const w of ['env', 'sudo', 'nohup', 'time', 'xargs', 'command']) for (const wr of ['tee .git/hooks/pre-commit', 'tee -a .git/config', 'sed -i s/a/b/ .git/hooks/pre-push', 'dd of=.git/config', 'truncate -s0 .git/hooks/pre-commit'])
+  for (const r of ['rm', 'unlink', 'rmdir', 'shred', 'find', 'chmod']) wrapRm.push(`${w} ${wr} ${r}`);
+for (const c of wrapRm) assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: wrapper + write + trailing rm word must stay denied: ${c}`);
+// Overwriting or emptying a stub disables SID-147 as well as deleting it: writes into .git/sflow-hooks and a linked worktree's hooks are git-dir hook writes.
+for (const c of ["printf 'exit 0\\n' > .git/sflow-hooks/pre-push", 'cp /dev/null .git/sflow-hooks/pre-push', 'tee .git/sflow-hooks/pre-commit', 'echo x >> .git/sflow-hooks/pre-commit',
+  'echo x > .git/worktrees/wt/hooks/pre-push', 'cp evil /r/.git/sflow-hooks/pre-push', 'ln -sf /tmp/x .git/sflow-hooks/pre-push', 'sed -i s/node/true/ .git/sflow-hooks/pre-push'])
+  assert.ok(denied('pre-bash.mjs', bash(c)), `#23 review: writing a stub must be denied: ${c}`);
 assert.deepEqual(newGitWrites('cd .git && rm -rf hooks'), [{ path: '.git/hooks', kind: 'unhook' }]);
 assert.deepEqual(newGitWrites('mv .git/hooks /tmp/x'), [{ path: '.git/hooks', kind: 'unhook' }], 'mv: the source goes, /tmp/x is no git write');
 { // real git: a linked worktree's hooks path, as git itself reports it, is denied from inside the worktree; nothing was run, the hooks dir is still there.

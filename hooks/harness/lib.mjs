@@ -338,7 +338,7 @@ const nonExec = (raw) => { const s = stripRedirs(raw.trim()); return !s || (NON_
 
 // Shell writes into a git directory: [{ path, kind }], kind config | hooks | info | modules. Git runs what such files hold (core.pager, aliases, hooks), so text quoted in a command that writes them is not data.
 // Works on a de-quoted copy: quoted characters are hidden (private-use code points) so a quoted `;`, `>` or space never splits or redirects. Reads (cat, grep, cp from, sed without -i) are not writes.
-const KIND_RES = [['hooks', /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/)?hooks(?:\/|$)/], ['modules', /(?:^|\/)[^\/\s]*\.git\/modules\/.+\/config$/], ['config', /(?:^|\/)[^\/\s]*\.git\/(?:config(?:\.worktree)?|worktrees\/[^\/]+\/config\.worktree)$/], ['info', /(?:^|\/)[^\/\s]*\.git\/info\//], ['config', /(?:^|\/)\.gitconfig$|(?:^|\/)\.config\/git\/config$|^\$\{?XDG_CONFIG_HOME\}?\/git\/config$|^\/etc\/gitconfig$/]]; // the last is global/system config: ~/.gitconfig, ~/.config/git/config, $XDG_CONFIG_HOME/git/config, /etc/gitconfig
+const KIND_RES = [['hooks', /(?:^|\/)[^\/\s]*\.git\/(?:modules\/.+\/|worktrees\/[^\/]+\/)?(?:sflow-)?hooks(?:\/|$)/], ['modules', /(?:^|\/)[^\/\s]*\.git\/modules\/.+\/config$/], ['config', /(?:^|\/)[^\/\s]*\.git\/(?:config(?:\.worktree)?|worktrees\/[^\/]+\/config\.worktree)$/], ['info', /(?:^|\/)[^\/\s]*\.git\/info\//], ['config', /(?:^|\/)\.gitconfig$|(?:^|\/)\.config\/git\/config$|^\$\{?XDG_CONFIG_HOME\}?\/git\/config$|^\/etc\/gitconfig$/]]; // the last is global/system config: ~/.gitconfig, ~/.config/git/config, $XDG_CONFIG_HOME/git/config, /etc/gitconfig
 const hide = (c) => (c.charCodeAt(0) < 256 ? String.fromCharCode(0xE000 + c.charCodeAt(0)) : c), show = (s) => s.replace(/[\uE000-\uE0FF]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xE000));
 function dequote(s) { // q: s single, d double, a $'..'
   let out = '', q = null;
@@ -431,7 +431,7 @@ function scan(cmd) {
         if (rargs.some((a) => /^-(?:delete|exec|execdir|ok|okdir)$/.test(a))) (starts.length ? starts : ['.']).forEach(unhook);
       } else if (rname === 'chmod') { const m = rargs.findIndex((a) => !/^-(?:[Rcfv]+|-[a-z-]+(?:=.*)?)$/.test(a)); rargs.slice(m + 1).forEach(unhook); } // the first non-option word is the mode (-x included)
       else rargs.filter((a) => !a.startsWith('-')).forEach(unhook);
-      continue;
+      // No `continue`: a wrapper line (`env tee .git/hooks/x rm`) still gets the GIT_CMDS write scan below. rm/unlink/... are not GIT_CMDS, so nothing double-counts.
     }
     const at = GIT_CMDS.has(base(w[0])) ? 0 : GIT_WRAP.has(base(w[0])) ? w.findIndex((x, j) => j > 0 && GIT_CMDS.has(base(x))) : -1;
     if (at < 0) continue;
