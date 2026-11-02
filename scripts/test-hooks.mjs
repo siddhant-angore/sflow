@@ -66,7 +66,7 @@ const SID247_QUOTED_ATTACKS = [
   // allowed on e7d30ea, closed here as a tightening (CTO review 5730668319): the old rule never read this line, since it normalizes to `git x commit -n -m x`
   'git --namespace"" x commit -n -m x',
   'git "-C" merge commit -n -m x', "git '--namespace' merge commit -n -m x", 'git \\-C merge commit -n -m x', 'git --git-dir"" merge commit -n -m x', 'git --work-tree"" merge commit -n -m x', 'git merge -n main && git --namespace"" merge commit -n -m x',
-  'git -"C" . merge -n main', "git $'-C' . merge -n main", "git $'\\x2dC' . merge -n main", 'git -C . --namespace"" merge commit -n -m x', 'git -c a=b -"C" . merge -n main', 'git --namespace`true` merge commit -n -m x', 'git --namespace$(true) merge commit -n -m x', 'git --namespace$X merge commit -n -m x', 'git -$X . merge -n main', 'git "--namespace$(true)" merge commit -n -m x',
+  'git -"C" . merge -n main', "git -'C' . merge -n main", "git -'C' merge -n main", "git $'-C' . merge -n main", "git $'\\x2dC' . merge -n main", 'git -C . --namespace"" merge commit -n -m x', 'git -c a=b -"C" . merge -n main', 'git --namespace`true` merge commit -n -m x', 'git --namespace$(true) merge commit -n -m x', 'git --namespace$X merge commit -n -m x', 'git -$X . merge -n main', 'git "--namespace$(true)" merge commit -n -m x',
   'git >f --namespace"" merge commit -n -m x', 'git 2>&1 -"C" . merge -n main', '"env" git -"C" . merge -n main', 'g"i"t -"C" . merge -n main', '\\git --namespace"" x commit -n -m x', 'timeout 5 git --namespace"" x commit -n -m x', 'sudo -u x git --namespace"" x commit -n -m x', 'xargs git --namespace"" x commit -n -m x', 'chrt -f 5 git -"C" . merge -n main',
   `b"ash" -c 'git -"C" . merge -n main'`, `eval 'git -"C" . merge -n main'`, `echo 'git -"C" . merge -n main' | sh`, 'bash <<E\ngit -"C" . merge -n main\nE', 'echo $(git -"C" . merge -n main)', `bash -c "bash -c 'git -\\"C\\" . merge -n main'"`, 'true && { git -"C" . merge -n main; }',
   // Found with real git 2.47.3 while fixing that review: plain --shallow-file takes a value too, and gitSub's list doesn't have it, so the same line hides a real hook skip with no quote at all. The merge and rebase lines were denied on e7d30ea and allowed on 704e88f; the x line was already allowed on e7d30ea. Closed as a tightening.
@@ -75,7 +75,9 @@ const SID247_QUOTED_ATTACKS = [
 // Newly denied by the same rule, with no merge or commit to hide: pinned collateral. Each could be written plainly, and the deny says how.
 const SID247_QUOTED_COLLATERAL = ['git --git-dir="my dir" status', 'git --namespace="x" status', 'git --git-dir=$D status', 'git -"C" . status', 'git "--no-pager" status', 'echo git "-C"',
   // CTO review 5732381973: the reader takes any word that names git, not only a command word. Allowed on e7d30ea. Narrowing it to command position would loosen 34a4f99 and make wrappers a risk, so these are pinned and listed instead.
-  'grep git "-i" notes.txt', 'ls git "-l"', 'echo git --shallow-file', `cat <<'EOF' > notes.md\nrun git "-C" dir status\nEOF`];
+  'grep git "-i" notes.txt', 'ls git "-l"', 'echo git --shallow-file', `cat <<'EOF' > notes.md\nrun git "-C" dir status\nEOF`,
+  // only the refusal denies these: they run no merge or rebase, so the positive check has nothing to keep
+  'git -`true`C . status', "git $'\\x2dC' . status", 'git "-C$X" . status'];
 const SID247_MUST_ALLOW = [
   'git merge -n main', 'git rebase -n main', 'git merge -n', 'git rebase -n', 'git merge -n -m msg feat', 'git merge -m msg -n feat', 'git rebase -n --onto main feat', 'git merge --no-ff -n feat', 'git merge -n --no-ff feat', 'git merge -n -n feat',
   'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge -Xpatience main', 'git merge -Xrenormalize main', 'git merge -Xno-renames main', 'git merge -Xfind-renames=50 main', 'git rebase -Xno-renames main',

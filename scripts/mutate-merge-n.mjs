@@ -180,16 +180,16 @@ const M = [
   ['the reader names git by its raw word', G, String.raw`if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;`, "if (base(w[i]) !== 'git') continue;"],
   ['the reader needs a bare git, no path', G, String.raw`if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;`, String.raw`if (canon(w[i]).text.replace(/^'|'$/g, '') !== 'git') continue;`],
   ['the dash is only read off quote marks', G, " || canon(w).text.replace(/^'/, '').startsWith('-')", ''],
-  ['the dash is only read through canon', G, "DASH_WORD.test(w) || canon(w)", 'canon(w)'],
+  ['the dash is only read through canon', G, "DASH_WORD.test(w) || canon(w)", 'canon(w)', 'a word DASH_WORD reads and canon does not holds an expansion inside its quotes (`"-C$X"`). Under this mutant the reader stops there and takes it as the subcommand, the expanding-subcommand deny refuses the line, and a line with merge or rebase behind it fails the positive check too. Measured on this mutant: git "-C$X" . status and git "--namespace$(true)" merge commit -n -m x stay denied.'],
   ['the deny does not say how to rewrite', G, 'write git\'s global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them', 'it is refused'],
   ['--shallow-file is allowed', G, "w[j] === '--shallow-file' || ", ''],
   ['matcher: --shallow-file is accepted', T, "b === '--shallow-file' || ", ''],
   ['matcher: a double quote only counts', T, 'w !== b || /[$`]/.test(w)', 'w.includes(\'"\')'],
-  ['matcher: an expansion counts as plain', T, 'w !== b || /[$`]/.test(w)', 'w !== b'],
+  ['matcher: an expansion counts as plain', T, 'w !== b || /[$`]/.test(w)', 'w !== b', 'sid247LiteralPrefixes reads the same words, every word through the subcommand, and rejects any $ or backtick in them, so this condition can no longer decide a line.'],
   ['matcher: a quoted script is not read again', T, 'if (bare !== words[i] && /\\s/.test(bare) && !sid247PlainGlobals(bare)) return false;', ''],
-  ['matcher: $\'..\' is read as plain text', T, `w.startsWith("$'") || `, ''],
+  ['matcher: $\'..\' is read as plain text', T, `w.startsWith("$'") || `, '', "a word that starts with $' holds a $ outside any simple quoted part, and sid247LiteralPrefixes rejects that through the subcommand, so this condition can no longer decide a line."],
   ['matcher: a plain option\'s value reads as an option', T, 'if (SID247_GIT_VALUED.has(w)) j++;', ''],
-  ['matcher: redirections stay words', T, ".filter((w) => !/^\\d*[<>]/.test(w))", ''],
+  ['matcher: redirections stay words', T, ".filter((w) => !/^\\d*[<>]/.test(w))", '', 'this filter only let the reader see past a redirection before git\'s subcommand, and sid247LiteralPrefixes rejects a redirection there; past the subcommand both readers have stopped.'],
 ];
 
 const filter = process.argv[2];
