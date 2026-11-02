@@ -26,7 +26,77 @@ const VALUE_NEXT = "if (next && head === w && i + 1 < words.length) kept.push(wo
 const QUOTED_DENY = 'const quoted = quotedGitOption(cmd, segs);\n  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };\n';
 const KEEP_QUOTED = 'quotedGitOption(cmd, segs) !== null || ';
 const NOT_LITERAL = String.raw`NOT_LITERAL = /["'\\$` + '`' + ']/';
+const TICK = '`';
+const PLAIN_CLASS = String.raw`[\w@%+=:,./!-]`;
+const plainAlso = (c) => `[\\w@%+=:,./!${c}-]`;
+const DQ_PART = String.raw`"[^"\\$` + TICK + ']*"', SQ_PART = String.raw`'[^'\\$` + TICK + "]*'";
+const GIT_BOUND = "let sub = i + 1;\n        while (w[sub]?.startsWith('-')) sub += GIT_ARG.has(w[sub]) ? 2 : 1;";
+const PROVEN_EVERY = 'if (!w.slice(0, sub + 1).every((x) => PROVEN_WORD.test(x))) return false;';
+const M_CLASS = '/^[A-Za-z0-9_@%+=:,./!-]+$/.test(w.replace(';
+const matcherAlso = (c) => `/^[A-Za-z0-9_@%+=:,./!${c}-]+$/.test(w.replace(`;
+const M_PARTS = String.raw`/"[^"\\$` + TICK + String.raw`]*"|'[^'\\$` + TICK + "]*'/g";
+const M_BOUND = 'for (let k = start; k <= sub && !ends(words[k]); k++) if (!sid247Proven(words[k])) return false;';
+const M_SUB = "let sub = i + 1;\n    while (words[sub]?.startsWith('-')) sub += SID247_GIT_VALUED.has(words[sub]) ? 2 : 1;";
 const M = [
+  // CTO review 5732381973: the positive check, one condition at a time
+  ['the skip needs no proof', G, ' || !provenLiteral(cmd, segs)', ''],
+  ['proof: $ is plain', G, PLAIN_CLASS, plainAlso('$')],
+  ['proof: a backtick is plain', G, PLAIN_CLASS, plainAlso(TICK)],
+  ['proof: a backslash is plain', G, PLAIN_CLASS, plainAlso('\\\\')],
+  ...['*', '?', '[', '\\]', '{', '}', '~'].map((c) => [`proof: ${c} is plain`, G, PLAIN_CLASS, plainAlso(c)]),
+  ['proof: only named bad characters are refused', G, PLAIN_CLASS, String.raw`[^\s"'\\$` + TICK + '*?[\\]{}~]'],
+  ['proof: a double quoted part may hold a backslash', G, DQ_PART, '"[^"$' + TICK + ']*"'],
+  ['proof: a double quoted part may hold $', G, DQ_PART, String.raw`"[^"\\` + TICK + ']*"'],
+  ['proof: a double quoted part may hold a backtick', G, DQ_PART, String.raw`"[^"\\$]*"`],
+  ['proof: a single quoted part may hold a backslash', G, SQ_PART, "'[^'$" + TICK + "]*'"],
+  ['proof: a single quoted part may hold $', G, SQ_PART, String.raw`'[^'\\` + TICK + "]*'"],
+  ['proof: a single quoted part may hold a backtick', G, SQ_PART, String.raw`'[^'\\$]*'`],
+  ['proof: no double quoted part', G, `|${DQ_PART}`, ''],
+  ['proof: no single quoted part', G, `|${SQ_PART}`, ''],
+  ['proof: a blank bash keeps is not read', G, 'if (NOT_A_BASH_BLANK.test(t)) return false;\n', ''],
+  ['proof: only NBSP is such a blank', G, String.raw`NOT_A_BASH_BLANK = /[^\S \t\n]/`, String.raw`NOT_A_BASH_BLANK = /\xa0/`],
+  ['proof: newline is such a blank', G, String.raw`NOT_A_BASH_BLANK = /[^\S \t\n]/`, String.raw`NOT_A_BASH_BLANK = /[^\S \t]/`],
+  ['proof: env -S is not read', G, "if (name === 'env' && w.slice(i + 1).some(splitsArgs)) return false;\n", ''],
+  ['proof: env -S only right after env', G, 'w.slice(i + 1).some(splitsArgs)', 'splitsArgs(w[i + 1] ?? "")'],
+  ['proof: env -S in a cluster is not read', G, '/^-[a-zA-Z0-9]*S/.test(w)', "/^-S/.test(w)"],
+  ['proof: an abbreviated --split-string is not read', G, "isAbbrev(w, '--split-string')", "w.split('=')[0] === '--split-string'"],
+  ['proof: words before git are not read', G, PROVEN_EVERY, PROVEN_EVERY.replace('w.slice(0, ', 'w.slice(i, ')],
+  ['proof: stops at git', G, GIT_BOUND, 'const sub = i;'],
+  ['proof: stops after the first option', G, GIT_BOUND, GIT_BOUND.replace('while (', 'if (')],
+  ["proof: an option's value is not counted", G, GIT_BOUND, GIT_BOUND.replace('? 2 : 1', '? 1 : 1')],
+  ['proof: the subcommand is not read', G, PROVEN_EVERY, PROVEN_EVERY.replace('sub + 1', 'sub')],
+  ['proof: past the subcommand must be plain too', G, PROVEN_EVERY, PROVEN_EVERY.replace('w.slice(0, sub + 1)', 'w')],
+  ['proof: redirections are dropped first', G, 'const w = toks(piece);', 'const w = toks(stripRedirs(piece));'],
+  ['proof: shell payloads are not read', G, 'for (const t of [cmd, ...(segs.payloads ?? [])]) {\n    if (NOT_A_BASH_BLANK', 'for (const t of [cmd]) {\n    if (NOT_A_BASH_BLANK'],
+  ['proof: only the first piece is read', G, 'for (const piece of rawSegments(t)) {\n      const w = toks(piece);', 'for (const piece of rawSegments(t).slice(0, 1)) {\n      const w = toks(piece);'],
+  ['proof: a word names git as written', G, "const name = base(canon(w[i]).text.replace(/^'|'$/g, ''));", 'const name = base(w[i]);'],
+  ['proof: a path does not name git', G, "const name = base(canon(w[i]).text.replace(/^'|'$/g, ''));", "const name = canon(w[i]).text.replace(/^'|'$/g, '');"],
+  ['unwrap: env -S in a cluster is not a script', 'hooks/harness/lib.mjs', '(?:-[a-zA-Z0-9]*?S|--split-string|', '(?:-S|--split-string|'],
+  ['unwrap: an abbreviated --split-string is not a script', 'hooks/harness/lib.mjs', '|(--s[a-z-]*)(?==|$))=?(.*)$/', '|(--nope)(?==|$))=?(.*)$/'],
+  ['unwrap: any --s word is a script', 'hooks/harness/lib.mjs', "if (m && (!m[1] || '--split-string'.startsWith(m[1]))) {", 'if (m) {'],
+  // the matcher's counterparts
+  ['matcher: no positive check', T, ' || !sid247LiteralPrefixes(c)', ''],
+  ['matcher proof: $ is plain', T, M_CLASS, matcherAlso('$')],
+  ['matcher proof: a backtick is plain', T, M_CLASS, matcherAlso(TICK)],
+  ['matcher proof: a backslash is plain', T, M_CLASS, matcherAlso('\\\\')],
+  ...['*', '?', '[', '\\]', '{', '}', '~'].map((c) => [`matcher proof: ${c} is plain`, T, M_CLASS, matcherAlso(c)]),
+  ['matcher proof: a double quoted part may hold anything', T, M_PARTS, String.raw`/"[^"]*"|'[^'\\$` + TICK + "]*'/g"],
+  ['matcher proof: a single quoted part may hold anything', T, M_PARTS, String.raw`/"[^"\\$` + TICK + String.raw`]*"|'[^']*'/g`],
+  ['matcher proof: a blank bash keeps is not read', T, 'SID247_NOT_BASH_BLANKS.test(c) || ', ''],
+  ['matcher proof: CR, FF and VT are not such blanks', T, String.raw`SID247_NOT_BASH_BLANKS = /[\r\f\v`, 'SID247_NOT_BASH_BLANKS = /['],
+  ['matcher proof: an escaped blank is not read', T, String.raw` || /\\[ \t]/.test(c)`, ''],
+  ['matcher proof: env -S is not read', T, 'if (env && sid247SplitsArgs(bare)) return false;\n', ''],
+  ['matcher proof: env -S in a cluster is not read', T, '/^-[A-Za-z0-9]*S/.test(b)', '/^-S/.test(b)'],
+  ['matcher proof: an abbreviated --split-string is not read', T, "(b.split('=')[0].length >= 3 && '--split-string'.startsWith(b.split('=')[0]))", "b.split('=')[0] === '--split-string'"],
+  ['matcher proof: env reads across commands', T, 'start = i + 1; env = false; continue;', 'start = i + 1; continue;'],
+  ['matcher proof: words before git are not read', T, M_BOUND, M_BOUND.replace('k = start', 'k = i')],
+  ['matcher proof: stops at git', T, M_SUB, 'const sub = i;'],
+  ['matcher proof: stops after the first option', T, M_SUB, M_SUB.replace('while (', 'if (')],
+  ["matcher proof: an option's value is not counted", T, M_SUB, M_SUB.replace('? 2 : 1', '? 1 : 1')],
+  ['matcher proof: the subcommand is not read', T, M_BOUND, M_BOUND.replace('k <= sub', 'k < sub')],
+  ['matcher proof: a quoted script is not read', T, 'if (bare !== words[i] && /\\s/.test(bare) && !sid247LiteralPrefixes(bare)) return false;\n', ''],
+  ['matcher proof: a command is the whole line', T, 'if (ends(words[i])) { start = i + 1;', 'if (ends(words[i])) {'],
+  ['matcher proof: a path does not name git', T, "const name = bare.split('/').pop();\n    env ||=", "const name = bare;\n    env ||="],
   // which commands
   ['the allow widened to commit', G, TABLE, `${TABLE}\n  commit: { short: /^-/, flags: new Set(), values: new Set() },`],
   ['the allow widened to am', G, TABLE, `${TABLE}\n  am: { short: /^-/, flags: new Set(), values: new Set() },`, 'the rule that reads this text has no `am` in its head, and no other rule in the table reads git am, so the text it sees changes no verdict. git am -n and its long form stay allowed as pinned for SID-238; the row below proves the pin bites.'],
@@ -97,7 +167,7 @@ const M = [
   // CTO review 5730668319: quoted, escaped or expanding global options. Each layer has a test of its own.
   ['the quoted-option deny is dropped', G, QUOTED_DENY, ''],
   ['the SID-247 path ignores a quoted option', G, KEEP_QUOTED, ''],
-  ['matcher: no raw check', T, 'if (!sid247PlainGlobals(c)) return false;', ''],
+  ['matcher: no raw check', T, 'if (!sid247PlainGlobals(c) || ', 'if ('],
   ['a double quote only counts as not literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /"/`],
   ['a backslash is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["'$` + '`' + String.raw`]/`],
   ['a single quote is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["\\$` + '`' + String.raw`]/`],

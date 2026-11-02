@@ -222,7 +222,31 @@ function quotedGitOption(cmd, segs) {
   return null;
 }
 const NO_QUOTED_GLOBAL = (w) => `the git global option ${clip(w, 80)} is quoted, escaped, an expansion or --shallow-file, so the guard can't tell which word git reads as its value or as the subcommand; write git's global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them`;
-export const keepsHookRule = (segs, cmd) => quotedGitOption(cmd, segs) !== null || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
+// CTO review 5732381973: the tokenizer and bash can end a word in different places, and then git reads a different subcommand than the guard does. So the skip needs proof, not the absence of a known-bad shape.
+// A word they end in the same place: plain characters, and quoted parts with no backslash, $ or backtick, so each closes at the next quote mark in both. Whitespace inside such quotes is text to both.
+const PROVEN_WORD = /^(?:[\w@%+=:,./!-]|"[^"\\$`]*"|'[^'\\$`]*')+$/;
+// Whitespace to the tokenizer (JS \s), part of a word to bash.
+const NOT_A_BASH_BLANK = /[^\S \t\n]/;
+const splitsArgs = (w) => /^-[a-zA-Z0-9]*S/.test(w) || isAbbrev(w, '--split-string');
+// Every simple command that names git, in every piece the guard reads, is proven from its first word through git's subcommand; and no env on the line splits a string into words.
+function provenLiteral(cmd, segs) {
+  for (const t of [cmd, ...(segs.payloads ?? [])]) {
+    if (NOT_A_BASH_BLANK.test(t)) return false;
+    for (const piece of rawSegments(t)) {
+      const w = toks(piece);
+      for (let i = 0; i < w.length; i++) {
+        const name = base(canon(w[i]).text.replace(/^'|'$/g, ''));
+        if (name === 'env' && w.slice(i + 1).some(splitsArgs)) return false;
+        if (name !== 'git') continue;
+        let sub = i + 1;
+        while (w[sub]?.startsWith('-')) sub += GIT_ARG.has(w[sub]) ? 2 : 1;
+        if (!w.slice(0, sub + 1).every((x) => PROVEN_WORD.test(x))) return false;
+      }
+    }
+  }
+  return true;
+}
+export const keepsHookRule = (segs, cmd) => quotedGitOption(cmd, segs) !== null || !provenLiteral(cmd, segs) || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
 
 export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
   const p = pushReason(raw, prot, branch);

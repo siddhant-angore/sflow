@@ -135,6 +135,7 @@ const SID247_NEAR = [
   // CTO review 5730668319: the quoted-option rule reads global options only. The three lines after the control are the approved allowance, denied on e7d30ea and allowed since 704e88f.
   ['git --namespace merge commit -n -m x', 'deny', 'the unquoted control: git runs commit -n, and gitSub reads the same'],
   ['git -C . merge -n main', 'allow', 'a plain global option in front of the approved shape'], ['git --no-pager rebase -n main', 'allow', 'a plain global option in front of the approved shape'], ['git -c "core.pager=less -R" merge -n main', 'allow', 'a quoted value of a plain -c is not an option'],
+  ['env --strange=git reset --hard', 'allow', 'not an abbreviation of --split-string, so env refuses it and its value is not read as a script'],
   ['git -C "some dir" status', 'allow', 'a quoted value of a plain -C is not an option'], ['git -C "-odd dir" status', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git -C "-odd dir" merge -n main', 'allow', 'the value of a plain -C is not an option, whatever it starts with'], ['git log "-1"', 'allow', 'past the subcommand: not a global option'], ['git -c "core.pager=less -R" log "-1"', 'allow', 'past the subcommand: not a global option'], ['git status "-s"', 'allow', 'past the subcommand: not a global option'], ['git "" status', 'allow', 'an empty word does not start with a dash; git refuses it'],
 ];
 // Today's verdict, allowed on e7d30ea and unchanged here: known gaps with their own issues. Do not read these as approved; they are pinned so a fix there is a visible test change.
@@ -145,6 +146,8 @@ const SID247_PINS = [
   'git merge --no-verif main', 'git merge --no-veri main', 'git commit --no-verif -m x', 'git commit --no-veri -m x', 'git rebase --no-verif main', 'git rebase --no-veri main',
   // SID-238: git am is not in this rule
   'git am -n x.patch', 'git am --no-verify x.patch', 'git am --no-verify',
+  // a quoted env option is dropped unread, so the string after it isn't read as a script (found on CTO review 5732381973; no issue yet)
+  `env -"S" 'git --namespace"" merge commit -n -m x'`,
 ];
 const sid247Quotes = (f) => [f, `"${f}"`, `'${f}'`, `-"${f.slice(1)}"`, `-'${f.slice(1)}'`, `\\${f}`, `-\\${f.slice(1)}`, `""${f}`];
 const sid247Nest = (x) => (x.includes("'") ? `"${x.replace(/(["\\$`])/g, '\\$1')}"` : `'${x}'`);
@@ -207,6 +210,28 @@ const sid247PlainGlobals = (c) => {
   }
   return true;
 };
+// CTO review 5732381973: the guard's positive check, written again here with no guard or lib code. A blank bash doesn't split on, a word through git's subcommand that isn't plain, or env -S in any spelling rejects the line.
+const SID247_NOT_BASH_BLANKS = /[\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
+const sid247Proven = (w) => /^[A-Za-z0-9_@%+=:,./!-]+$/.test(w.replace(/"[^"\\$`]*"|'[^'\\$`]*'/g, '_'));
+const sid247SplitsArgs = (b) => /^-[A-Za-z0-9]*S/.test(b) || (b.split('=')[0].length >= 3 && '--split-string'.startsWith(b.split('=')[0]));
+const sid247LiteralPrefixes = (c) => {
+  if (SID247_NOT_BASH_BLANKS.test(c) || /\\[ \t]/.test(c)) return false;
+  const words = c.replace(/\\\n/g, '').match(new RegExp(String.raw`\d*[<>]+&?\s*${SID247_WORD}|${SID247_WORD}|[;&|()\n]`, 'g')) ?? [], ends = (w) => w === undefined || /^[;&|()\n]$/.test(w);
+  let start = 0, env = false;
+  for (let i = 0; i < words.length; i++) {
+    if (ends(words[i])) { start = i + 1; env = false; continue; }
+    const bare = sid247Bare(words[i]);
+    if (bare !== words[i] && /\s/.test(bare) && !sid247LiteralPrefixes(bare)) return false;
+    if (env && sid247SplitsArgs(bare)) return false;
+    const name = bare.split('/').pop();
+    env ||= name === 'env';
+    if (name !== 'git') continue;
+    let sub = i + 1;
+    while (words[sub]?.startsWith('-')) sub += SID247_GIT_VALUED.has(words[sub]) ? 2 : 1;
+    for (let k = start; k <= sub && !ends(words[k]); k++) if (!sid247Proven(words[k])) return false;
+  }
+  return true;
+};
 const sid247OptionsOut = (s) => {
   const [, sub, ...args] = s.split(/\s+/), [valued, plain] = SID247_OPTION_WORDS[sub], out = [];
   let value = false, literal = false;
@@ -222,8 +247,8 @@ const sid247OptionsOut = (s) => {
   return ['git', sub, ...out].join(' ');
 };
 const sid247Approved = (c) => {
-  if (!sid247PlainGlobals(c)) return false;
-  const segs = [...sid247Rules.guardSegments(c)], text = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""'), named = /^git\s+(merge|rebase)\s/;
+  if (!sid247PlainGlobals(c) || !sid247LiteralPrefixes(c)) return false;
+  const segs =[...sid247Rules.guardSegments(c)], text = (s) => s.replace(/"[^"]*"|'[^']*'/g, '""'), named = /^git\s+(merge|rebase)\s/;
   const prefixOf = (w, flag) => w.length >= 3 && flag.startsWith(w.split('=')[0]);
   if (segs.some((s) => s.split(/\s+/).some((w) => prefixOf(w, '--no-verify')))) return false;
   if (segs.some((s) => named.test(s) && sid247OptionsOut(text(s)) === null)) return false;

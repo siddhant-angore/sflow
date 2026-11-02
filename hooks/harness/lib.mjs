@@ -257,8 +257,8 @@ function unwrap(name, rest) {
     if (t === null || !(t.startsWith('-') || (name === 'env' && /^\w+=/.test(t)))) break;
     rest = r;
     if (t === '--') break;
-    const m = name === 'env' && /^(-S|--split-string)=?(.*)$/.exec(t);
-    if (m) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
+    const m = name === 'env' && /^(?:-[a-zA-Z0-9]*?S|--split-string|(--s[a-z-]*)(?==|$))=?(.*)$/.exec(t); // env takes -S in a cluster (-iS) and any abbreviation of --split-string
+    if (m && (!m[1] || '--split-string'.startsWith(m[1]))) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
     if ((t.length === 2 && WRAPPERS[name].includes(t[1])) || LONG_ARG.has(t)) rest = take(r)[1];
   }
   return name === 'timeout' ? take(rest)[1] : rest;

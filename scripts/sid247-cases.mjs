@@ -50,13 +50,16 @@ export const REVIEW_3_GENERATED = [...new Set(REVIEW_3.flatMap((r) => WRAPPERS.m
 const HIDDEN = 'git --namespace $E merge commit -n -m x';
 export const NOT_PROVEN_LITERAL = [
   // whitespace to the tokenizer, part of a word to bash, so git reads x<blank>merge as the value and commit as the subcommand
-  ...[' ', '\r', '\f', '\v', ' ', ' ', '﻿'].map((blank) => `git --namespace x${blank}merge commit -n -m x`),
+  ...[0xa0, 0x0d, 0x0c, 0x0b, 0x2003, 0x2028, 0xfeff].map((code) => `git --namespace x${String.fromCharCode(code)}merge commit -n -m x`),
   // a word before git
-  'FOO=$X git merge -n main', 'FOO=`true` git merge -n main', 'FOO=a\\ b git merge -n main', 'env A=$B git merge -n main', 'sudo -u $U git merge -n main', "FOO='$X' git merge -n main", 'FOO="`true`" git merge -n main',
+  'FOO=$X git merge -n main', 'FOO=`true` git merge -n main', 'FOO=a\\ git merge -n main', 'env A=$B git merge -n main', 'sudo -u $U git merge -n main', "FOO='$X' git merge -n main", 'FOO="`true`" git merge -n main',
+  'git -C a\\b merge -n main', 'git m\\erge -n main',
+  // the guard's quote-blind split leaves `{` on the word before git
+  '{ git merge -n main; }',
   // a redirection in the prefix
   '2>&1 git merge -n main', 'git >f merge -n main', 'git >$E merge -n main',
   // unquoted glob and brace characters
-  'git -C ~ merge -n main', 'git -C ~/x rebase -n main', 'FOO=~ git merge -n main', 'FOO=* git merge -n main', 'FOO=? git merge -n main', 'FOO=[a] git merge -n main', 'FOO={a,b} git merge -n main', 'git -C x* merge -n main', 'git -C x? merge -n main', 'git -C [x] merge -n main', 'git -C {x,y} merge -n main', 'git -C x] merge -n main', 'git -C x} merge -n main',
+  'git -C ~ merge -n main', 'git -C ~/x rebase -n main', 'FOO=~ git merge -n main', 'FOO=* git merge -n main', 'FOO=? git merge -n main', 'FOO=[a] git merge -n main', 'FOO={a,b} git merge -n main', 'git -C [x merge -n main', 'git -C x* merge -n main', 'git -C x? merge -n main', 'git -C [x] merge -n main', 'git -C {x,y} merge -n main', 'git -C x] merge -n main', 'git -C x} merge -n main',
   // quoted parts that are not simple
   'git -C "a\\"b" merge -n main', "git -C 'a\\b' merge -n main", "git -C 'a$b' merge -n main", "git -C 'a`b' merge -n main", 'git -C "a\\b" merge -n main', 'git -C "$D" merge -n main', 'git -C "`true`" merge -n main',
   // the bound: every word through the subcommand, not only the first option
@@ -65,10 +68,11 @@ export const NOT_PROVEN_LITERAL = [
   `git merge -n main && ${HIDDEN}`, `${HIDDEN} && git merge -n main`, 'true; git -C $E merge -n main',
   `(${HIDDEN})`, `{ ${HIDDEN}; }`, `if ${HIDDEN}; then true; fi`, `! ${HIDDEN}`, `time ${HIDDEN}`, `nice ${HIDDEN}`, `nohup ${HIDDEN}`, `timeout 5 ${HIDDEN}`, `xargs ${HIDDEN}`, `exec ${HIDDEN}`, `g"i"t --namespace $E merge commit -n -m x`, `\\${HIDDEN}`,
   `echo $(${HIDDEN})`, `echo "$(${HIDDEN})"`, `cat <(${HIDDEN})`, `xargs sh -c '${HIDDEN}'`, `echo "${HIDDEN}" | sh`, `bash <<E\n${HIDDEN}\nE`, `cat <<E | sh\n${HIDDEN}\nE`,
+  `/usr/bin/${HIDDEN}`, `b"ash" -c '${HIDDEN}'`, `f() { eval "$1"; }; f '${HIDDEN}'`,
   `su -c '${HIDDEN}'`, `ssh h '${HIDDEN}'`, `watch '${HIDDEN}'`, `flock f -c '${HIDDEN}'`, `script -c '${HIDDEN}'`,
   // env -S spelled any way env accepts, on any command the line runs. The env -iS, -vS, --s and --sp lines were allowed on e7d30ea too: reading them is a tightening
-  `"env" -S 'git --namespace"" merge commit -n -m x'`, `e\\nv -S 'git --namespace"" merge commit -n -m x'`, `/usr/bin/env -S 'git --namespace"" merge commit -n -m x'`, `env -"S" 'git --namespace"" merge commit -n -m x'`, `env -i -S 'git --namespace"" merge commit -n -m x'`, `env -vS 'git --namespace"" merge commit -n -m x'`, `env A=1 -S 'git --namespace"" merge commit -n -m x'`, `env --s='git --namespace"" merge commit -n -m x'`, `env --sp 'git --namespace"" merge commit -n -m x'`,
-  `env -S 'git merge -n main'`, `env -iS 'git merge -n main'`, `env --split-string='git merge -n main'`, `env --spl 'git merge -n main'`, `env -S'git merge -n main'`, `git merge -n main; env -S 'git status'`, `bash -c "env -S 'git merge -n main'"`,
+  `"env" -S 'git --namespace"" merge commit -n -m x'`, `e\\nv -S 'git --namespace"" merge commit -n -m x'`, `/usr/bin/env -S 'git --namespace"" merge commit -n -m x'`, `env -i -S 'git --namespace"" merge commit -n -m x'`, `env -vS 'git --namespace"" merge commit -n -m x'`, `env A=1 -S 'git --namespace"" merge commit -n -m x'`, `env --s='git --namespace"" merge commit -n -m x'`, `env --sp 'git --namespace"" merge commit -n -m x'`,
+  `/usr/bin/env -S 'git merge -n main'`, `env -S 'git merge -n main'`,`env -iS 'git merge -n main'`, `env --split-string='git merge -n main'`, `env --spl 'git merge -n main'`, `env -S'git merge -n main'`, `git merge -n main; env -S 'git status'`, `bash -c "env -S 'git merge -n main'"`,
   `env -iS 'git commit -n -m x'`, `env --split-str='git commit -n -m x'`, `env --s 'git push -f origin main'`,
 ];
 
@@ -77,5 +81,5 @@ export const PROVEN_LITERAL = [
   'git -c "core.pager=less -R" rebase -n main', "git -c 'core.pager=less -R' merge -n main", 'git -C "some dir" rebase -n main', "git -C 'some dir' merge -n main", 'git -C "a b"c merge -n main', 'git --namespace=x merge -n main', 'git --namespace x merge -n main',
   'env git merge -n main', 'env FOO=1 git merge -n main', 'FOO=1 git merge -n main', 'sudo git merge -n main', 'command git rebase -n main', 'timeout 5 git merge -n main', 'nice git merge -n main', '/usr/bin/git merge -n main', '"git" merge -n main',
   'if git merge -n main; then true; fi', '! git merge -n main', 'cd /tmp && git merge -n main', 'cd $D && git merge -n main', "bash -c 'git -C . merge -n main'",
-  'git merge -n main 2>&1', 'git merge -n main >f',
+  'git merge -n main 2>&1', 'git merge -n main >f', 'env true; git merge -n -Sabc main',
 ];
