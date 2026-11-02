@@ -246,7 +246,7 @@ function provenLiteral(cmd, segs) {
   }
   return true;
 }
-export const keepsHookRule = (segs, cmd) => quotedGitOption(cmd, segs) !== null || !provenLiteral(cmd, segs) || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
+export const keepsHookRule = (segs, cmd, quoted = quotedGitOption(cmd, segs)) => quoted !== null || !provenLiteral(cmd, segs) || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
 
 export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
   const p = pushReason(raw, prot, branch);
@@ -1028,7 +1028,7 @@ export function segmentReason(cmd, cfg, branch, segs = guardSegments(cmd)) {
   if (segs.positional !== undefined) return { why: 'a bash -c / sh -c script that uses positional parameters ($1, $@, shift, ...) can run its arguments as a command; write the command into the script', seg: segs.positional };
   const quoted = quotedGitOption(cmd, segs);
   if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };
-  const noStat = !keepsHookRule(segs, cmd);
+  const noStat = !keepsHookRule(segs, cmd, quoted);
   for (const seg of segs) {
     const why = reason(seg, cfg, branch, noStat) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
     if (why) return { why, seg };

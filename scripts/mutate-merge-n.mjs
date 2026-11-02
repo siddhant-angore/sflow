@@ -23,8 +23,8 @@ const MATCH_MERGE_VALUED = String.raw`merge: [/^(-[evq]*[mXsF]|--(message|file|`
 const MATCH_MERGE_PLAIN = String.raw`/^(-[evq]*([mXsF]\S+|S\S*)?|`;
 const MATCH_TABLE = 'const SID247_OPTION_WORDS = {';
 const VALUE_NEXT = "if (next && head === w && i + 1 < words.length) kept.push(words[++i]);";
-const QUOTED_DENY = 'const quoted = quotedGitOption(cmd, segs);\n  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };\n';
-const KEEP_QUOTED = 'quotedGitOption(cmd, segs) !== null || ';
+const QUOTED_DENY = '  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };\n';
+const KEEP_QUOTED = 'quoted !== null || ';
 const NOT_LITERAL = String.raw`NOT_LITERAL = /["'\\$` + '`' + ']/';
 const TICK = '`';
 const PLAIN_CLASS = String.raw`[\w@%+=:,./!-]`;
@@ -142,8 +142,8 @@ const M = [
   ['--exec is a known flag to rebase', G, "'--keep-base --no-keep-base ", "'--exec --keep-base --no-keep-base "],
   ['a value after the first quote is not read', G, String.raw`const head = w.split(/["'\\]/)[0], next`, 'const head = /["\'\\\\]/.test(w) ? \'-\' : w, next'],
   ['a word git cannot classify drops only that word', G, 'if (next === null) return null;', 'if (next === null) continue;'],
-  ['an unknown word only keeps its own segment', G, "const noStat = !keepsHookRule(segs, cmd);\n  for (const seg of segs) {\n    const why = reason(seg, cfg, branch, noStat)", 'for (const seg of segs) {\n    const why = reason(seg, cfg, branch, !keepsHookRule([seg], cmd))'],
-  ['the loosening is never on', G, 'const noStat = !keepsHookRule(segs, cmd);', 'const noStat = false;'],
+  ['an unknown word only keeps its own segment', G, "const noStat = !keepsHookRule(segs, cmd, quoted);\n  for (const seg of segs) {\n    const why = reason(seg, cfg, branch, noStat)", 'for (const seg of segs) {\n    const why = reason(seg, cfg, branch, !keepsHookRule([seg], cmd, quoted))'],
+  ['the loosening is never on', G, 'const noStat = !keepsHookRule(segs, cmd, quoted);', 'const noStat = false;'],
   // expansions keep the old rule
   ['the default is loose', G, 'branch, noStat = false)', 'branch, noStat = true)'],
   ['a substituted variable reads loose', G, 'const why = reason(c, cfg, branch) ?? reason(s, cfg, branch); if (why) return `${why} (after substituting', 'const why = reason(c, cfg, branch, true) ?? reason(s, cfg, branch, true); if (why) return `${why} (after substituting', 'a line this read could decide has an expansion in a merge or rebase segment. An expanding argument is still probed with -n under the strict rule, an expanding subcommand has its own deny, and an expanding command word is denied by literalReason; a -m value too, since merge and rebase are not value-option commands. Measured on this mutant: every expansion must-deny stays denied (X=-n; git merge -m $X main, C="git merge -n main"; $C, A="merge -n"; git $A main).'],
