@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { canon, clip, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, quotesAreData, rawSegments, segments, sortOut, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
+import { canon, clip, GIT_ARG, gitWrites, isPolicyPath, normalize, outerCommands, policyDeny, policyGlobHit, quotesAreData, rawSegments, segments, sortOut, stripRedirs, take, uniqOut, unwrap, WRAPPERS } from './lib.mjs';
 // Pure rule table over one normalized shell segment. Returns the reason to deny, or null.
 const headRef = (r) => r === 'HEAD' || r === '@';
 // The protected branch a refspec pushes to (+ stripped, no colon means dst = src, HEAD and @ resolve to the current branch), or null. viaHead: the name came from the checkout, not from the text.
@@ -157,10 +157,101 @@ const replaceReason = (a) => {
 const NO_OPT_GLOB = 'an unquoted glob in a git <sub> argument can expand to a file named like an option (--exec=, --upload-pack=); quote it or spell the names out';
 const optGlob = (raw) => { const w = []; for (let [t, r] = take(raw); t !== null; [t, r] = take(r)) w.push(t); return w.slice(2).some((t) => /^[*?]/.test(t) || /[-!^]/.test(/^\[(\]?[^\]]*)\]/.exec(t)?.[1] ?? '')) ? NO_OPT_GLOB : null; };
 
-export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch) {
+// SID-247, a loosening approved by Siddhant via the CTO (Nov 1 2026, 6:10 PM IST): to git merge and git rebase, a bare -n is --no-stat and a glued -X value is not flags, so the hook-skip rule doesn't read them.
+// The options each command lists in git 2.47: anything else is unknown, including abbreviations, and --exec and -x on purpose (SID-260). In `short`, group 1 is a letter whose value is glued or is the next word, and S and r take only a glued one.
+const NO_STAT_OPTIONS = {
+  __proto__: null,
+  merge: {
+    short: /^-[evq]*(?:([mXsF])|[mXsF].+|S.*)?$/,
+    flags: new Set('--stat --no-stat --summary --no-summary --log --no-log --squash --no-squash --commit --no-commit --edit --no-edit --ff --no-ff --ff-only --rerere-autoupdate --no-rerere-autoupdate --verify-signatures --verbose --quiet --progress --no-progress --allow-unrelated-histories --no-allow-unrelated-histories --gpg-sign --no-gpg-sign --autostash --no-autostash --overwrite-ignore --no-overwrite-ignore --signoff --no-signoff --verify --abort --quit --continue'.split(' ')),
+    values: new Set('--message --file --strategy --strategy-option --into-name --cleanup'.split(' ')),
+  },
+  rebase: {
+    short: /^-[qvfmi]*(?:([sXC])|[sXC].+|[Sr].*)?$/,
+    flags: new Set('--keep-base --no-keep-base --verify --quiet --verbose --no-stat --stat --signoff --no-signoff --committer-date-is-author-date --reset-author-date --ignore-date --ignore-whitespace --force-rebase --no-ff --ff --continue --skip --abort --quit --edit-todo --show-current-patch --apply --merge --interactive --rerere-autoupdate --no-rerere-autoupdate --autosquash --no-autosquash --update-refs --no-update-refs --gpg-sign --no-gpg-sign --autostash --no-autostash --rebase-merges --no-rebase-merges --fork-point --no-fork-point --root --reschedule-failed-exec --no-reschedule-failed-exec --reapply-cherry-picks --no-reapply-cherry-picks'.split(' ')),
+    values: new Set('--onto --whitespace --empty --strategy --strategy-option'.split(' ')),
+  },
+};
+// Whether a word in option position is a known flag (false) or takes the next word as its value (true); null when git may read it some other way.
+const takesNextWord = (word, { short, flags, values }) => {
+  if (word.startsWith('--')) {
+    const name = word.split('=')[0];
+    if (!flags.has(name) && !values.has(name)) return null;
+    return word === name && values.has(name);
+  }
+  const m = short.exec(word);
+  return m ? Boolean(m[1]) : null;
+};
+// A segment with its bare -n and glued -X words taken out, where git reads them as options: before any --, and not as a value. Null when a word can't be classified.
+// A word that still holds a quote or escape is read up to it and takes no next word (-m"a b", or -"n", whose resolved form guardSegments also hands over).
+const noStatText = (seg) => {
+  const m = /^git\s+(\S+)\s+(.*)$/s.exec(seg), options = NO_STAT_OPTIONS[m?.[1]];
+  if (!options) return seg;
+  const words = m[2].split(/\s+/), kept = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w === '--') { kept.push(...words.slice(i)); break; }
+    if (w === '-n' || /^-X\S/.test(w)) continue;
+    kept.push(w);
+    if (!w.startsWith('-')) continue;
+    const head = w.split(/["'\\]/)[0], next = takesNextWord(head, options);
+    if (next === null) return null;
+    if (next && head === w && i + 1 < words.length) kept.push(words[++i]);
+  }
+  return `git ${m[1]} ${kept.join(' ')}`;
+};
+// The line keeps the rule whole when it holds any prefix of the hook-skip flag (git takes abbreviations; SID-259), or a merge or rebase word that can't be classified.
+const isAbbrev = (word, flag) => { const name = word.split('=')[0]; return name.length >= 3 && flag.startsWith(name); };
+// CTO review 5730668319: gitSub compares each global option as written, so `--namespace""`, `-"C"` or `-\C` aren't seen to take a value, while git reads the next word as that value and `merge` can hide a real `git commit -n`.
+// The first word in git's global-option position, in any piece the guard reads, that isn't plain text and resolves to a dash-word; null when there is none. It reads pieces as written, because normalize() drops these words. Any word that names git counts, so a wrapper needs no list. The value of a plain option is not an option.
+// --shallow-file takes a value and gitSub's list lacks it. Adding it there would stop `git --shallow-file reset --hard` reading as a reset, so it is refused here instead; nothing legitimate passes this internal option.
+const NOT_LITERAL = /["'\\$`]/, DASH_WORD = /^(?:\$?""|\$?''|\$?['"]|\\)*-/;
+const resolvesToDash = (w) => DASH_WORD.test(w) || canon(w).text.replace(/^'/, '').startsWith('-');
+function quotedGitOption(cmd, segs) {
+  for (const t of [cmd, ...(segs.payloads ?? [])]) for (const piece of rawSegments(t)) {
+    const w = toks(stripRedirs(piece));
+    for (let i = 0; i < w.length; i++) {
+      if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;
+      for (let j = i + 1; j < w.length; j++) {
+        if (w[j] === '--shallow-file' || (NOT_LITERAL.test(w[j]) && resolvesToDash(w[j]))) return w[j];
+        if (!w[j].startsWith('-')) break;
+        if (GIT_ARG.has(w[j])) j++;
+      }
+    }
+  }
+  return null;
+}
+const NO_QUOTED_GLOBAL = (w) => `the git global option ${clip(w, 80)} is quoted, escaped, an expansion or --shallow-file, so the guard can't tell which word git reads as its value or as the subcommand; write git's global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them`;
+// CTO review 5732381973: the tokenizer and bash can end a word in different places, and then git reads a different subcommand than the guard does. So the skip needs proof, not the absence of a known-bad shape.
+// A word they end in the same place: plain characters, and quoted parts with no backslash, $ or backtick, so each closes at the next quote mark in both. Whitespace inside such quotes is text to both.
+const PROVEN_WORD = /^(?:[\w@%+=:,./!-]|"[^"\\$`]*"|'[^'\\$`]*')+$/;
+// Whitespace to the tokenizer (JS \s), part of a word to bash.
+const NOT_A_BASH_BLANK = /[^\S \t\n]/;
+const splitsArgs = (w) => /^-[a-zA-Z0-9]*S/.test(w) || isAbbrev(w, '--split-string');
+// Every simple command that names git, in every piece the guard reads, is proven from its first word through git's subcommand; and no env on the line splits a string into words.
+function provenLiteral(cmd, segs) {
+  for (const t of [cmd, ...(segs.payloads ?? [])]) {
+    if (NOT_A_BASH_BLANK.test(t)) return false;
+    for (const piece of rawSegments(t)) {
+      const w = toks(piece);
+      for (let i = 0; i < w.length; i++) {
+        const name = base(canon(w[i]).text.replace(/^'|'$/g, ''));
+        if (name === 'env' && w.slice(i + 1).some(splitsArgs)) return false;
+        if (name !== 'git') continue;
+        let sub = i + 1;
+        while (w[sub]?.startsWith('-')) sub += GIT_ARG.has(w[sub]) ? 2 : 1;
+        if (!w.slice(0, sub + 1).every((x) => PROVEN_WORD.test(x))) return false;
+      }
+    }
+  }
+  return true;
+}
+export const keepsHookRule = (segs, cmd, quoted = quotedGitOption(cmd, segs)) => quoted !== null || !provenLiteral(cmd, segs) || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
+
+export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
   const p = pushReason(raw, prot, branch);
   if (p) return p;
-  const seg = unquoted(raw);
+  const plain = unquoted(raw), seg = (noStat && noStatText(plain)) || plain;
   const rules = [
     [/^git\s+reset\b.*\s(--hard|--merge)\b/, 'git reset --hard/--merge destroys uncommitted work; commit to a WIP branch or use a fresh worktree; restore named files with git restore <path>'],
     [/^git\s+(checkout|restore|switch)\b.*(\s\.(\s|$)|--discard-changes|\s-f(\s|$)|\s--force(\s|$)|\s--worktree\s+\.)/, 'discarding the working tree is irreversible; restore named files'],
@@ -935,8 +1026,11 @@ export function segmentReason(cmd, cfg, branch, segs = guardSegments(cmd)) {
   // SID-191 review B1: a payload gets the whole-line checks too (core.hooksPath, hidden config, an unclosed quote)
   for (const p of segs.payloads ?? []) { const why = lineReason(p); if (why) return { why, seg: p }; }
   if (segs.positional !== undefined) return { why: 'a bash -c / sh -c script that uses positional parameters ($1, $@, shift, ...) can run its arguments as a command; write the command into the script', seg: segs.positional };
+  const quoted = quotedGitOption(cmd, segs);
+  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };
+  const noStat = !keepsHookRule(segs, cmd, quoted);
   for (const seg of segs) {
-    const why = reason(seg, cfg, branch) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
+    const why = reason(seg, cfg, branch, noStat) ?? expansionReason(seg, cfg, branch, vars) ?? shapeReason(seg, cfg);
     if (why) return { why, seg };
   }
   // SID-191 re-review: literal-only command words and arguments (on the line and each shell payload, not on split artifacts); reread builtins near a guarded word

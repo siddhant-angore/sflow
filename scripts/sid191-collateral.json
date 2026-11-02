@@ -130,6 +130,7 @@
 "ln -sf /tmp/x .git/sflow-hooks/pre-push",
 "ln -t docs .git/hooks/pre-commit",
 "ln .git/hooks/pre-commit hl4",
+"ln <SEP>.gitdir/hooks/pre-commit hl5",
 "mv --target-directory=/tmp .git/hooks/pre-push",
 "mv -t /tmp .git/hooks",
 "mv .git/hooks /tmp/x",

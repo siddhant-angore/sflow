@@ -257,13 +257,13 @@ function unwrap(name, rest) {
     if (t === null || !(t.startsWith('-') || (name === 'env' && /^\w+=/.test(t)))) break;
     rest = r;
     if (t === '--') break;
-    const m = name === 'env' && /^(-S|--split-string)=?(.*)$/.exec(t);
-    if (m) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
+    const m = name === 'env' && /^(?:-[a-zA-Z0-9]*?S|--split-string|(--s[a-z-]*)(?==|$))=?(.*)$/.exec(t); // env takes -S in a cluster (-iS) and any abbreviation of --split-string
+    if (m && (!m[1] || '--split-string'.startsWith(m[1]))) { const [v, after] = m[2] ? [m[2], r] : take(r); rest = `${(v ?? '').replace(/^(["'])(.*)\1$/, '$2')} ${after}`; continue; }
     if ((t.length === 2 && WRAPPERS[name].includes(t[1])) || LONG_ARG.has(t)) rest = take(r)[1];
   }
   return name === 'timeout' ? take(rest)[1] : rest;
 }
-export { WRAPPERS, take, unwrap };
+export { GIT_ARG, WRAPPERS, stripRedirs, take, unwrap };
 
 // Drop git's global options (everything starting with - before the subcommand, plus the argument of those that take one).
 function gitSub(rest) {
@@ -632,7 +632,9 @@ export function segments(cmd, raw = false) {
   return [...new Set([...qa, ...blind])];
 }
 
-export const rawSegments = (cmd) => segments(cmd, true);
+// Three rules read the same line through this, and segments() takes over a second on a 4 MB command (R32-6). It depends only on its argument, so a cached answer can't change a verdict; callers only iterate it.
+const rawSeen = new Map();
+export const rawSegments = (cmd) => { if (!rawSeen.has(cmd)) { if (rawSeen.size >= 64) rawSeen.clear(); rawSeen.set(cmd, segments(cmd, true)); } return rawSeen.get(cmd); }; // bounded: hook-batch.mjs reads hundreds of commands in one process
 // No command on the line can run its quoted text: every piece is a known non-executing command, nothing is written to a file, and no heredoc expands.
 export function quotesAreData(cmd) {
   const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)), { out, docs } = split(joined);
