@@ -129,7 +129,7 @@ for (const [name, file, from, to, equivalent] of M.filter(([x]) => !filter || x.
   const dir = scratch('sid247-mut-');
   mkdirSync(join(dir, 'hooks'), { recursive: true }); mkdirSync(join(dir, 'scripts'));
   cpSync(join(root, 'workflows', 'hooks'), join(dir, 'hooks', 'harness'), { recursive: true });
-  for (const f of ['test-hooks.mjs', 'hook-batch.mjs', 'sid243-cases.mjs', 'scratch.mjs']) cpSync(join(root, 'scripts', f), join(dir, 'scripts', f));
+  for (const f of ['test-hooks.mjs', 'hook-batch.mjs', 'sid243-cases.mjs', 'sid247-cases.mjs', 'scratch.mjs']) cpSync(join(root, 'scripts', f), join(dir, 'scripts', f));
   const f = join(dir, file);
   let s = readFileSync(f, 'utf8');
   [from].flat().forEach((text, k) => {

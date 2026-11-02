@@ -10,6 +10,7 @@ import { GATE_RECORD_DIR, gitWrites as newGitWrites, pathWithin, pushSecretScan,
 import * as newRules from '../hooks/harness/guard-rules.mjs';
 import { scratch as makeScratch, trackScratch } from './scratch.mjs';
 import { COLLATERAL as sid243Collateral, MUST_ALLOW as sid243Allow, MUST_DENY_ATTR, MUST_DENY_CONFIG, MUST_DENY_OPAQUE, MUST_DENY_OVERRIDE, MUST_DENY_WRAPPER, NESTED_QUOTE_VARIANTS, QUOTE_VARIANTS, WRAP_VARIANTS } from './sid243-cases.mjs';
+import { NOT_PROVEN_LITERAL, PROVEN_LITERAL, REVIEW_3, REVIEW_3_GENERATED } from './sid247-cases.mjs';
 
 const hooks = new URL('../hooks/harness/', import.meta.url).pathname;
 const run = (hook, ev) => {
@@ -81,6 +82,7 @@ const SID247_MUST_ALLOW = [
   'git merge -n main && git status', 'git status; git rebase -n main',
   // a bare -n in option position after an option that takes a value, a positional, or before a --
   'git merge -X ours -n main', 'git merge -m "a b" -n feat', 'git merge -s ort -n main', 'git merge --strategy ort -n main', 'git merge -F msg.txt -n feat', 'git merge --cleanup strip -n feat', 'git rebase --onto main -n feat', 'git rebase -s ort -n main', 'git merge main -n', 'git merge -n -- main', 'git rebase -n -- main', 'git merge -n -q main', 'git rebase -n -i main', 'git rebase -n --rebase-merges main', 'git merge -n --log=5 feat', 'git merge -n -Sabc feat', 'git merge -mfoo -n feat', "git merge -m 'x -vn y' -n feat",
+  ...PROVEN_LITERAL,
 ];
 const SID247_MUST_DENY = [
   // git commit -n in every form
@@ -115,6 +117,8 @@ const SID247_MUST_DENY = [
   // run 4: a quoted value glued to an option it can't name; the option word is read up to the quote
   "git rebase -n -x'git commit -n' main", 'git rebase -n -x"make test" main', "git merge -n -x'a b' main", "git rebase -n -ix'make test' main", "git rebase -n --exec='make test' main", 'git rebase -n --"exec"=make main', 'git merge -n --"unknown" main',
   ...SID247_QUOTED_ATTACKS, ...SID247_QUOTED_COLLATERAL,
+  // CTO review 5732381973
+  ...REVIEW_3, ...NOT_PROVEN_LITERAL,
 ];
 // [command, 'deny' | 'allow', why]
 const SID247_NEAR = [
@@ -173,7 +177,7 @@ const SID247_GEN_QUOTED = [
   ...SID247_QUOTED_OPTS.flatMap((o) => ['merge', 'rebase'].flatMap((s) => ['commit -n -m x', 'commit -m x -n', 'commit -nm x'].flatMap((b) => SID247_QUOTED_WRAPS.map((w) => w(`git ${o} ${s} ${b}`))))),
   ...SID247_QUOTED_OPTS.flatMap((o) => sid247Gen(SID247_ALLOW_BASES.map(([t, flags]) => [(f) => `git ${o} . ${t(f)}`, flags]))),
 ];
-SID247_GEN_DENY.push(...SID247_GEN_QUOTED);
+SID247_GEN_DENY.push(...SID247_GEN_QUOTED, ...REVIEW_3_GENERATED);
 const sid247All = [...SID247_MUST_ALLOW, ...SID247_MUST_DENY, ...SID247_NEAR.map(([c]) => c), ...SID247_PINS, ...SID247_GEN_ALLOW, ...SID247_GEN_DENY];
 sid247All.forEach((c) => corpus.add(c));
 // The ALLOWLIST matcher (the regression check below): written apart from the guard's own code, so it can't drift with it. It matches a line only when the old rule hits it,
@@ -243,8 +247,12 @@ const sid247Approved = (c) => {
   for (const c of ['git merge -n main', 'git rebase -n main', 'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge "-n" main', "bash -c 'git rebase -n main'", 'git merge -n main && git status', 'git merge -m msg -n feat', 'git merge -X ours -n main', 'git rebase --onto main -n feat']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
   for (const c of ['git commit -n -m x', 'git commit -nm x', 'git merge -nv main', 'git merge -vn', 'git rebase -in', 'git merge -n --no-verify main', 'git merge -n --no-verif main', 'git rebase -n --no-veri main', 'git am -n x.patch', 'git am --no-verify', 'git merge-file -n a b c', 'git merge-base -n 1 a b', 'git rebase -n -x make main', 'git rebase -n --exec=make main', 'git merge -n main && git commit -n -m x', 'git merge -n "$B"', 'git merge -Xours main', 'git status', 'git merge -- -n', 'git merge -- "-n"', 'git merge -m "-n" feat', "git merge -m '-n' feat", 'git merge -X -n main', 'git merge -X "-n" main', 'git merge -n -x main', 'git merge "-n" -x main', 'git merge -n main; git merge -x feat', 'git merge -n --unknown main', 'git merge --strat -n main', 'git rebase --onto -n feat', 'git merge -s -n', 'git merge -F -n', 'git merge -n -- -n', 'git merge -n main && git commit --no-verif -m x', ...SID247_QUOTED_ATTACKS, ...SID247_GEN_QUOTED]) if (sid247Approved(c)) wrong.push(`matcher must reject: ${c}`);
   for (const c of ['git -C . merge -n main', 'git --no-pager rebase -n main', 'git -c "core.pager=less -R" merge -n main', 'git -C "some dir" merge -n main', 'git -C "-odd dir" merge -n main']) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
+  for (const c of [...REVIEW_3, ...NOT_PROVEN_LITERAL, ...REVIEW_3_GENERATED]) if (sid247Approved(c)) wrong.push(`matcher must reject: ${c}`);
+  for (const c of PROVEN_LITERAL) if (!sid247Approved(c)) wrong.push(`matcher must accept: ${c}`);
   // Each layer on its own: a quoted global option keeps the hook-skip rule whole even without the deny, and the deny says how to rewrite. Without a quoted option the rule stays loose.
   for (const c of SID247_QUOTED_ATTACKS) if (sid247Rules.keepsHookRule(sid247Rules.guardSegments(c), c) !== true) wrong.push(`a quoted global option must keep the hook-skip rule: ${c}`);
+  for (const c of [...REVIEW_3, ...NOT_PROVEN_LITERAL]) if (sid247Rules.keepsHookRule(sid247Rules.guardSegments(c), c) !== true) wrong.push(`a line not proven literal must keep the hook-skip rule: ${c}`);
+  for (const c of PROVEN_LITERAL) if (sid247Rules.keepsHookRule(sid247Rules.guardSegments(c), c) !== false) wrong.push(`a line proven literal must not keep the hook-skip rule: ${c}`);
   for (const c of ['git merge -n main', 'git -C . merge -n main', 'git -c "core.pager=less -R" merge -n main']) if (sid247Rules.keepsHookRule(sid247Rules.guardSegments(c), c) !== false) wrong.push(`must not keep the hook-skip rule: ${c}`);
   for (const c of ['git -"C" . status', 'git --namespace"" merge commit -n -m x']) if (!/plainly, unquoted and unescaped/.test(sid247Rules.segmentReason(c, sid247Cfg, 'feat/x')?.why ?? '')) wrong.push(`the deny must say how to rewrite: ${c}`);
   console.log(`SID-247: ${Object.entries(reds).map(([k, [n, r]]) => `${k} ${n} (${r} verdicts wrong)`).join(', ')}, x 2 branches through the rule function and the real pre-bash.mjs`);
