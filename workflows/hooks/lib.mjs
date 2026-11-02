@@ -632,7 +632,9 @@ export function segments(cmd, raw = false) {
   return [...new Set([...qa, ...blind])];
 }
 
-export const rawSegments = (cmd) => segments(cmd, true);
+// Three rules read the same line through this, and segments() takes over a second on a 4 MB command (R32-6). It depends only on its argument, so a cached answer can't change a verdict; callers only iterate it.
+const rawSeen = new Map();
+export const rawSegments = (cmd) => { if (!rawSeen.has(cmd)) rawSeen.set(cmd, segments(cmd, true)); return rawSeen.get(cmd); };
 // No command on the line can run its quoted text: every piece is a known non-executing command, nothing is written to a file, and no heredoc expands.
 export function quotesAreData(cmd) {
   const joined = cmd.replace(/\\+\n/g, (m) => ((m.length - 1) % 2 ? m.slice(0, -2) : m)), { out, docs } = split(joined);
