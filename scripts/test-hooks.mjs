@@ -197,7 +197,7 @@ const sid247PlainGlobals = (c) => {
     if (bare.split('/').pop() !== 'git') continue;
     for (let j = i + 1; j < words.length; j++) {
       const w = words[j], b = sid247Bare(w);
-      if (w.startsWith("$'") || (b.startsWith('-') && (w !== b || /[$`]/.test(w)))) return false;
+      if (b === '--shallow-file' || w.startsWith("$'") || (b.startsWith('-') && (w !== b || /[$`]/.test(w)))) return false;
       if (!b.startsWith('-')) break;
       if (SID247_GIT_VALUED.has(w)) j++;
     }

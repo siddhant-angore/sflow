@@ -23,6 +23,9 @@ const MATCH_MERGE_VALUED = String.raw`merge: [/^(-[evq]*[mXsF]|--(message|file|`
 const MATCH_MERGE_PLAIN = String.raw`/^(-[evq]*([mXsF]\S+|S\S*)?|`;
 const MATCH_TABLE = 'const SID247_OPTION_WORDS = {';
 const VALUE_NEXT = "if (next && head === w && i + 1 < words.length) kept.push(words[++i]);";
+const QUOTED_DENY = 'const quoted = quotedGitOption(cmd, segs);\n  if (quoted) return { why: NO_QUOTED_GLOBAL(quoted), seg: cmd };\n';
+const KEEP_QUOTED = 'quotedGitOption(cmd, segs) !== null || ';
+const NOT_LITERAL = String.raw`NOT_LITERAL = /["'\\$` + '`' + ']/';
 const M = [
   // which commands
   ['the allow widened to commit', G, TABLE, `${TABLE}\n  commit: { short: /^-/, flags: new Set(), values: new Set() },`],
@@ -69,8 +72,8 @@ const M = [
   ['--exec is a known flag to rebase', G, "'--keep-base --no-keep-base ", "'--exec --keep-base --no-keep-base "],
   ['a value after the first quote is not read', G, String.raw`const head = w.split(/["'\\]/)[0], next`, 'const head = /["\'\\\\]/.test(w) ? \'-\' : w, next'],
   ['a word git cannot classify drops only that word', G, 'if (next === null) return null;', 'if (next === null) continue;'],
-  ['an unknown word only keeps its own segment', G, "const noStat = !keepsHookRule(segs);\n  for (const seg of segs) {\n    const why = reason(seg, cfg, branch, noStat)", 'for (const seg of segs) {\n    const why = reason(seg, cfg, branch, !keepsHookRule([seg]))'],
-  ['the loosening is never on', G, 'const noStat = !keepsHookRule(segs);', 'const noStat = false;'],
+  ['an unknown word only keeps its own segment', G, "const noStat = !keepsHookRule(segs, cmd);\n  for (const seg of segs) {\n    const why = reason(seg, cfg, branch, noStat)", 'for (const seg of segs) {\n    const why = reason(seg, cfg, branch, !keepsHookRule([seg], cmd))'],
+  ['the loosening is never on', G, 'const noStat = !keepsHookRule(segs, cmd);', 'const noStat = false;'],
   // expansions keep the old rule
   ['the default is loose', G, 'branch, noStat = false)', 'branch, noStat = true)'],
   ['a substituted variable reads loose', G, 'const why = reason(c, cfg, branch) ?? reason(s, cfg, branch); if (why) return `${why} (after substituting', 'const why = reason(c, cfg, branch, true) ?? reason(s, cfg, branch, true); if (why) return `${why} (after substituting', 'a line this read could decide has an expansion in a merge or rebase segment. An expanding argument is still probed with -n under the strict rule, an expanding subcommand has its own deny, and an expanding command word is denied by literalReason; a -m value too, since merge and rebase are not value-option commands. Measured on this mutant: every expansion must-deny stays denied (X=-n; git merge -m $X main, C="git merge -n main"; $C, A="merge -n"; git $A main).'],
@@ -91,6 +94,32 @@ const M = [
   ['matcher: a value never reads as a value', T, 'else if (valued.test(w)) value = true;', 'else if (valued.test(w)) value = false;'],
   ['matcher accepts an unknown option', T, `!plain.test(w.split(/["'\\\\]/)[0])) return null;`, `!plain.test(w.split(/["'\\\\]/)[0])) continue;`],
   ['matcher reads an unknown word in its own segment only', T, 'if (segs.some((s) => named.test(s) && sid247OptionsOut(text(s)) === null)) return false;', ''],
+  // CTO review 5730668319: quoted, escaped or expanding global options. Each layer has a test of its own.
+  ['the quoted-option deny is dropped', G, QUOTED_DENY, ''],
+  ['the SID-247 path ignores a quoted option', G, KEEP_QUOTED, ''],
+  ['matcher: no raw check', T, 'if (!sid247PlainGlobals(c)) return false;', ''],
+  ['a double quote only counts as not literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /"/`],
+  ['a backslash is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["'$` + '`' + String.raw`]/`],
+  ['a single quote is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["\\$` + '`' + String.raw`]/`],
+  ['a dollar is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["'\\` + '`' + String.raw`]/`],
+  ['a backtick is literal', G, NOT_LITERAL, String.raw`NOT_LITERAL = /["'\\$]/`],
+  ['the reader stops only at the end of the words', G, "if (!w[j].startsWith('-')) break;\n        if (GIT_ARG", 'if (GIT_ARG'],
+  ['a plain option\'s value reads as an option', G, 'if (GIT_ARG.has(w[j])) j++;\n      }\n    }\n  }\n  return null;', '}\n    }\n  }\n  return null;'],
+  ['the reader keeps redirections', G, 'toks(stripRedirs(piece))', 'toks(piece)'],
+  ['the reader skips shell payloads', G, 'for (const t of [cmd, ...(segs.payloads ?? [])]) for (const piece of rawSegments(t)) {\n    const w = toks', 'for (const t of [cmd]) for (const piece of rawSegments(t)) {\n    const w = toks'],
+  ['the reader names git by its raw word', G, String.raw`if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;`, "if (base(w[i]) !== 'git') continue;"],
+  ['the reader needs a bare git, no path', G, String.raw`if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;`, String.raw`if (canon(w[i]).text.replace(/^'|'$/g, '') !== 'git') continue;`],
+  ['the dash is only read off quote marks', G, " || canon(w).text.replace(/^'/, '').startsWith('-')", ''],
+  ['the dash is only read through canon', G, "DASH_WORD.test(w) || canon(w)", 'canon(w)'],
+  ['the deny does not say how to rewrite', G, 'write git\'s global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them', 'it is refused'],
+  ['--shallow-file is allowed', G, "w[j] === '--shallow-file' || ", ''],
+  ['matcher: --shallow-file is accepted', T, "b === '--shallow-file' || ", ''],
+  ['matcher: a double quote only counts', T, 'w !== b || /[$`]/.test(w)', 'w.includes(\'"\')'],
+  ['matcher: an expansion counts as plain', T, 'w !== b || /[$`]/.test(w)', 'w !== b'],
+  ['matcher: a quoted script is not read again', T, 'if (bare !== words[i] && /\\s/.test(bare) && !sid247PlainGlobals(bare)) return false;', ''],
+  ['matcher: $\'..\' is read as plain text', T, `w.startsWith("$'") || `, ''],
+  ['matcher: a plain option\'s value reads as an option', T, 'if (SID247_GIT_VALUED.has(w)) j++;', ''],
+  ['matcher: redirections stay words', T, ".filter((w) => !/^\\d*[<>]/.test(w))", ''],
 ];
 
 const filter = process.argv[2];

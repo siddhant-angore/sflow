@@ -204,6 +204,7 @@ const noStatText = (seg) => {
 const isAbbrev = (word, flag) => { const name = word.split('=')[0]; return name.length >= 3 && flag.startsWith(name); };
 // CTO review 5730668319: gitSub compares each global option as written, so `--namespace""`, `-"C"` or `-\C` aren't seen to take a value, while git reads the next word as that value and `merge` can hide a real `git commit -n`.
 // The first word in git's global-option position, in any piece the guard reads, that isn't plain text and resolves to a dash-word; null when there is none. It reads pieces as written, because normalize() drops these words. Any word that names git counts, so a wrapper needs no list. The value of a plain option is not an option.
+// --shallow-file takes a value and gitSub's list lacks it. Adding it there would stop `git --shallow-file reset --hard` reading as a reset, so it is refused here instead; nothing legitimate passes this internal option.
 const NOT_LITERAL = /["'\\$`]/, DASH_WORD = /^(?:\$?""|\$?''|\$?['"]|\\)*-/;
 const resolvesToDash = (w) => DASH_WORD.test(w) || canon(w).text.replace(/^'/, '').startsWith('-');
 function quotedGitOption(cmd, segs) {
@@ -212,7 +213,7 @@ function quotedGitOption(cmd, segs) {
     for (let i = 0; i < w.length; i++) {
       if (base(canon(w[i]).text.replace(/^'|'$/g, '')) !== 'git') continue;
       for (let j = i + 1; j < w.length; j++) {
-        if (NOT_LITERAL.test(w[j]) && resolvesToDash(w[j])) return w[j];
+        if (w[j] === '--shallow-file' || (NOT_LITERAL.test(w[j]) && resolvesToDash(w[j]))) return w[j];
         if (!w[j].startsWith('-')) break;
         if (GIT_ARG.has(w[j])) j++;
       }
@@ -220,7 +221,7 @@ function quotedGitOption(cmd, segs) {
   }
   return null;
 }
-const NO_QUOTED_GLOBAL = (w) => `the git global option ${clip(w, 80)} is quoted, escaped or an expansion, so the guard can't tell which word git reads as its value or as the subcommand; write git's global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them`;
+const NO_QUOTED_GLOBAL = (w) => `the git global option ${clip(w, 80)} is quoted, escaped, an expansion or --shallow-file, so the guard can't tell which word git reads as its value or as the subcommand; write git's global options plainly, unquoted and unescaped (e.g. git -C dir status), or drop them`;
 export const keepsHookRule = (segs, cmd) => quotedGitOption(cmd, segs) !== null || segs.some((s) => s.split(/\s+/).some((x) => isAbbrev(x, '--no-verify')) || noStatText(unquoted(s)) === null);
 
 export function reason(raw, { protectedBranches: prot, allowMerge, unreadable }, branch, noStat = false) {
