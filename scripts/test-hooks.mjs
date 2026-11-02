@@ -73,7 +73,9 @@ const SID247_QUOTED_ATTACKS = [
   'git --shallow-file merge commit -n -m x', 'git --shallow-file merge commit -m x -n', 'git --shallow-file rebase commit -n -m x', 'git --shallow-file x commit -n -m x', 'env git --shallow-file merge commit -n -m x', `bash -c 'git --shallow-file merge commit -n -m x'`, '/usr/bin/git --shallow-file merge commit -nm x', 'git merge -n main && git --shallow-file merge commit -n -m x', 'git -C . --shallow-file merge commit -n -m x', 'git --shallow-file f merge -n main',
 ];
 // Newly denied by the same rule, with no merge or commit to hide: pinned collateral. Each could be written plainly, and the deny says how.
-const SID247_QUOTED_COLLATERAL = ['git --git-dir="my dir" status', 'git --namespace="x" status', 'git --git-dir=$D status', 'git -"C" . status', 'git "--no-pager" status', 'echo git "-C"'];
+const SID247_QUOTED_COLLATERAL = ['git --git-dir="my dir" status', 'git --namespace="x" status', 'git --git-dir=$D status', 'git -"C" . status', 'git "--no-pager" status', 'echo git "-C"',
+  // CTO review 5732381973: the reader takes any word that names git, not only a command word. Allowed on e7d30ea. Narrowing it to command position would loosen 34a4f99 and make wrappers a risk, so these are pinned and listed instead.
+  'grep git "-i" notes.txt', 'ls git "-l"', 'echo git --shallow-file', `cat <<'EOF' > notes.md\nrun git "-C" dir status\nEOF`];
 const SID247_MUST_ALLOW = [
   'git merge -n main', 'git rebase -n main', 'git merge -n', 'git rebase -n', 'git merge -n -m msg feat', 'git merge -m msg -n feat', 'git rebase -n --onto main feat', 'git merge --no-ff -n feat', 'git merge -n --no-ff feat', 'git merge -n -n feat',
   'git merge -Xignore-space-change main', 'git rebase -Xignore-space-at-eol main', 'git merge -Xpatience main', 'git merge -Xrenormalize main', 'git merge -Xno-renames main', 'git merge -Xfind-renames=50 main', 'git rebase -Xno-renames main',
